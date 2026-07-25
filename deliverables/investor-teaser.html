@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CostSauce — investor one-pager (concept)</title>
+<style>
+  body{margin:0;background:#FAF6EF;font-family:Georgia,serif;color:#23282B;}
+  .page{max-width:820px;margin:0 auto;padding:48px 40px;background:#fff;}
+  h1{font-size:34px;color:#0F5E63;margin:0;}
+  .tag{color:#C98A2B;font-size:16px;margin:6px 0 28px;font-style:italic;}
+  h2{font-size:14px;text-transform:uppercase;letter-spacing:.08em;color:#0F5E63;border-bottom:2px solid #E8A33D;padding-bottom:4px;margin:28px 0 10px;font-family:Arial,sans-serif;}
+  p,li{font-size:15px;line-height:1.55;}
+  .grid{display:flex;gap:24px;}
+  .grid>div{flex:1;}
+  .stat{background:#FAF6EF;border-left:4px solid #E8A33D;padding:10px 14px;margin:8px 0;font-family:Arial,sans-serif;}
+  .stat b{font-size:22px;color:#0F5E63;display:block;}
+  table{width:100%;border-collapse:collapse;font-size:13px;font-family:Arial,sans-serif;}
+  th{text-align:left;background:#0F5E63;color:#fff;padding:6px 8px;}
+  td{padding:6px 8px;border-bottom:1px solid #eee;}
+  .disc{font-size:11px;color:#999;margin-top:36px;font-family:Arial,sans-serif;}
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>CostSauce</h1>
+  <div class="tag">Price-drift radar for independent restaurants. The secret sauce is knowing your costs.</div>
+
+  <h2>Problem</h2>
+  <p>Independent restaurants lose margin silently: supplier prices drift weekly, menu prices don't. Owners track this in spreadsheets that break, or pay $199–$480/mo for enterprise food-cost platforms built for chains. In 2025, 82% of operators reported higher food costs (NRN/Technomic); owners on r/restaurateur describe "way too many nights fighting with food costs" and being quoted $480/mo for one location.</p>
+
+  <h2>Product</h2>
+  <p>Owners forward or photograph supplier invoices. CostSauce normalizes prices, ties them to recipes, and alerts the owner when a dish's food cost crosses target, with the price that fixes it. Working product exists (FastAPI + SQLite, seeded demo). No POS integration required; deliberately constrained scope undercuts the $199+ automation tier.</p>
+
+  <h2>Market</h2>
+  <div class="grid">
+    <div>
+      <div class="stat"><b>412,498</b>independent US restaurant locations (NRN/Technomic, end of 2025)</div>
+      <div class="stat"><b>82%</b>of operators saw higher food costs in 2025 (NRN)</div>
+    </div>
+    <div>
+      <div class="stat"><b>$199–480/mo</b>price of incumbent automation (MarketMan pricing page; owner-quoted MarginEdge)</div>
+      <div class="stat"><b>$49–149/mo</b>CostSauce pricing — inside the "&lt;$200/mo" owners explicitly ask for</div>
+    </div>
+  </div>
+
+  <h2>Business model</h2>
+  <p>SaaS: $49 Starter / $99 Growth / $149 Pro (multi-location). Monthly billing, 14-day trial. 100 customers ≈ $7.9k MRR; 500 ≈ $39.5k MRR. Expansion: bookkeeper channel, OCR tier, POS add-ons.</p>
+
+  <h2>Competition</h2>
+  <table>
+    <tr><th>Tool</th><th>Price</th><th>Gap CostSauce exploits</th></tr>
+    <tr><td>MarginEdge / xtraCHEF / R365</td><td>$300–480/mo</td><td>Priced for groups; overbuilt for one location</td></tr>
+    <tr><td>MarketMan</td><td>$199–249/mo</td><td>Automation floor; we run constrained scope at half price</td></tr>
+    <tr><td>meez / RCC</td><td>$24–119 / $29/mo</td><td>Chef recipe tools, manual maintenance; no invoice-driven drift radar for owners</td></tr>
+    <tr><td>Backbar</td><td>$0–149/mo</td><td>Bars/beverage only; we don't target bars</td></tr>
+    <tr><td>Spreadsheets</td><td>free</td><td>Break, go stale, never alert anyone</td></tr>
+  </table>
+
+  <h2>Go to market</h2>
+  <p>Founder-led in owner communities (r/restaurateur, r/restaurantowners, FB groups), a free food-cost calculator as the wedge, restaurant bookkeepers as a distribution channel, design partners for proof.</p>
+
+  <h2>Risks (we name them ourselves)</h2>
+  <ul>
+    <li>Affordable competitors exist (Backbar, meez, RCC); our defensibility is owner-side drift alerting + radically simpler onboarding, not recipe costing alone.</li>
+    <li>Independent restaurants are financially stressed; churn risk is real. Mitigation: weekly value email, seasonal pause, month-to-month pricing.</li>
+    <li>OCR/POS automation is where incumbents charge $199+; we defer it rather than fake it.</li>
+  </ul>
+
+  <p class="disc">Concept one-pager produced in an autonomous company-building exercise, July 2026. Market stats and quotes link to sources in the full evidence pack. The founder persona is fictional; the market evidence is not.</p>
+</div>
+</body>
+</html>

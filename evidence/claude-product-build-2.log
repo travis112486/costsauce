@@ -1,0 +1,9 @@
+The build was already complete — frontend, CSS, JS, and logo were all in place from a prior session. I finished the two missing pieces (`README.md` and `VERIFY.md`), then ran the real verification:
+
+- `uv run app.py` starts cleanly (one command, auto-installs deps)
+- `GET /` → 200, static assets (css/js/logo) → 200
+- `GET /api/dashboard` → **4 active drift alerts** (Lime +31%, Chicken Breast +14%, Ground Beef +9%, Cod Fillet +7%), within the required 3–5 range, all 8 seeded recipes costed with plate_cost/fc_pct/status/suggested_price
+- Spot-checked ingredients (24), recipes (8), settings, invoices, CSV import (correctly fuzzy-matched instead of duplicating), and ingredient price history endpoints
+
+All commands + real outputs are recorded in `VERIFY.md`. Also added a `.gitignore` in `product/` for the runtime-generated `costsauce.db` and `uploads/` so they don't get committed. Server is stopped, no stray processes.
+CLAUDE_EXIT:0
