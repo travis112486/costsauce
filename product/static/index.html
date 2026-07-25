@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CostSauce — The Copper Ladle</title>
+<link rel="icon" href="/static/brand/logo-mark-v2.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <img src="/static/brand/logo-mark-v2.svg" alt="CostSauce" class="logo">
+    <div class="brand-text">
+      <span class="brand-name">CostSauce</span>
+      <span class="brand-tag" id="restaurant-name">The Copper Ladle</span>
+    </div>
+  </div>
+  <nav class="tabs" id="tabs">
+    <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
+    <button class="tab-btn" data-tab="ingredients">Ingredients</button>
+    <button class="tab-btn" data-tab="recipes">Recipes</button>
+    <button class="tab-btn" data-tab="import">Import</button>
+    <button class="tab-btn" data-tab="settings">Settings</button>
+  </nav>
+</header>
+
+<main id="app"></main>
+
+<div id="toast" class="toast"></div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>

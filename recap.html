@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CostSauce — Build Recap (run-1)</title>
+<style>
+  :root{--teal:#0F5E63;--deep:#0A4247;--amber:#E8A33D;--cream:#FAF6EF;--char:#23282B;--line:#E4DACA;}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--cream);color:var(--char);font-family:Inter,system-ui,Arial,sans-serif;line-height:1.6;}
+  .wrap{max-width:960px;margin:0 auto;padding:40px 20px 80px;}
+  header{background:var(--deep);color:#fff;padding:56px 20px;text-align:center;}
+  header img{width:88px;height:88px;}
+  header h1{font-family:Georgia,serif;font-size:44px;margin:12px 0 6px;}
+  header p{color:#CBD8D6;max-width:640px;margin:0 auto;font-size:17px;}
+  h2{font-family:Georgia,serif;color:var(--teal);font-size:26px;margin:48px 0 14px;border-bottom:3px solid var(--amber);padding-bottom:6px;}
+  h3{color:var(--deep);font-size:17px;margin:26px 0 8px;}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin:14px 0;}
+  .card{background:#fff;border:1px solid var(--line);border-radius:10px;padding:16px 18px;}
+  .card b.t{display:block;color:var(--teal);font-size:15px;margin-bottom:4px;}
+  .card span.s{font-size:13px;color:#6b6257;}
+  a{color:var(--teal);}
+  .btn{display:inline-block;background:var(--amber);color:var(--char);font-weight:700;padding:12px 22px;border-radius:8px;text-decoration:none;margin:6px 8px 6px 0;}
+  .btn.ghost{background:#fff;border:2px solid var(--teal);color:var(--teal);}
+  table{width:100%;border-collapse:collapse;font-size:14px;background:#fff;border:1px solid var(--line);}
+  th{background:var(--teal);color:#fff;text-align:left;padding:8px 10px;font-size:12px;text-transform:uppercase;letter-spacing:.05em;}
+  td{padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top;}
+  .stat{background:#fff;border-left:4px solid var(--amber);padding:10px 14px;margin:8px 0;}
+  .stat b{font-size:24px;color:var(--teal);display:block;}
+  video{width:100%;border-radius:10px;border:1px solid var(--line);background:#000;margin:8px 0;}
+  img.shot{width:100%;border-radius:10px;border:1px solid var(--line);margin:6px 0;}
+  .warn{background:#FDF3E7;border-left:4px solid var(--amber);padding:12px 16px;font-size:14px;margin:14px 0;}
+  .ok{background:#EAF4F2;border-left:4px solid var(--teal);padding:12px 16px;font-size:14px;margin:14px 0;}
+  code{background:#EFE8DA;padding:2px 6px;border-radius:4px;font-size:13px;}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+  @media(max-width:720px){.grid2{grid-template-columns:1fr;} table{display:block;overflow-x:auto;}}
+  footer{color:#8a8175;font-size:12px;text-align:center;padding:30px 0 0;}
+</style>
+</head>
+<body>
+<header>
+  <img src="brand/logo-mark-v2.svg" alt="CostSauce logo">
+  <h1>CostSauce</h1>
+  <p>Price-drift radar for independent restaurants. Built end-to-end in one autonomous run — research, tournament, skeptic pivot, product, brand, site, videos, and a kill pass. This page is the whole story in five minutes.</p>
+</header>
+<div class="wrap">
+
+<h2>1. The business in one minute</h2>
+<p><b>Problem.</b> Independent restaurant owners lose margin silently: supplier prices drift weekly, menus don't. They track it in spreadsheets that break, or get quoted <b>$300–$480/mo</b> for enterprise food-cost platforms built for chains. In 2025, <b>82% of operators reported higher food costs</b> and the US still had <b>412,498 independent restaurant locations</b> (<a href="https://www.nrn.com/independent-restaurants/the-independent-restaurant-sector-shrunk-by-2-3-in-2025">NRN / Technomic</a>). Owners say it in their own words: <i>"I've spent way too many nights fighting with food costs"</i> and <i>"keeping the cost less than 200 a month would be ideal"</i> (<a href="https://www.reddit.com/r/restaurateur/comments/1l845fu/im_a_fellow_restaurant_owner_that_built_a_food/">r/restaurateur</a>, <a href="https://www.reddit.com/r/restaurantowners/comments/1jvuw2i/frustrated_between_choosing_from_bar_vs/">r/restaurantowners</a>).</p>
+<p><b>Product.</b> Owners photograph or forward supplier invoices. CostSauce normalizes every price, ties them to their recipes, and alerts them when a dish's food cost crosses target — <b>with the price that fixes it</b>. No POS integration, no annual contract, live from the first invoice.</p>
+<p><b>Model.</b> $49 / $99 / $149 per month — deliberately under the <a href="https://www.marketman.com/pricing-for-restaurant-inventory-management-system">$199+ automation tier</a> and inside the sub-$200 owners explicitly ask for.</p>
+
+<div class="grid2">
+  <div class="stat"><b>412,498</b>independent US restaurant locations (end of 2025)</div>
+  <div class="stat"><b>82%</b>of operators saw higher food costs in 2025</div>
+  <div class="stat"><b>$199–480/mo</b>incumbent automation pricing</div>
+  <div class="stat"><b>$49/mo</b>CostSauce entry price</div>
+</div>
+
+<h2>2. The working product (yes, it runs)</h2>
+<div class="ok">Verified this session: server boots via <code>uv run app.py</code>, API returns live drift alerts (Lime +31%, Chicken +14%…) and 8 costed recipes; UI checked on desktop and mobile (390px).</div>
+<p>FastAPI + SQLite, seeded demo restaurant "The Copper Ladle". Ingredient price log with CSV import, recipe costing, drift engine with thresholds, suggested repricing, dashboard.</p>
+<p><b>Run it:</b> <code>cd product && uv run app.py</code> → http://localhost:8321</p>
+<div class="grid2">
+  <a href="site/assets/img/product-dashboard.png"><img class="shot" src="site/assets/img/product-dashboard.png" alt="Dashboard"></a>
+  <a href="site/assets/img/product-recipes.png"><img class="shot" src="site/assets/img/product-recipes.png" alt="Recipes"></a>
+</div>
+
+<h2>3. The website</h2>
+<p>Static marketing site with sourced owner quotes, honest "what it doesn't do" section, competitor price links, and a <b>free interactive food-cost calculator</b> (math verified live: $5.70 plate on $16 menu → 35.6%, suggested $19.00).</p>
+<p><b>Run it:</b> <code>cd site && python3 -m http.server 8322</code> → http://localhost:8322</p>
+<div class="grid2">
+  <a href="evidence/screens/site-desktop-fixed.png"><img class="shot" src="evidence/screens/site-desktop-fixed.png" alt="Site desktop"></a>
+  <a href="evidence/screens/site-mobile-top.png"><img class="shot" src="evidence/screens/site-mobile-top.png" alt="Site mobile"></a>
+</div>
+
+<h2>4. The videos (watch-verified)</h2>
+<h3>Launch video — 62s</h3>
+<video controls preload="metadata" src="videos/launch.mp4"></video>
+<h3>Founder video — 94s</h3>
+<video controls preload="metadata" src="videos/founder.mp4"></video>
+<div class="warn">The founder persona is fictional creative work (disclosed in the script). Every market claim in both videos is sourced. Scripts: <a href="videos/launch-script.md">launch</a> · <a href="videos/founder-script.md">founder</a>.</div>
+
+<h2>5. Deliverables map</h2>
+<table>
+<tr><th>Deliverable</th><th>Path</th><th>Notes</th></tr>
+<tr><td>Working product</td><td><code>product/</code></td><td>FastAPI+SQLite, seeded demo, verified</td></tr>
+<tr><td>Marketing site + free calculator</td><td><code>site/</code></td><td>Screenshot-verified desktop + mobile</td></tr>
+<tr><td>Launch video (62s)</td><td><code>videos/launch.mp4</code></td><td>Script, TTS VO, music, watch-verified</td></tr>
+<tr><td>Founder video (94s)</td><td><code>videos/founder.mp4</code></td><td>Same pipeline; persona disclosed</td></tr>
+<tr><td><b>The Freezer Sheet (PDF)</b></td><td><code>deliverables/freezer-sheet.pdf</code></td><td><b>The unexpected one:</b> a printable walk-in-cooler sheet generated from live demo data — plate costs, drift alerts, suggested reprices in kitchen-proof type</td></tr>
+<tr><td>Onboarding email sequence</td><td><code>deliverables/onboarding-emails.md</code></td><td>5 emails, trial day 0–13</td></tr>
+<tr><td>Weekly Drift Report sample</td><td><code>deliverables/drift-report-sample.html</code></td><td>The retention email, from demo data</td></tr>
+<tr><td>Investor one-pager</td><td><code>deliverables/investor-teaser.html</code></td><td>With self-named risks</td></tr>
+<tr><td>Ad creative (1:1)</td><td><code>deliverables/ad-feed-1x1.jpg</code></td><td>For owner-community / FB feed</td></tr>
+<tr><td>Brand system</td><td><code>brand/</code></td><td>Logo (SVG), icons, palette, voice guide</td></tr>
+<tr><td>Evidence pack</td><td><code>research/</code></td><td>12 candidate pains, tournament, skeptic #1, final review</td></tr>
+<tr><td>Business design</td><td><code>business/BUSINESS_MODEL.md</code></td><td>Post-skeptic revision</td></tr>
+<tr><td>Build log</td><td><code>BUILD_LOG.md</code></td><td>Every self-answered question + decision</td></tr>
+</table>
+
+<h2>6. Why it would work — and what could kill it</h2>
+<h3>For</h3>
+<ul>
+<li>Real, current, quoted pain with a stated budget ("less than 200 a month").</li>
+<li>The wedge is <b>automation at half the incumbents' floor</b>, in a segment incumbents don't build for.</li>
+<li>The skeptic pass killed the weak version of this idea; what survived is narrower and more defensible.</li>
+<li>The product, site, calculator, and videos on this page all exist and were verified this session.</li>
+</ul>
+<h3>Against (from the kill pass)</h3>
+<ul>
+<li>meez ($24–119) or RCC ($29) could bolt on drift alerts and move down-market. Speed + owner-community channel is the defense.</li>
+<li>OCR is manual-photo-assisted in v1 — friction vs MarketMan's automation.</li>
+<li>Independent restaurants are financially stressed; churn risk is real (mitigated by weekly value email + month-to-month).</li>
+<li>Evidence base is thin by design: 2 Reddit threads, 1 trade article, live pricing pages. Enough for a wedge, not a Series A deck.</li>
+</ul>
+
+<h2>7. Guardrails & provenance</h2>
+<ul>
+<li><b>No new spending:</b> all generation used the pre-existing Higgsfield subscription and local tools. Domain availability checked (costsauce.com/.app free) — nothing purchased.</li>
+<li><b>Nothing published:</b> everything lives in this repo; no emails, posts, or deployments.</li>
+<li><b>Nothing invented:</b> every stat/quote/price links to its fetched source. Inferences are labeled. The founder persona is the single fictional element and is disclosed everywhere it appears.</li>
+<li><b>Models used:</b> Kimi K3 (orchestration, judging, skeptic), Claude CLI (product + site builds), subagent swarm (research), Higgsfield (imagery/music), edge TTS (voiceover).</li>
+</ul>
+
+<footer>CostSauce run-1 · built autonomously by HERMES PRIME · July 25, 2026 · concept package, not a live business</footer>
+</div>
+</body>
+</html>
