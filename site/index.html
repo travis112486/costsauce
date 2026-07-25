@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CostSauce — Live plate costs for single-location restaurants</title>
+<meta name="description" content="CostSauce reads your supplier invoices, keeps live plate costs for every menu item, and warns you when a recipe stops making money. $49 a month.">
+<link rel="icon" type="image/svg+xml" href="assets/logo-mark-v2.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <nav class="nav-bar">
+    <a href="#top" class="brand">
+      <img src="assets/logo-mark-v2.svg" alt="" class="brand-mark" width="36" height="36">
+      <span class="brand-name">CostSauce</span>
+    </a>
+    <button class="nav-toggle" id="navToggle" aria-expanded="false" aria-controls="navLinks" aria-label="Toggle menu">
+      <span></span><span></span><span></span>
+    </button>
+    <div class="nav-links" id="navLinks">
+      <a href="#demo">Product</a>
+      <a href="#pricing">Pricing</a>
+      <a href="#calculator">Free calculator</a>
+      <a href="#faq">FAQ</a>
+      <a href="#demo" class="btn btn-primary btn-small">Try the demo</a>
+    </div>
+  </nav>
+</header>
+
+<main id="main">
+
+  <!-- HERO -->
+  <section class="hero" id="top">
+    <div class="hero-inner">
+      <div class="hero-copy">
+        <h1>Chicken went up 14% last month. Your wings didn&rsquo;t.</h1>
+        <p class="hero-sub">CostSauce reads your supplier invoices, keeps live plate costs for every menu item, and warns you when a recipe stops making money. Built for single-location restaurants. $49 a month.</p>
+        <div class="hero-ctas">
+          <a href="#demo" class="btn btn-primary btn-large">See the live demo</a>
+          <a href="#calculator" class="btn btn-secondary btn-large">Free calculator</a>
+        </div>
+        <p class="hero-micro">No POS integration to set up. No annual contract.</p>
+      </div>
+      <div class="hero-art">
+        <img src="assets/img/hero-owner.jpg" alt="Restaurant owner reviewing costs on a tablet after close" width="2688" height="1520">
+      </div>
+    </div>
+  </section>
+
+  <!-- PROBLEM -->
+  <section class="problem" id="problem">
+    <div class="section-inner">
+      <h2>You find out your margin moved when the month is already over</h2>
+      <div class="quote-grid">
+        <blockquote class="quote-card">
+          <p>&ldquo;I&rsquo;ve spent way too many nights fighting with food costs.&rdquo;</p>
+          <footer>— restaurant owner, <a href="https://www.reddit.com/r/restaurateur/comments/1l845fu/im_a_fellow_restaurant_owner_that_built_a_food/" target="_blank" rel="noopener">r/restaurateur</a></footer>
+        </blockquote>
+        <blockquote class="quote-card">
+          <p>&ldquo;The formulas got fragile, my team broke them constantly, and I was the only one who could fix them.&rdquo;</p>
+          <footer>— same thread, <a href="https://www.reddit.com/r/restaurateur/comments/1l845fu/im_a_fellow_restaurant_owner_that_built_a_food/" target="_blank" rel="noopener">r/restaurateur</a></footer>
+        </blockquote>
+        <blockquote class="quote-card">
+          <p>&ldquo;I looked hard at xtraCHEF and almost pulled the trigger on MarginEdge, but $300&ndash;$350/month just didn&rsquo;t sit right.&rdquo;</p>
+          <footer>— same thread, <a href="https://www.reddit.com/r/restaurateur/comments/1l845fu/im_a_fellow_restaurant_owner_that_built_a_food/" target="_blank" rel="noopener">r/restaurateur</a></footer>
+        </blockquote>
+        <blockquote class="quote-card">
+          <p>&ldquo;LOVED the demo for MarginEdge with Freepour, but at 480.00 per month it seems hard to get the value out of it with one location.&rdquo;</p>
+          <footer>— <a href="https://www.reddit.com/r/restaurantowners/comments/1jvuw2i/frustrated_between_choosing_from_bar_vs/" target="_blank" rel="noopener">r/restaurantowners</a></footer>
+        </blockquote>
+      </div>
+      <p class="stat-strip">
+        <strong>82%</strong> of operators said food costs rose in 2025; independents ended the year at
+        <strong>412,498</strong> US locations.
+        <a href="https://www.nrn.com/independent-restaurants/the-independent-restaurant-sector-shrunk-by-2-3-in-2025" target="_blank" rel="noopener">Nation&rsquo;s Restaurant News / Technomic</a>
+      </p>
+    </div>
+  </section>
+
+  <!-- HOW IT WORKS -->
+  <section class="how-it-works" id="how-it-works">
+    <div class="section-inner">
+      <h2>Three steps. None of them is a spreadsheet.</h2>
+      <div class="steps-grid">
+        <div class="step-card">
+          <div class="step-icon"><img src="assets/icon-invoice.svg" alt="" width="64" height="64"></div>
+          <h3>1. Send the invoice.</h3>
+          <p>Photograph it, forward the email, or drop in the Sysco CSV. Price history builds itself.</p>
+        </div>
+        <div class="step-card">
+          <div class="step-icon"><img src="assets/icon-plate.svg" alt="" width="64" height="64"></div>
+          <h3>2. See every plate&rsquo;s cost.</h3>
+          <p>Your recipes meet current prices, not last quarter&rsquo;s. Food-cost % per item, against your target.</p>
+        </div>
+        <div class="step-card">
+          <div class="step-icon"><img src="assets/icon-alert.svg" alt="" width="64" height="64"></div>
+          <h3>3. Get tapped on the shoulder.</h3>
+          <p>When an ingredient drifts past your threshold, CostSauce names the menu items that need a reprice, and the price that fixes them.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- PRODUCT SCREENSHOTS -->
+  <section class="product-demo" id="demo">
+    <div class="section-inner">
+      <h2>This is the actual product</h2>
+      <div class="screens-grid">
+        <figure class="browser-frame">
+          <div class="browser-chrome"><span></span><span></span><span></span></div>
+          <img src="assets/img/product-dashboard.png" alt="CostSauce dashboard showing plate costs and food-cost percentages for The Copper Ladle" width="1265" height="863" loading="lazy">
+          <figcaption>Dashboard</figcaption>
+        </figure>
+        <figure class="browser-frame">
+          <div class="browser-chrome"><span></span><span></span><span></span></div>
+          <img src="assets/img/product-ingredients.png" alt="CostSauce ingredient price history view" width="1265" height="1411" loading="lazy">
+          <figcaption>Ingredient price history</figcaption>
+        </figure>
+        <figure class="browser-frame">
+          <div class="browser-chrome"><span></span><span></span><span></span></div>
+          <img src="assets/img/product-recipes.png" alt="CostSauce recipe costing view" width="1265" height="1126" loading="lazy">
+          <figcaption>Recipe costing</figcaption>
+        </figure>
+      </div>
+      <p class="demo-note">Demo restaurant: The Copper Ladle. Run it locally: <code>uv run app.py</code> — see README.</p>
+    </div>
+  </section>
+
+  <!-- PRICING -->
+  <section class="pricing" id="pricing">
+    <div class="section-inner">
+      <h2>Cheaper than the mistake it catches</h2>
+      <div class="pricing-grid">
+        <div class="price-card">
+          <h3>Starter</h3>
+          <p class="price">$49<span>/mo</span></p>
+          <ul>
+            <li>1 location</li>
+            <li>30 invoices/mo</li>
+            <li>25 recipes</li>
+            <li>Drift alerts</li>
+            <li>Dashboard</li>
+          </ul>
+        </div>
+        <div class="price-card price-card-featured">
+          <p class="price-badge">Most popular</p>
+          <h3>Growth</h3>
+          <p class="price">$99<span>/mo</span></p>
+          <ul>
+            <li>Unlimited invoices</li>
+            <li>Unlimited recipes</li>
+            <li>Vendor comparison</li>
+            <li>CSV export</li>
+          </ul>
+        </div>
+        <div class="price-card">
+          <h3>Pro</h3>
+          <p class="price">$149<span>/mo</span></p>
+          <ul>
+            <li>Up to 3 locations</li>
+            <li>Multi-user</li>
+            <li>Priority parsing</li>
+          </ul>
+        </div>
+      </div>
+      <p class="pricing-line">One avoided reprice mistake pays for a year of Starter. 14-day trial. Cancel whenever.</p>
+      <p class="pricing-comparison">
+        MarginEdge demo quoted to a one-location owner: <a href="https://www.reddit.com/r/restaurantowners/comments/1jvuw2i/frustrated_between_choosing_from_bar_vs/" target="_blank" rel="noopener">$480/mo (his words, linked)</a>.
+        MarketMan&rsquo;s automation tier starts at <a href="https://www.marketman.com/pricing-for-restaurant-inventory-management-system" target="_blank" rel="noopener">$199/mo (their pricing page, linked)</a>.
+      </p>
+    </div>
+  </section>
+
+  <!-- TRUST / WHAT IT DOESN'T DO -->
+  <section class="trust" id="trust">
+    <div class="section-inner">
+      <h2>What it doesn&rsquo;t do</h2>
+      <ul class="trust-list">
+        <li>It won&rsquo;t count your walk-in. Full inventory is a different product and we don&rsquo;t pretend otherwise.</li>
+        <li>It doesn&rsquo;t talk to your POS yet. Toast&rsquo;s partner program takes months; we chose to ship value first.</li>
+        <li>It doesn&rsquo;t read invoices with AI magic in v1. Photo-assisted entry means the photo sits next to the form. OCR is a paid-tier roadmap item.</li>
+        <li>Bars: <a href="https://www.getbackbar.com/pricing" target="_blank" rel="noopener">Backbar</a> already does this well for beverage. If you run a bar, use them.</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- CALCULATOR -->
+  <section class="calculator" id="calculator">
+    <div class="section-inner">
+      <h2>Free: the 60-second food-cost calculator</h2>
+      <p class="calc-sub">No signup. The thing every owner does on a napkin, done right.</p>
+
+      <div class="calc-app">
+        <div class="calc-inputs">
+          <div class="calc-field">
+            <label for="itemName">Menu item</label>
+            <input type="text" id="itemName" placeholder="e.g. Buffalo Wings" value="Buffalo Wings" autocomplete="off">
+          </div>
+          <div class="calc-field">
+            <label for="menuPrice">Menu price</label>
+            <div class="input-prefix">
+              <span>$</span>
+              <input type="number" id="menuPrice" min="0" step="0.01" placeholder="16.00" value="16.00" inputmode="decimal">
+            </div>
+          </div>
+
+          <div class="ingredients-block">
+            <div class="ingredients-header">
+              <span class="col-name">Ingredient</span>
+              <span class="col-qty">Qty</span>
+              <span class="col-unit">Unit cost</span>
+              <span class="col-cost">Cost</span>
+              <span class="col-remove" aria-hidden="true"></span>
+            </div>
+            <div id="ingredientRows" class="ingredient-rows"></div>
+            <button type="button" id="addRow" class="btn btn-outline btn-small">+ Add ingredient</button>
+          </div>
+        </div>
+
+        <div class="calc-results" aria-live="polite">
+          <div class="result-tile">
+            <span class="result-label">Plate cost</span>
+            <span class="result-value" id="resultPlateCost">$0.00</span>
+          </div>
+          <div class="result-tile" id="foodCostTile">
+            <span class="result-label">Food-cost %</span>
+            <span class="result-value" id="resultFoodCostPct">0.0%</span>
+          </div>
+          <div class="result-tile">
+            <span class="result-label">Suggested price @ 30% target</span>
+            <span class="result-value" id="resultSuggestedPrice">$0.00</span>
+          </div>
+          <p class="verdict" id="verdictText" role="status"></p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FAQ -->
+  <section class="faq" id="faq">
+    <div class="section-inner">
+      <h2>FAQ</h2>
+      <div class="faq-list">
+        <details class="faq-item">
+          <summary>Do I need a new POS?</summary>
+          <p>No. CostSauce sits between your invoices and your menu. Paper, email, or CSV in; alerts out.</p>
+        </details>
+        <details class="faq-item">
+          <summary>How is this different from a spreadsheet?</summary>
+          <p>The spreadsheet waits for you to notice. CostSauce notices for you, and it doesn&rsquo;t break when your prep cook adds a row.</p>
+        </details>
+        <details class="faq-item">
+          <summary>What if my vendor names everything weird?</summary>
+          <p>&ldquo;CHKN BRST BNLS&rdquo; maps to chicken breast once. After that it sticks.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Can I export?</summary>
+          <p>CSV of everything, on Growth and up. Your data is yours on every plan.</p>
+        </details>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="section-inner">
+    <p class="footer-evidence">Evidence: every claim on this page links to its source.</p>
+    <ul class="footer-links">
+      <li><a href="https://www.reddit.com/r/restaurateur/comments/1l845fu/im_a_fellow_restaurant_owner_that_built_a_food/" target="_blank" rel="noopener">r/restaurateur thread</a></li>
+      <li><a href="https://www.reddit.com/r/restaurantowners/comments/1jvuw2i/frustrated_between_choosing_from_bar_vs/" target="_blank" rel="noopener">r/restaurantowners thread</a></li>
+      <li><a href="https://www.nrn.com/independent-restaurants/the-independent-restaurant-sector-shrunk-by-2-3-in-2025" target="_blank" rel="noopener">Nation&rsquo;s Restaurant News</a></li>
+      <li><a href="https://www.marketman.com/pricing-for-restaurant-inventory-management-system" target="_blank" rel="noopener">MarketMan pricing</a></li>
+      <li><a href="https://www.getmeez.com/pricing" target="_blank" rel="noopener">meez pricing</a></li>
+      <li><a href="https://recipecostcalculator.net/" target="_blank" rel="noopener">Recipe Cost Calculator</a></li>
+      <li><a href="https://www.getbackbar.com/pricing" target="_blank" rel="noopener">Backbar pricing</a></li>
+    </ul>
+    <p class="footer-copy">© 2026 CostSauce (concept demo — not a live business)</p>
+  </div>
+</footer>
+
+<script src="js/calculator.js"></script>
+</body>
+</html>

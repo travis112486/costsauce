@@ -1,0 +1,39 @@
+{
+  "out": "founder.mp4",
+  "resolution": [
+    1920,
+    1080
+  ],
+  "voiceover": "vo/founder-full.mp3",
+  "music": "music-loop.wav",
+  "music_volume": 0.08,
+  "slide_min_seconds": 5.0,
+  "slides": [
+    {
+      "image": "frames-founder/F1-owner.png",
+      "caption": "I kept reading the same sentence from restaurant owners."
+    },
+    {
+      "image": "frames-founder/F2-quote.png"
+    },
+    {
+      "image": "frames-founder/F3-480.png"
+    },
+    {
+      "image": "frames-founder/F4-indies.png"
+    },
+    {
+      "image": "frames-founder/F5-radar.png"
+    },
+    {
+      "image": "frames-founder/F6-49.png"
+    },
+    {
+      "image": "frames-founder/F7-calc.png",
+      "caption": "Try the free food-cost calculator."
+    },
+    {
+      "image": "frames-founder/endcard-founder.png"
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "out": "launch.mp4",
+  "resolution": [
+    1920,
+    1080
+  ],
+  "voiceover": "vo/launch-full.mp3",
+  "music": "music-loop.wav",
+  "music_volume": 0.1,
+  "slide_min_seconds": 4.0,
+  "slides": [
+    {
+      "image": "frames-launch/L1-chicken.png",
+      "caption": "Chicken breast: +14% in one month."
+    },
+    {
+      "image": "frames-launch/L2-menu.png"
+    },
+    {
+      "image": "frames-launch/L3-stat.png"
+    },
+    {
+      "image": "frames-launch/L4-live.png"
+    },
+    {
+      "image": "frames-launch/L5-alert.png"
+    },
+    {
+      "image": "frames-launch/L6-versus.png"
+    },
+    {
+      "image": "frames-launch/L7-phone.png"
+    },
+    {
+      "image": "frames-launch/endcard-launch.png"
+    }
+  ]
+}
