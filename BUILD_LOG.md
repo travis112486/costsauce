@@ -72,3 +72,12 @@ recap.html: 5-minute stranger test — business, run instructions, embedded vide
 
 ## DEFINITION OF DONE — graded (research/final-review.md §DoD)
 All items PASS. Working tree clean after final commit.
+
+## Phase 10 — GO LIVE (2026-07-25, post-experiment, user-approved)
+- GitHub repo created via Composio GitHub connection: travis112486/costsauce (71 files, byte-verified; mp4s + >5MB binaries excluded per API limits; big PNGs recompressed to JPEG, refs updated)
+- Vercel CLI 57.0.0 (user-local npm prefix); device-code auth (user-approved)
+- deploy/ package (Claude-built, orchestrator-verified): FastAPI serverless + /tmp SQLite seeding (VERCEL=1), marketing at /, product at /demo
+- Fixed Vercel FastAPI preset quirk: preset routes / to the function, shadowing public/index.html — marketing page now served by the function route itself (marketing.html)
+- 5 deployments total (routing iterations) → LIVE: https://costsauce.vercel.app
+- Verified live via Playwright + API: marketing headline, hero .jpg, calculator recomputes ($5.70 plate / 35.6%), demo alerts render, videos stream 206, API 4 alerts + 8 items
+- Duplicate debug project 'deploy' removed from Vercel; canonical project: travis112486s-projects/costsauce

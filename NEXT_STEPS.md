@@ -3,8 +3,8 @@
 Ordered by dependency. Free tiers used wherever they exist; anything costing money or touching third parties is marked **[APPROVAL]**.
 
 ## Stage 1 — Public demo (this deployment)
-- [x] GitHub repo: `travis112486/costsauce`
-- [ ] Vercel deploy: static site at `/`, serverless FastAPI demo at `/demo` + `/api/*`, videos, recap
+- [x] GitHub repo: [`travis112486/costsauce`](https://github.com/travis112486/costsauce)
+- [x] Vercel deploy LIVE: **https://costsauce.vercel.app** — marketing site at `/`, product demo at `/demo`, API at `/api/*`, videos at `/videos/*`, recap at `/recap.html` (verified 2026-07-25: 4 drift alerts, 8 recipes, calculator live)
 - [ ] **Known demo limitation:** SQLite seeds into `/tmp` per serverless instance — data resets on cold start. Fine for a demo; say so on the page.
 
 ## Stage 2 — Make it real (week 1–2)
