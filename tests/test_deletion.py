@@ -624,20 +624,26 @@ async def test_concurrent_account_deletions_cannot_zero_out_owners(pool, raw_con
     assert (await cur.fetchone())[0] == 1, "the org must keep exactly one owner, never zero"
 
 
-async def test_membership_committed_after_the_fixed_point_is_still_deleted(
+async def test_membership_committed_after_the_fixed_point_is_never_left_behind(
     pool, raw_conn, seeded
 ):
-    """Review round 1, Critical-1.
+    """Review round 1, Critical-1 -- and the outcome corrected in round 2.
 
     `_lock_caller_orgs` reaches a fixed point on the caller's org set. A
-    membership committed AFTER that final read cannot have been locked --
-    the caller was not a member yet, so `accept_invite_tx`'s own org lock
-    never contended -- and an earlier version scoped the DELETE to that
-    frozen set. `DELETE /me` then returned 200, with `profiles` gone and a
-    LIVE membership surviving in another tenant's org: `GET /me` renders a
-    null contact_email, and that org's `members.csv` exports a NULL address.
+    membership committed AFTER that final read cannot have been locked: the
+    caller was not a member yet, so `accept_invite_tx`'s own org lock never
+    contended.
 
-    Reproduced here with a forced interleave rather than hopeful scheduling.
+    Round 1 scoped the DELETE to that frozen set, so `DELETE /me` returned
+    200 with `profiles` gone and a LIVE membership surviving in another
+    tenant's org -- `GET /me` renders a null contact_email and that org's
+    `members.csv` exports a NULL address. Round 2 rejected the obvious repair
+    (delete unscoped) because it strips memberships in orgs that were never
+    locked or owner-counted.
+
+    The answer is neither: refuse the whole deletion with 409 and let the
+    retry -- whose fixed point now includes the new org -- do it properly.
+    Nothing is deleted and nothing is left behind.
     """
     # A second owner of Acme, so Alice is not the sole owner and the deletion
     # actually proceeds rather than 409ing before it can be tested.
@@ -658,25 +664,157 @@ async def test_membership_committed_after_the_fixed_point_is_still_deleted(
 
     from api.routes import deletion as deletion_module
 
+    async def alice_deletes_her_account():
+        async with tenant_connection(pool, {"sub": str(seeded["alice"])}) as conn:
+            orgs = await deletion_module._lock_caller_orgs(conn, str(seeded["alice"]))
+            assert [str(o) for o in orgs] == [str(seeded["acme"])]
+
+            # A second, fully independent transaction commits the new membership
+            # while the first is still open and past its fixed point.
+            async with tenant_connection(pool, {"sub": str(seeded["alice"])}) as other:
+                cur = await other.execute(
+                    "SELECT status FROM accept_invite_tx('hash-late')")
+                assert (await cur.fetchone())[0] == "ok"
+
+            assert not await deletion_module._sole_owner_blocking_orgs(
+                conn, str(seeded["alice"]))
+            await deletion_module._purge_caller_rows(conn, str(seeded["alice"]), orgs)
+
+    with pytest.raises(HTTPException) as exc:
+        await alice_deletes_her_account()
+    assert exc.value.status_code == 409, "must not report success over a live membership"
+
+    # Nothing destroyed, nothing stranded: the caller retries and the retry's
+    # fixed point covers both orgs.
+    cur = await raw_conn.execute(
+        "SELECT count(*) FROM memberships WHERE user_id = %s", (seeded["alice"],))
+    assert (await cur.fetchone())[0] == 2
+    cur = await raw_conn.execute(
+        "SELECT count(*) FROM profiles WHERE user_id = %s", (seeded["alice"],))
+    assert (await cur.fetchone())[0] == 1, "a refused deletion destroyed the profile"
+
     async with tenant_connection(pool, {"sub": str(seeded["alice"])}) as conn:
         orgs = await deletion_module._lock_caller_orgs(conn, str(seeded["alice"]))
-        assert [str(o) for o in orgs] == [str(seeded["acme"])]
-
-        # A second, fully independent transaction commits the new membership
-        # while the first is still open and past its fixed point.
-        async with tenant_connection(pool, {"sub": str(seeded["alice"])}) as other:
-            cur = await other.execute(
-                "SELECT status FROM accept_invite_tx('hash-late')")
-            assert (await cur.fetchone())[0] == "ok"
-
+        assert len(orgs) == 2, "the retry must lock both orgs"
         assert not await deletion_module._sole_owner_blocking_orgs(
             conn, str(seeded["alice"]))
-        await deletion_module._purge_caller_rows(conn, str(seeded["alice"]), orgs)
+        assert await deletion_module._purge_caller_rows(
+            conn, str(seeded["alice"]), orgs) == 2
+    cur = await raw_conn.execute(
+        "SELECT count(*) FROM memberships WHERE user_id = %s", (seeded["alice"],))
+    assert (await cur.fetchone())[0] == 0, "the retry must converge and complete"
+
+
+async def test_an_unlocked_org_is_refused_rather_than_silently_stripped(
+    pool, raw_conn, seeded
+):
+    """Review round 2, Critical. The mirror image of the test above, and the
+    reason the unscoped DELETE is compared against the locked set.
+
+    An unscoped DELETE with no comparison removes memberships in orgs this
+    transaction never locked or owner-counted -- re-opening the zero-owner
+    write skew Task 9 needed three rounds to close, which is strictly worse
+    than the false success it replaced.
+
+    Alice is offered a SECOND-owner seat in Bistro. Her account deletion fixes
+    its point at {Acme}. She accepts the Bistro owner invite in an independent
+    transaction. Bistro's original owner Bob then locks Bistro, counts two
+    owners and leaves. Alice's DELETE must now refuse: removing her Bistro
+    owner row without ever holding Bistro's lock leaves Bistro with zero
+    members and zero owners, `deletion_scheduled_at` NULL -- invisible to
+    every tenant under RLS, administrable by nobody, and never enumerated by
+    `purge_scheduled_orgs`.
+    """
+    from api.routes import deletion as D
+
+    boss = await make_user(raw_conn, "boss@acme.example.com")
+    await add_member(raw_conn, boss, seeded["acme"], "owner")
+    await raw_conn.execute("UPDATE organizations SET plan = 'growth' WHERE id = %s",
+                           (seeded["bistro"],))
+    await raw_conn.execute(
+        "UPDATE profiles SET contact_email_verified_at = now() WHERE user_id = %s",
+        (seeded["alice"],))
+    await raw_conn.execute(
+        "INSERT INTO invites (org_id, email, role, token_hash, invited_by, expires_at) "
+        "VALUES (%s, 'alice@acme.test', 'owner', 'hash-owner-seat', %s, "
+        "        now() + interval '7 days')",
+        (seeded["bistro"], seeded["bob"]),
+    )
+    await raw_conn.commit()
+
+    async def alice_deletes_her_account():
+        # The handler's real order -- lock, owner-count, THEN delete -- and the
+        # exception is allowed to PROPAGATE out of `tenant_connection`, exactly
+        # as it does from the route. Catching it inside the context manager
+        # would let the block exit normally and COMMIT the partial deletion,
+        # which is the very thing being tested against.
+        async with tenant_connection(pool, {"sub": str(seeded["alice"])}) as conn:
+            orgs = await D._lock_caller_orgs(conn, str(seeded["alice"]))
+            assert [str(o) for o in orgs] == [str(seeded["acme"])], "Bistro must be unlocked"
+            assert not await D._sole_owner_blocking_orgs(conn, str(seeded["alice"]))
+
+            # The interleave lands between the owner-count and the delete,
+            # which is where a real request is actually vulnerable.
+            async with tenant_connection(pool, {"sub": str(seeded["alice"])}) as other:
+                cur = await other.execute(
+                    "SELECT status FROM accept_invite_tx('hash-owner-seat')")
+                assert (await cur.fetchone())[0] == "ok"
+
+            # Bob leaves Bistro: he locks it, counts two owners, and goes.
+            async with tenant_connection(pool, {"sub": str(seeded["bob"])}) as bobs:
+                bob_orgs = await D._lock_caller_orgs(bobs, str(seeded["bob"]))
+                assert not await D._sole_owner_blocking_orgs(bobs, str(seeded["bob"]))
+                await D._purge_caller_rows(bobs, str(seeded["bob"]), bob_orgs)
+
+            await D._purge_caller_rows(conn, str(seeded["alice"]), orgs)
+
+    with pytest.raises(HTTPException) as exc:
+        await alice_deletes_her_account()
+    assert exc.value.status_code == 409
+    assert "changing concurrently" in str(exc.value.detail).lower()
+
+    cur = await raw_conn.execute(
+        "SELECT count(*) FROM memberships WHERE org_id = %s AND role = 'owner'",
+        (seeded["bistro"],))
+    assert (await cur.fetchone())[0] == 1, (
+        "an org lost its last owner through a membership row that was never locked")
+
+
+async def test_a_refused_account_deletion_rolls_back_completely(pool, raw_conn, seeded):
+    """The 409 above must delete nothing at all -- a partial deletion would be
+    worse than either failure it replaces."""
+    from api.routes import deletion as D
+
+    boss = await make_user(raw_conn, "boss@acme.example.com")
+    await add_member(raw_conn, boss, seeded["acme"], "owner")
+    await raw_conn.execute("UPDATE organizations SET plan = 'growth' WHERE id = %s",
+                           (seeded["bistro"],))
+    await raw_conn.execute(
+        "UPDATE profiles SET contact_email_verified_at = now() WHERE user_id = %s",
+        (seeded["alice"],))
+    await raw_conn.execute(
+        "INSERT INTO invites (org_id, email, role, token_hash, invited_by, expires_at) "
+        "VALUES (%s, 'alice@acme.test', 'manager', 'hash-late2', %s, "
+        "        now() + interval '7 days')",
+        (seeded["bistro"], seeded["bob"]),
+    )
+    await raw_conn.commit()
+
+    with pytest.raises(HTTPException):
+        async with tenant_connection(pool, {"sub": str(seeded["alice"])}) as conn:
+            orgs = await D._lock_caller_orgs(conn, str(seeded["alice"]))
+            async with tenant_connection(pool, {"sub": str(seeded["alice"])}) as other:
+                await other.execute("SELECT status FROM accept_invite_tx('hash-late2')")
+            await D._purge_caller_rows(conn, str(seeded["alice"]), orgs)
 
     cur = await raw_conn.execute(
         "SELECT count(*) FROM memberships WHERE user_id = %s", (seeded["alice"],))
-    assert (await cur.fetchone())[0] == 0, (
-        "a membership committed after the fixed point survived a 200 deletion")
+    assert (await cur.fetchone())[0] == 2, "a refused deletion removed rows anyway"
+    cur = await raw_conn.execute(
+        "SELECT count(*) FROM profiles WHERE user_id = %s", (seeded["alice"],))
+    assert (await cur.fetchone())[0] == 1
+    cur = await raw_conn.execute("SELECT count(*) FROM deleted_accounts")
+    assert (await cur.fetchone())[0] == 0, "a refused deletion left a tombstone"
 
 
 async def test_purge_and_cancel_cannot_interleave_to_resurrect_an_org(
@@ -856,157 +994,139 @@ async def test_double_delete_me(app_client, raw_conn, seeded):
     assert r2.status_code == 200, r2.text
 
 
-async def test_cancel_racing_account_deletion_cannot_orphan(pool, raw_conn, seeded, db_url):
+async def test_cancel_racing_account_deletion_cannot_orphan(pool, raw_conn, seeded):
     """A cancel racing an ex-sole-owner's account deletion must not leave an
     org UNSCHEDULED with ZERO members -- invisible to every tenant under RLS,
     administrable by nobody, and invisible to the purge job forever.
 
-    Review round 1, Important-3 corrected what this pins. It is NOT lock
-    ordering. `org_update` (0004) re-evaluates `current_user_memberships()`
-    against the UPDATE's OWN snapshot, so once the membership delete has
-    committed the row is filtered out and the UPDATE matches zero rows --
-    regardless of whether the handler locked before or after authorizing. The
-    load-bearing line is therefore cancel_org_deletion's `cur.rowcount != 1`
-    check, which turns that zero into a refusal instead of a cheerful
-    `{"cancelled": true}` over an org that is still scheduled. An earlier
-    version of this test omitted the rowcount check from its inline copy of
-    the handler, so it pinned a status code rather than the orphan its
-    docstring described.
+    Review round 1, Important-3 corrected what this pins: not lock ordering.
+    `org_update` (0004) re-evaluates `current_user_memberships()` against the
+    UPDATE's own snapshot, so once the membership delete commits the row is
+    filtered out and the UPDATE matches zero rows. The load-bearing line is
+    `cancel_org_deletion`'s `cur.rowcount != 1` check, which turns that zero
+    into a refusal rather than a cheerful `{"cancelled": true}` over an org
+    that is still scheduled.
 
-    `inner()` below mirrors cancel_org_deletion's real statement sequence,
-    rowcount check included. Deleting that check makes this test fail.
+    Review round 2 caught this test replicating the handler inline: deleting
+    the rowcount check from the REAL handler left the suite green, because the
+    mutation was only ever caught in the test's own copy. It now calls
+    `cancel_org_deletion` itself. No hook is needed to force the interleave:
+    the real handler blocks inside its own `_lock_org` on the lock the account
+    deletion is holding.
+
+    And driving the real handler corrected the story a SECOND time. The
+    refusal here is a 404, not the 409 the round-1 docstring claimed: once the
+    membership delete commits, `org_select` hides the org from the SELECT
+    above the UPDATE, so the handler never reaches the rowcount check at all.
+    Measured, both ways -- removing the `row is None` guard AND removing the
+    rowcount check each leave this test and the whole suite green. Neither is
+    load-bearing HERE, because `org_update` makes the orphaning UPDATE
+    impossible on its own; they exist so a write that does not land is never
+    reported as success.
+
+    The rowcount branch is in fact unreachable on a SCHEDULED org: losing
+    ownership needs either the membership row to go (caught by the SELECT
+    above) or a role change, which migration 0007's trigger refuses while the
+    org is scheduled. It is reachable, and pinned, on the not-yet-scheduled
+    path -- see
+    `test_losing_ownership_mid_schedule_is_refused_not_a_500` below.
+
+    What this test pins is the invariant itself: the cancel is refused and no
+    orphan exists afterwards.
     """
-    from api.routes import deletion as D, members as M
+    from types import SimpleNamespace
+    from api.auth import CallerIdentity
+    from api.routes import deletion as D
+
     await raw_conn.execute(
-        "UPDATE organizations SET deletion_scheduled_at = now() WHERE id=%s", (seeded["acme"],))
+        "UPDATE organizations SET deletion_scheduled_at = now() WHERE id=%s",
+        (seeded["acme"],))
     await raw_conn.commit()
+
+    alice = str(seeded["alice"])
+    caller = CallerIdentity(user_id=alice, claims={"sub": alice})
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(pool=pool)))
 
     locked = asyncio.Event()
     go = asyncio.Event()
 
     async def delete_account():
-        async with tenant_connection(pool, {"sub": str(seeded["alice"])}) as conn:
-            orgs = await D._lock_caller_orgs(conn, str(seeded["alice"]))
+        async with tenant_connection(pool, {"sub": alice}) as conn:
+            orgs = await D._lock_caller_orgs(conn, alice)
             locked.set()
             await go.wait()
-            assert not await D._sole_owner_blocking_orgs(conn, str(seeded["alice"]))
-            await D._purge_caller_rows(conn, str(seeded["alice"]), orgs)
+            assert not await D._sole_owner_blocking_orgs(conn, alice)
+            await D._purge_caller_rows(conn, alice, orgs)
             return "deleted"
 
     async def cancel():
         await locked.wait()
-
-        async def inner():
-            async with tenant_connection(pool, {"sub": str(seeded["alice"])}) as conn:
-                try:
-                    await M._require_owner(conn, str(seeded["alice"]), seeded["acme"])
-                except Exception:
-                    return "403"
-                await M._lock_org(conn, seeded["acme"])
-                cur = await conn.execute(
-                    "UPDATE organizations SET deletion_scheduled_at = NULL "
-                    "WHERE id = %s AND deletion_scheduled_at IS NOT NULL",
-                    (seeded["acme"],))
-                if cur.rowcount != 1:
-                    raise HTTPException(409, "the deletion could not be cancelled; retry")
-                return "cancelled"
-
-        t = asyncio.create_task(inner())
+        # THE REAL HANDLER, not a replica.
+        t = asyncio.create_task(
+            D.cancel_org_deletion(seeded["acme"], request, caller))
         await asyncio.sleep(0.3)
         assert not t.done(), "the cancel must serialize behind the org lock"
         go.set()
         try:
-            return await t
+            await t
+            return "cancelled"
         except HTTPException as e:
-            return f"{e.status_code}"
+            return str(e.status_code)
 
     a, b = await asyncio.gather(delete_account(), cancel())
     assert a == "deleted"
-    assert b in ("403", "409"), b
+    assert b in ("403", "404", "409"), f"the cancel must be refused, got {b}"
 
     cur = await raw_conn.execute(
         "SELECT deletion_scheduled_at IS NOT NULL, "
-        "(SELECT count(*) FROM memberships m WHERE m.org_id=o.id) "
-        "FROM organizations o WHERE id=%s", (seeded["acme"],))
+        "(SELECT count(*) FROM memberships m WHERE m.org_id = o.id) "
+        "FROM organizations o WHERE id = %s", (seeded["acme"],))
     scheduled, members = await cur.fetchone()
     assert (scheduled, members) != (False, 0), "orphaned: unscheduled with zero members"
     assert scheduled is True and members == 0
 
 
-async def test_multi_org_deletions_do_not_deadlock(pool, raw_conn, seeded):
-    """Two callers deleting their accounts out of the SAME two orgs. Locking
-    several orgs at once is a deadlock risk unless every acquirer agrees on an
-    order; _lock_caller_orgs and purge_scheduled_orgs both use ORDER BY
-    org_id, so neither can hold one org while waiting on another."""
-    from api.routes import deletion as D
-    o1 = await make_org(raw_conn, "One")
-    o2 = await make_org(raw_conn, "Two")
-    keeper = await make_user(raw_conn, "keeper@x.example.com")
-    u1 = await make_user(raw_conn, "u1@x.example.com")
-    u2 = await make_user(raw_conn, "u2@x.example.com")
-    for o in (o1, o2):
-        await add_member(raw_conn, keeper, o, "owner")
-        await add_member(raw_conn, u1, o, "manager")
-        await add_member(raw_conn, u2, o, "manager")
+async def test_losing_ownership_mid_schedule_is_refused_not_a_500(pool, raw_conn, seeded):
+    """Review round 2, Minor: `schedule_org_deletion` returned 500 when its
+    UPDATE matched zero rows, which is a lost race, not a server fault.
+
+    This is the one path where that branch is genuinely REACHABLE. The org is
+    not scheduled yet, so migration 0007's trigger does not block a concurrent
+    role change: the caller passes `_require_owner`, blocks on the org lock,
+    is demoted to manager while it waits, and then still SELECTs the row
+    (`org_select` admits any member) while the UPDATE matches nothing
+    (`org_update` admits only owners). Drives the REAL handler.
+    """
+    from types import SimpleNamespace
+    from api.auth import CallerIdentity
+    from api.routes import deletion as D, members as M
+
+    boss = await make_user(raw_conn, "boss@acme.example.com")
+    await add_member(raw_conn, boss, seeded["acme"], "owner")
     await raw_conn.commit()
 
-    async def run(uid):
-        async with tenant_connection(pool, {"sub": str(uid)}) as conn:
-            orgs = await D._lock_caller_orgs(conn, str(uid))
-            await asyncio.sleep(0.15)
-            if await D._sole_owner_blocking_orgs(conn, str(uid)):
-                return "refused"
-            await D._purge_caller_rows(conn, str(uid), orgs)
-            return "deleted"
+    alice = str(seeded["alice"])
+    caller = CallerIdentity(user_id=alice, claims={"sub": alice})
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(pool=pool)))
 
-    res = await asyncio.wait_for(asyncio.gather(run(u1), run(u2)), timeout=10)
-    assert res == ["deleted", "deleted"], res
+    async with tenant_connection(pool, {"sub": str(boss)}) as bosss:
+        await M._lock_org(bosss, seeded["acme"])
+        task = asyncio.create_task(
+            D.schedule_org_deletion(seeded["acme"], request, caller))
+        await asyncio.sleep(0.3)
+        assert not task.done(), "the schedule must serialize behind the org lock"
+        # Alice passed _require_owner already; take her ownership away.
+        await bosss.execute(
+            "UPDATE memberships SET role = 'manager' WHERE org_id = %s AND user_id = %s",
+            (seeded["acme"], seeded["alice"]))
 
+    with pytest.raises(HTTPException) as exc:
+        await task
+    assert exc.value.status_code == 409, "a lost race is not a 500"
 
-@pytest.mark.parametrize("role", ["manager", "bookkeeper"])
-async def test_non_owner_roles_locked_out(app_client, raw_conn, seeded, role):
-    """Every new org-scoped endpoint is owner-only. Roles are exactly owner,
-    manager, bookkeeper."""
-    u = await make_user(raw_conn, f"{role}@acme.example.com")
-    await add_member(raw_conn, u, seeded["acme"], role)
-    await raw_conn.commit()
-    h = {"Authorization": f"Bearer {mint(str(u))}"}
-    assert (await app_client.get(f"/orgs/{seeded['acme']}/export", headers=h)).status_code == 403
-    assert (await app_client.post(f"/orgs/{seeded['acme']}/deletion", headers=h)).status_code == 403
-    assert (await app_client.delete(f"/orgs/{seeded['acme']}/deletion", headers=h)).status_code == 403
-
-
-async def test_unauthenticated(app_client, seeded):
-    """The middleware runs before authentication, so it must fall through
-    rather than answering for an anonymous caller."""
-    assert (await app_client.delete("/me")).status_code == 401
-    assert (await app_client.post(f"/orgs/{seeded['acme']}/deletion")).status_code == 401
-    assert (await app_client.get(f"/orgs/{seeded['acme']}/export")).status_code == 401
-
-
-async def test_future_scheduled_at_is_not_purged(raw_conn, seeded):
-    """Clock skew must never shorten the grace window."""
-    await raw_conn.execute(
-        "UPDATE organizations SET deletion_scheduled_at = now() + interval '5 days' WHERE id=%s",
-        (seeded["acme"],))
-    cur = await raw_conn.execute("SELECT purge_scheduled_orgs(interval '30 days')")
-    assert (await cur.fetchone())[0] == 0
-
-
-async def test_locations_write_blocked(pool, raw_conn, seeded):
-    """Pins the migration's future-proofing claim directly at the database.
-    No /locations route exists yet, so this is reachable only through raw SQL
-    on a tenant connection -- which is exactly the point: the trigger, not the
-    URL middleware, is what a future POST /sync will be relying on."""
-    import psycopg
-    await raw_conn.execute(
-        "UPDATE organizations SET deletion_scheduled_at = now() WHERE id=%s", (seeded["acme"],))
-    await raw_conn.commit()
-    async with tenant_connection(pool, {"sub": str(seeded["alice"])}) as conn:
-        with pytest.raises(psycopg.Error) as e:
-            await conn.execute(
-                "INSERT INTO locations (org_id, name) VALUES (%s, 'zombie')", (seeded["acme"],))
-        assert e.value.sqlstate == "CS410"
+    cur = await raw_conn.execute(
+        "SELECT deletion_scheduled_at FROM organizations WHERE id = %s", (seeded["acme"],))
+    assert (await cur.fetchone())[0] is None, "a refused schedule must not have landed"
 
 
 async def test_a_non_member_cannot_reach_the_org_advisory_lock(pool, app_client, seeded):
@@ -1159,6 +1279,50 @@ async def test_a_failed_billing_cancellation_is_retried_on_every_confirm(
     assert await cur.fetchone() == (True, True)
 
 
+async def test_a_cancellation_that_cannot_be_recorded_is_surfaced_not_assumed(
+    app_client, raw_conn, seeded, monkeypatch
+):
+    """Review round 2, Minor: the second transaction's UPDATE had no rowcount
+    check, so a zero-row match returned `billing_cancelled: true` over a NULL
+    column -- a discrepancy only Task 12's alert would ever notice.
+
+    Zero rows is reachable: `org_update` admits only owners, and the caller
+    can stop being one between the schedule commit and the record write. Here
+    the caller's membership disappears while Stripe is being called. The
+    cancellation really did happen, so the response must not claim otherwise
+    -- but it must say the record is missing.
+    """
+    boss = await make_user(raw_conn, "boss@acme.example.com")
+    await add_member(raw_conn, boss, seeded["acme"], "owner")
+    await raw_conn.execute(
+        "UPDATE organizations SET stripe_customer_id = 'cus_x' WHERE id = %s",
+        (seeded["acme"],))
+    await raw_conn.commit()
+
+    async def cancel_and_unseat_the_caller(customer_id):
+        await raw_conn.execute(
+            "DELETE FROM memberships WHERE org_id = %s AND user_id = %s",
+            (seeded["acme"], seeded["alice"]))
+        await raw_conn.commit()
+
+    monkeypatch.setattr(
+        "api.routes.deletion.cancel_subscription", cancel_and_unseat_the_caller)
+
+    r = await app_client.post(
+        f"/orgs/{seeded['acme']}/deletion",
+        headers={"Authorization": f"Bearer {mint(str(seeded['alice']))}"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["billing_cancelled"] is True, "the cancellation did happen; say so"
+    assert any("could not be recorded" in w for w in body["warnings"]), body["warnings"]
+
+    cur = await raw_conn.execute(
+        "SELECT billing_cancelled_at, deletion_scheduled_at IS NOT NULL "
+        "FROM organizations WHERE id = %s", (seeded["acme"],))
+    recorded_at, scheduled = await cur.fetchone()
+    assert recorded_at is None and scheduled is True
+
+
 async def test_a_settled_billing_cancellation_is_not_re_attempted(
     app_client, raw_conn, seeded, monkeypatch
 ):
@@ -1231,3 +1395,79 @@ async def test_every_org_scoped_table_carries_the_deletion_guard_trigger(raw_con
         "scheduled for deletion succeed through any path the URL middleware "
         "cannot see (POST /invites/accept is one; a future POST /sync is another)."
     )
+
+
+async def test_multi_org_deletions_do_not_deadlock(pool, raw_conn, seeded):
+    """Two callers deleting their accounts out of the SAME two orgs. Locking
+    several orgs at once is a deadlock risk unless every acquirer agrees on an
+    order; _lock_caller_orgs and purge_scheduled_orgs both use ORDER BY
+    org_id, so neither can hold one org while waiting on another."""
+    from api.routes import deletion as D
+    o1 = await make_org(raw_conn, "One")
+    o2 = await make_org(raw_conn, "Two")
+    keeper = await make_user(raw_conn, "keeper@x.example.com")
+    u1 = await make_user(raw_conn, "u1@x.example.com")
+    u2 = await make_user(raw_conn, "u2@x.example.com")
+    for o in (o1, o2):
+        await add_member(raw_conn, keeper, o, "owner")
+        await add_member(raw_conn, u1, o, "manager")
+        await add_member(raw_conn, u2, o, "manager")
+    await raw_conn.commit()
+
+    async def run(uid):
+        async with tenant_connection(pool, {"sub": str(uid)}) as conn:
+            orgs = await D._lock_caller_orgs(conn, str(uid))
+            await asyncio.sleep(0.15)
+            if await D._sole_owner_blocking_orgs(conn, str(uid)):
+                return "refused"
+            await D._purge_caller_rows(conn, str(uid), orgs)
+            return "deleted"
+
+    res = await asyncio.wait_for(asyncio.gather(run(u1), run(u2)), timeout=10)
+    assert res == ["deleted", "deleted"], res
+
+
+@pytest.mark.parametrize("role", ["manager", "bookkeeper"])
+async def test_non_owner_roles_locked_out(app_client, raw_conn, seeded, role):
+    """Every new org-scoped endpoint is owner-only. Roles are exactly owner,
+    manager, bookkeeper."""
+    u = await make_user(raw_conn, f"{role}@acme.example.com")
+    await add_member(raw_conn, u, seeded["acme"], role)
+    await raw_conn.commit()
+    h = {"Authorization": f"Bearer {mint(str(u))}"}
+    assert (await app_client.get(f"/orgs/{seeded['acme']}/export", headers=h)).status_code == 403
+    assert (await app_client.post(f"/orgs/{seeded['acme']}/deletion", headers=h)).status_code == 403
+    assert (await app_client.delete(f"/orgs/{seeded['acme']}/deletion", headers=h)).status_code == 403
+
+
+async def test_unauthenticated(app_client, seeded):
+    """The middleware runs before authentication, so it must fall through
+    rather than answering for an anonymous caller."""
+    assert (await app_client.delete("/me")).status_code == 401
+    assert (await app_client.post(f"/orgs/{seeded['acme']}/deletion")).status_code == 401
+    assert (await app_client.get(f"/orgs/{seeded['acme']}/export")).status_code == 401
+
+
+async def test_future_scheduled_at_is_not_purged(raw_conn, seeded):
+    """Clock skew must never shorten the grace window."""
+    await raw_conn.execute(
+        "UPDATE organizations SET deletion_scheduled_at = now() + interval '5 days' WHERE id=%s",
+        (seeded["acme"],))
+    cur = await raw_conn.execute("SELECT purge_scheduled_orgs(interval '30 days')")
+    assert (await cur.fetchone())[0] == 0
+
+
+async def test_locations_write_blocked(pool, raw_conn, seeded):
+    """Pins the migration's future-proofing claim directly at the database.
+    No /locations route exists yet, so this is reachable only through raw SQL
+    on a tenant connection -- which is exactly the point: the trigger, not the
+    URL middleware, is what a future POST /sync will be relying on."""
+    import psycopg
+    await raw_conn.execute(
+        "UPDATE organizations SET deletion_scheduled_at = now() WHERE id=%s", (seeded["acme"],))
+    await raw_conn.commit()
+    async with tenant_connection(pool, {"sub": str(seeded["alice"])}) as conn:
+        with pytest.raises(psycopg.Error) as e:
+            await conn.execute(
+                "INSERT INTO locations (org_id, name) VALUES (%s, 'zombie')", (seeded["acme"],))
+        assert e.value.sqlstate == "CS410"

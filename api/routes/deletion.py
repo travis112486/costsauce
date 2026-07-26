@@ -137,55 +137,74 @@ async def _sole_owner_blocking_orgs(conn, user_id: str) -> list[str]:
 
 
 async def _purge_caller_rows(conn, user_id: str, orgs: list[uuid.UUID]) -> int:
-    """Remove everything this connection is actually able to remove.
+    """Remove everything this connection is able to remove, and refuse the
+    whole deletion if that is not exactly the set that was locked.
 
-    The DELETE is UNSCOPED (`WHERE user_id = %s`) and deliberately so.
+    The DELETE is unscoped so nothing can be left behind, and its RETURNING
+    set is then compared against `orgs` -- what `_lock_caller_orgs` actually
+    locked and owner-counted. Both halves are load-bearing, and each closes a
+    defect the other version had:
 
-    Review round 1, Critical-1: an earlier version scoped it to `orgs`, the
-    set `_lock_caller_orgs` reached a fixed point on. A membership committed
-    AFTER that final read is outside both the scope and the rowcount
-    assertion -- and `_lock_caller_orgs` could not have locked its org,
-    because the caller was not a member yet, so `accept_invite_tx`'s own org
-    lock never contended. Reproduced: Alice, a member of Acme only, holds a
-    pending invite to Bistro; `DELETE /me` reaches its fixed point,
-    `POST /invites/accept` commits a `manager` membership in Bistro, and
-    `DELETE /me` then commits and returns 200 with a LIVE membership in
-    another tenant's org and no `profiles` row -- so `GET /me` renders a null
-    contact_email and that org's `members.csv` exports a NULL address. A
-    snapshot taken earlier in the transaction is not something to trust for a
-    destructive statement; the statement's own snapshot is.
+    * SCOPED (`org_id = ANY(orgs)`) -- review round 1, Critical-1. A
+      membership committed AFTER the fixed point falls outside the scope, so
+      `DELETE /me` returned 200 with a LIVE membership surviving in another
+      tenant's org and no `profiles` row: `GET /me` renders a null
+      contact_email and that org's `members.csv` exports a NULL address.
+    * UNSCOPED WITH NO COMPARISON -- review round 2, Critical. The opposite
+      failure, and worse. Such a DELETE removes memberships in orgs this
+      transaction never locked or owner-counted, re-opening the zero-owner
+      write skew Task 9 needed three rounds to close. Reproduced: Alice is
+      offered a SECOND-owner seat in Bistro; her `DELETE /me` fixes its point
+      at {Acme}; she accepts the Bistro owner invite in an independent
+      transaction; Bistro's original owner Bob then locks Bistro, counts two
+      owners and leaves; Alice's unscoped DELETE removes her Bistro owner row
+      without ever holding Bistro's lock. Final state: Bistro with zero
+      members, zero owners and `deletion_scheduled_at` NULL -- invisible to
+      every tenant under RLS, administrable by nobody, and never enumerated
+      by `purge_scheduled_orgs`. Both callers got 200.
 
-    The surviving-rows check is what makes this honest, and it is NOT
+    So an org in the RETURNING set that is not in `orgs` is not an error to
+    tolerate, it is proof the caller's membership set moved under us: raise
+    409 and let the whole transaction roll back, deleting nothing. This is
+    the same contract `_lock_caller_orgs` already uses when its fixed point
+    will not converge, and it converges for the same reason -- the retry's
+    fixed point includes the new org, so the second attempt locks and
+    owner-counts every one of them before deciding anything.
+
+    The surviving-rows check is the last statement before COMMIT and is NOT
     vacuous under RLS. `membership_select` (0004) admits rows whose org is in
     `current_user_memberships()` -- which is derived from the very rows being
-    checked for. If a membership survived, this re-evaluation sees it (it is
-    committed, and this transaction did not delete it) and the policy admits
-    it, so the count is non-zero. If none survived, the count is zero and RLS
-    agrees. Either way the answer is the true one.
+    checked for. A survivor is committed and was not deleted here, so the
+    re-evaluation sees it and the policy admits it; if none survived the count
+    is zero and RLS agrees. Either way the answer is the true one.
 
-    The rowcount floor is a second, independent check: `memberships` is under
-    FORCE RLS and, before migration 0007's `membership_self_leave`, a
-    non-owner deleting their own row matched ZERO rows while the handler
-    cheerfully returned 200. Never report a deletion that did not happen.
+    A missing org (locked, but not deleted) is a different animal: it means
+    the DELETE could not touch a row this connection had every right to
+    remove, which before migration 0007's `membership_self_leave` was exactly
+    what happened to every non-owner -- zero rows matched, 200 returned. That
+    is a schema/policy fault, not a race, so it is a 500.
     """
-    cur = await conn.execute("DELETE FROM memberships WHERE user_id = %s", (user_id,))
-    removed = cur.rowcount
     cur = await conn.execute(
-        "SELECT count(*) FROM memberships WHERE user_id = %s", (user_id,)
+        "DELETE FROM memberships WHERE user_id = %s RETURNING org_id", (user_id,)
     )
-    (survivors,) = await cur.fetchone()
-    if survivors:
+    deleted_orgs = {r[0] for r in await cur.fetchall()}
+    locked_orgs = set(orgs)
+
+    unlocked = deleted_orgs - locked_orgs
+    if unlocked:
+        raise HTTPException(
+            409,
+            "your organization memberships are changing concurrently; retry the "
+            "account deletion",
+        )
+    missing = locked_orgs - deleted_orgs
+    if missing:
         raise HTTPException(
             500,
-            f"{survivors} membership(s) survived the deletion; refusing to report "
-            "an account as deleted while it still holds access to an organization",
+            f"{len(missing)} membership(s) could not be removed; refusing to report "
+            "a deletion that did not happen",
         )
-    if removed < len(orgs):
-        raise HTTPException(
-            500,
-            f"expected to remove at least {len(orgs)} membership(s) but removed "
-            f"{removed}; refusing to report a deletion that did not happen",
-        )
+
     # Single-use tokens the caller owns. Both cascade from `auth.users`,
     # which this endpoint cannot delete, so without this they outlive the
     # profile they belong to.
@@ -214,7 +233,25 @@ async def _purge_caller_rows(conn, user_id: str, orgs: list[uuid.UUID]) -> int:
         "INSERT INTO deleted_accounts (user_id) VALUES (%s) ON CONFLICT DO NOTHING",
         (user_id,),
     )
-    return removed
+
+    # LAST statement before COMMIT, deliberately. Anything committed by another
+    # transaction after this point survives, and nothing in this function can
+    # change that -- closing it needs a lock keyed on the USER that
+    # `accept_invite_tx` also takes, which means changing migration 0006.
+    # Keeping this check here shrinks the window to the COMMIT itself rather
+    # than the four statements above plus COMMIT (measured at ~6 ms in review,
+    # not the "one statement" my round-1 report claimed).
+    cur = await conn.execute(
+        "SELECT count(*) FROM memberships WHERE user_id = %s", (user_id,)
+    )
+    (survivors,) = await cur.fetchone()
+    if survivors:
+        raise HTTPException(
+            409,
+            "a membership was created while your account was being deleted; retry "
+            "the account deletion",
+        )
+    return len(deleted_orgs)
 
 
 async def _revoke_apple(apple_sub: str | None) -> bool | None:
@@ -346,7 +383,19 @@ async def schedule_org_deletion(
             )
             updated = await cur.fetchone()
             if updated is None:
-                raise HTTPException(500, "could not schedule the deletion")
+                # Review round 2, Minor: this was a 500. Under the org lock a
+                # concurrent schedule is impossible, so zero rows here means
+                # `org_update` (0004) filtered the row out -- the caller stopped
+                # being an owner between `_require_owner` above and this
+                # statement, which is precisely what happens when their own
+                # `DELETE /me` commits while this request waits on the lock.
+                # That is a lost race, not a server fault, and the retry gets
+                # the definitive answer (403) from `_require_owner`.
+                raise HTTPException(
+                    409,
+                    "the organization changed while the deletion was being "
+                    "scheduled; retry",
+                )
             scheduled_at = updated[0]
 
     warnings: list[str] = []
@@ -392,10 +441,32 @@ async def schedule_org_deletion(
 
     if billing_cancelled and billing_cancelled_at is None:
         async with tenant_connection(request.app.state.pool, caller.claims) as conn:
-            await conn.execute(
-                "UPDATE organizations SET billing_cancelled_at = now() "
-                "WHERE id = %s AND billing_cancelled_at IS NULL",
+            # `coalesce` makes this idempotent, and RETURNING reports what the
+            # row actually holds afterwards rather than what we assumed.
+            # Review round 2, Minor: without a rowcount check a zero-row match
+            # (org gone, or ownership lost while Stripe was being called) left
+            # the response saying `billing_cancelled: true` over a NULL column
+            # -- a discrepancy that only Task 12's alert would ever notice.
+            cur = await conn.execute(
+                "UPDATE organizations "
+                "   SET billing_cancelled_at = coalesce(billing_cancelled_at, now()) "
+                " WHERE id = %s RETURNING billing_cancelled_at",
                 (org_id,),
+            )
+            recorded = await cur.fetchone()
+        if recorded is None:
+            # The cancellation DID happen at Stripe, so saying otherwise would
+            # be a lie in the other direction. Report it truthfully and say the
+            # record is missing; the next confirm settles it, because that path
+            # is gated on `billing_cancelled_at IS NULL`.
+            log.error(
+                "billing cancellation for org %s succeeded but could not be "
+                "recorded; billing_cancelled_at is still NULL",
+                org_id,
+            )
+            warnings.append(
+                "The subscription was cancelled but this could not be recorded; "
+                "confirming the deletion again will settle it."
             )
 
     return {
