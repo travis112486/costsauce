@@ -57,6 +57,24 @@ GRACE = f"{GRACE_DAYS} days"
 # ---------------------------------------------------------------------------
 # Half 1: organizations
 # ---------------------------------------------------------------------------
+class StorageNotConfiguredError(RuntimeError):
+    """Raised by `run_purge` when it purged one or more organizations with no
+    `storage_delete` callback configured -- their storage was never deleted.
+
+    Carries `.purged` (the count that actually happened; the DB commit is not
+    rolled back on this exception) so a caller like `run_all` can still
+    report what succeeded while correctly treating the run as failed.
+    """
+
+    def __init__(self, purged: int, org_ids: list):
+        super().__init__(
+            f"{purged} organization(s) were purged with no storage_delete "
+            f"configured; their storage was NOT deleted: {org_ids}"
+        )
+        self.purged = purged
+        self.org_ids = org_ids
+
+
 async def run_purge(db_url: str, storage_delete=None) -> int:
     """Hard-delete organizations whose grace window has elapsed.
 
@@ -111,8 +129,15 @@ async def run_purge(db_url: str, storage_delete=None) -> int:
     this: it raises `SyntaxError: syntax error at or near "$1"`. Written
     here as `%s::interval` instead, which casts a normally-bound text
     parameter.
+
+    Raises `StorageNotConfiguredError` -- AFTER committing the purge -- if
+    `storage_delete` was `None` and one or more organizations were actually
+    purged. A purge that ran with no storage cleanup wired up must not look
+    like a healthy no-op to whatever is watching this job's exit code; see
+    the exception's own docstring.
     """
     conn = await psycopg.AsyncConnection.connect(db_url, autocommit=False)
+    storage_skipped_for: list | None = None
     try:
         cur = await conn.execute(
             "SELECT id FROM organizations_pending_purge(%s::interval)", (GRACE,)
@@ -126,28 +151,36 @@ async def run_purge(db_url: str, storage_delete=None) -> int:
             for org_id in doomed:
                 await storage_delete(f"{org_id}/")
         else:
-            # Silent here would mean a misconfigured deployment (no
-            # storage_delete wired up -- exactly what the brief's own
-            # __main__ calls with) orphans every purged org's files forever,
-            # with nothing anywhere to notice. Loud instead: the purge still
-            # proceeds (see Task 12 report for why this is not blocked
-            # outright -- no storage bucket/client exists anywhere in this
-            # codebase yet for this job to call), but it cannot happen quietly.
+            # Review Important-3: a misconfigured deployment (no
+            # storage_delete wired up -- exactly what __main__ calls with
+            # today, since no storage bucket/client exists anywhere in this
+            # codebase yet) must not look like a healthy run once something
+            # was actually purged. Logging alone was not enough -- combined
+            # with a caller that only checks the return value or exit code,
+            # a run that purged real rows and orphaned their storage was
+            # indistinguishable from an idle night. So this case still
+            # completes the purge (the org row itself is not held hostage to
+            # a bucket that doesn't exist yet) but is raised as a failure
+            # below, once the commit is safely done.
             log.error(
                 "storage_delete is not configured; storage objects for %d "
-                "organization(s) about to be purged were NOT deleted: %s",
+                "organization(s) about to be purged will NOT be deleted: %s",
                 len(doomed), doomed,
             )
+            storage_skipped_for = doomed
 
         cur = await conn.execute("SELECT purge_scheduled_orgs(%s::interval)", (GRACE,))
         (purged,) = await cur.fetchone()
         await conn.commit()
-        return purged
     except BaseException:
         await conn.rollback()
         raise
     finally:
         await conn.close()
+
+    if storage_skipped_for is not None:
+        raise StorageNotConfiguredError(purged, storage_skipped_for)
+    return purged
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +188,28 @@ async def run_purge(db_url: str, storage_delete=None) -> int:
 # ---------------------------------------------------------------------------
 class IdentityPurgeError(RuntimeError):
     pass
+
+
+class PartialIdentityPurgeError(RuntimeError):
+    """Raised by `purge_pending_identities` when the run finished but one or
+    more pending identities were NOT purged (an Admin API failure, or a
+    reported success that the tombstone re-check disproved).
+
+    Review Important-2: every pending id is still attempted regardless of
+    what happened to earlier ones (this is raised only after the loop
+    finishes, never used to abort it early), but the run as a WHOLE must not
+    report success -- a night where the Admin API is down for every account
+    and every attempt fails must not look identical to a night with nothing
+    pending. `.purged` and `.failed` let a caller like `run_all` still report
+    what happened while correctly treating the run as failed.
+    """
+
+    def __init__(self, purged: int, failed: int):
+        super().__init__(
+            f"identity purge finished with {failed} failure(s) (purged {purged})"
+        )
+        self.purged = purged
+        self.failed = failed
 
 
 async def _delete_identity(
@@ -258,6 +313,15 @@ async def purge_pending_identities(
     behind it. Nothing is lost on a partial failure either -- an id that
     was not purged this run simply remains in `deleted_accounts`, which
     exists for exactly this, and is retried unchanged next time.
+
+    Raises `PartialIdentityPurgeError` -- only after every pending id has
+    been attempted -- if one or more were not purged. Review Important-2:
+    the original version of this function caught every per-identity
+    exception and simply returned a lower count, which meant a run where the
+    Admin API returned 5xx for EVERY pending identity still returned `0` and
+    raised nothing -- indistinguishable from a quiet night with nothing
+    pending, for the exact half of this job that exists to satisfy App
+    Store guideline 5.1.1(v). It no longer does.
     """
     supabase_url = supabase_url or os.environ.get("SUPABASE_URL")
     service_role_key = service_role_key or os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
@@ -271,6 +335,7 @@ async def purge_pending_identities(
     http = http or httpx.AsyncClient(timeout=10)
     conn = await psycopg.AsyncConnection.connect(db_url, autocommit=True)
     purged = 0
+    failed = 0
     try:
         cur = await conn.execute("SELECT user_id FROM accounts_pending_identity_purge()")
         pending = [r[0] for r in await cur.fetchall()]
@@ -288,11 +353,13 @@ async def purge_pending_identities(
                 # a DNS failure or a TLS error out of httpx must be exactly
                 # as non-fatal to the REST of this run as a documented 4xx/5xx
                 # from the Admin API. One bad identity must never take the
-                # rest of an unattended run down with it.
+                # rest of an unattended run down with it -- the loop keeps
+                # going; only the eventual return/raise reflects the failure.
                 log.exception(
                     "identity purge failed for %s; left in deleted_accounts for "
                     "the next run", user_id,
                 )
+                failed += 1
                 continue
 
             cur = await conn.execute(
@@ -305,12 +372,16 @@ async def purge_pending_identities(
                     "Supabase reported %s as removed but its tombstone is still "
                     "present; NOT counting it as purged", user_id,
                 )
+                failed += 1
                 continue
             purged += 1
     finally:
         await conn.close()
         if owns_client:
             await http.aclose()
+
+    if failed:
+        raise PartialIdentityPurgeError(purged, failed)
     return purged
 
 
@@ -328,6 +399,17 @@ async def run_all(db_url: str, *, storage_delete=None) -> tuple[int, int]:
     both have had their turn -- so cron's own failure signal (a non-zero
     exit code) still fires, but neither half can silently starve the other
     of runtime.
+
+    `getattr(exc, "purged", 0)` on each catch: `StorageNotConfiguredError`
+    and `PartialIdentityPurgeError` both carry `.purged` for exactly this --
+    so a half that finished with real work done but is still correctly
+    reported as failed does not also lose that count. Logged explicitly
+    (not just the traceback) and attached to the RuntimeError this raises,
+    so a caller with its own monitoring around this job -- not merely
+    watching the exit code -- can still recover how much actually happened
+    before the failure. A plain exception (a missing env var, a network
+    error before anything ran) has no `.purged`, and 0 is the right answer
+    for it.
     """
     failed: list[str] = []
     orgs_purged = 0
@@ -335,22 +417,37 @@ async def run_all(db_url: str, *, storage_delete=None) -> tuple[int, int]:
 
     try:
         orgs_purged = await run_purge(db_url, storage_delete=storage_delete)
-    except Exception:
-        log.exception("organization purge failed")
+    except Exception as exc:
+        orgs_purged = getattr(exc, "purged", 0)
+        log.exception("organization purge failed (purged %d before failing)", orgs_purged)
         failed.append("organizations")
 
     try:
         identities_purged = await purge_pending_identities(db_url)
-    except Exception:
-        log.exception("identity purge failed")
+    except Exception as exc:
+        identities_purged = getattr(exc, "purged", 0)
+        log.exception("identity purge failed (purged %d before failing)", identities_purged)
         failed.append("identities")
 
     if failed:
-        raise RuntimeError(f"purge job failed for: {', '.join(failed)}")
+        exc = RuntimeError(f"purge job failed for: {', '.join(failed)}")
+        exc.orgs_purged = orgs_purged
+        exc.identities_purged = identities_purged
+        raise exc
     return orgs_purged, identities_purged
 
 
 if __name__ == "__main__":
+    # Review Important-4: deliberately NOT `DATABASE_URL` -- api/main.py
+    # reads that for the pooled `app_user` connection the API server uses,
+    # which holds none of the EXECUTE grants this job needs on
+    # `organizations_pending_purge`, `purge_scheduled_orgs`, or
+    # `accounts_pending_identity_purge` (all three are granted only to the
+    # migration-runner identity). Deployed in one environment where both
+    # variables happened to be set to the app server's own value, this job
+    # would fail every call with `InsufficientPrivilege`. A distinct name
+    # makes that collision structurally impossible instead of a runbook note
+    # someone has to remember.
     logging.basicConfig(level=logging.INFO)
-    _orgs_purged, _identities_purged = asyncio.run(run_all(os.environ["DATABASE_URL"]))
+    _orgs_purged, _identities_purged = asyncio.run(run_all(os.environ["PURGE_DATABASE_URL"]))
     print(f"orgs_purged={_orgs_purged} identities_purged={_identities_purged}")

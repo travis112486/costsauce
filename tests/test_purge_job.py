@@ -64,9 +64,21 @@ async def test_purge_job_deletes_storage_prefix_for_each_purged_org(raw_conn, se
     assert deleted_prefixes == [f"{seeded['acme']}/"]
 
 
-async def test_purge_job_is_a_noop_when_nothing_is_due(raw_conn, seeded, db_url):
-    n = await run_purge(db_url, storage_delete=None)
+async def test_purge_job_is_a_noop_when_nothing_is_due(raw_conn, seeded, db_url, caplog):
+    """Review Important-1: also pins the `if not doomed: return 0`
+    short-circuit itself. Removing it (mutation M8) still returns 0 here --
+    `purge_scheduled_orgs` legitimately finds nothing to delete either way --
+    but without the short-circuit, the `storage_delete is None` branch below
+    it would fire unconditionally and log an ERROR claiming organizations
+    were "about to be purged" when the doomed list is empty. A caplog check
+    is what actually distinguishes the short-circuit being there from not.
+    """
+    with caplog.at_level("ERROR"):
+        n = await run_purge(db_url, storage_delete=None)
     assert n == 0
+    assert not any("storage" in r.message.lower() for r in caplog.records), (
+        "nothing was due, so nothing should have been logged about storage at all"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -103,16 +115,30 @@ async def test_purge_job_leaves_storage_and_the_org_alive_before_grace_elapses(
 
 async def test_purge_job_grace_is_the_single_30_day_constant(db_url):
     """Correction 3: 'do not let the Python constant and the SQL argument
-    drift'. Pinned by deriving api.jobs.purge.GRACE from
-    api.routes.deletion.GRACE_DAYS directly, rather than a second literal
-    '30' living in this module -- so a change to the one place the grace
-    period is actually a product decision (deletion.py's docstring says so)
-    automatically propagates here instead of silently diverging.
+    drift'. The value check alone (`GRACE == f"{GRACE_DAYS} days"`) does not
+    pin single-sourcing despite this test's name: a hardcoded second literal
+    `GRACE = "30 days"` in api/jobs/purge.py satisfies it identically, and
+    would silently diverge the day someone changes GRACE_DAYS without
+    noticing this module. Checked at the source level instead: GRACE's own
+    assignment expression must actually reference the name `GRACE_DAYS`.
     """
+    import ast
+    import inspect
     import api.jobs.purge as purge_module
 
     assert GRACE_DAYS == 30
     assert purge_module.GRACE == f"{GRACE_DAYS} days"
+
+    tree = ast.parse(inspect.getsource(purge_module))
+    assign = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "GRACE" for t in node.targets)
+    )
+    names_used = {n.id for n in ast.walk(assign.value) if isinstance(n, ast.Name)}
+    assert "GRACE_DAYS" in names_used, (
+        "GRACE must be derived from GRACE_DAYS in its own source, not merely equal to it"
+    )
 
 
 async def test_purge_job_deletes_storage_before_the_org_row_is_gone(raw_conn, seeded, db_url):
@@ -189,13 +215,18 @@ async def test_purge_job_storage_failure_leaves_the_org_for_a_clean_retry(
     assert deleted_prefixes == [f"{seeded['acme']}/"]
 
 
-async def test_purge_job_logs_and_still_purges_when_storage_delete_is_unconfigured(
+async def test_purge_job_raises_and_still_purges_when_storage_delete_is_unconfigured(
     raw_conn, seeded, db_url, caplog
 ):
-    """storage_delete=None is what the brief's own __main__ entrypoint calls
-    with. Silently skipping storage cleanup for a real purge (not the given
-    no-op test's empty case) must not pass unnoticed -- an operator reading
-    logs needs to see that files were left behind.
+    """Review Important-3: storage_delete=None is what __main__ (and
+    run_all's own default) calls with today, since no storage bucket/client
+    exists anywhere in this codebase yet. The first version of this fix only
+    logged an ERROR and returned success -- combined with Important-2's
+    finding, a run that purged real rows and orphaned every one of their
+    storage prefixes was indistinguishable, by return value or exit code,
+    from a completely healthy no-op night. The org row still gets purged
+    (it is not held hostage to a bucket that doesn't exist), but the run as
+    a whole must now be reported as failed.
     """
     await raw_conn.execute(
         "UPDATE organizations SET deletion_scheduled_at = now() - interval '31 days' "
@@ -204,8 +235,14 @@ async def test_purge_job_logs_and_still_purges_when_storage_delete_is_unconfigur
     )
     await raw_conn.commit()
     with caplog.at_level("ERROR"):
-        n = await run_purge(db_url, storage_delete=None)
-    assert n == 1
+        with pytest.raises(purge_module.StorageNotConfiguredError) as exc_info:
+            await run_purge(db_url, storage_delete=None)
+    assert exc_info.value.purged == 1
+    cur = await raw_conn.execute("SELECT count(*) FROM organizations WHERE id = %s",
+                                  (seeded["acme"],))
+    assert (await cur.fetchone())[0] == 0, (
+        "the org row is still actually purged despite the run being reported as failed"
+    )
     assert any("storage" in r.message.lower() for r in caplog.records), (
         "an unconfigured storage_delete on a real purge must be logged loudly"
     )
@@ -267,61 +304,92 @@ async def test_purge_job_does_not_purge_an_org_a_racing_cancel_saves(raw_conn, s
     )
 
 
-async def test_organizations_pending_purge_works_for_a_caller_with_no_privilege_on_organizations(
-    raw_conn, seeded, db_url
-):
-    """Pins the exact defect this task's own first draft shipped and this
-    file's other tests cannot rule out: `db_url` connects as a genuine
-    Postgres superuser, which bypasses `organizations`' FORCE ROW LEVEL
-    SECURITY regardless of grants -- so a raw `SELECT ... FOR UPDATE`
-    against it "worked" in every other test here even when it would return
-    zero rows (silently) or fail outright (loudly) for the actual
-    non-superuser role a real Supabase migration runner is. This creates a
-    deliberately unprivileged role, grants it EXECUTE on
-    `organizations_pending_purge` ONLY, and proves: a raw SELECT still fails
-    for that role, while the accessor still returns the real row and takes
-    a real lock -- so the SECURITY DEFINER elevation this migration relies
-    on does not depend on the caller happening to be a superuser.
+async def test_run_purge_works_for_a_restricted_migration_runner_role(raw_conn, seeded, db_url):
+    """Review Important-1 (the headline finding): the previous version of
+    this test called `organizations_pending_purge` directly, over the same
+    superuser connection every other test in this file shares, and never
+    invoked `run_purge` at all. That pinned the migration, not the shipping
+    job -- confirmed by restoring this task's original broken first draft
+    (the raw `SELECT ... FROM organizations ... FOR UPDATE` in
+    api/jobs/purge.py) and watching the previous version of this test still
+    pass alongside the rest of the file (21/21).
+
+    This drives `run_purge` itself, over a connection whose role is
+    `NOSUPERUSER NOBYPASSRLS NOINHERIT` -- standing in for the real,
+    restricted migration-runner identity Task 14 will deploy this job under
+    -- holding ONLY the three `EXECUTE` grants a deployed job actually needs
+    (`organizations_pending_purge`, `purge_scheduled_orgs`,
+    `accounts_pending_identity_purge`) and nothing else on `organizations`
+    directly. A raw `SELECT` against `organizations` is proven to fail for
+    this same role first, so the contrast is real: if `run_purge` ever
+    regresses to reading the table directly, this fails with
+    `InsufficientPrivilege` the way it actually would in production, instead
+    of silently passing because the test's own connection happens to be a
+    superuser.
     """
+    deleted_prefixes = []
+
+    async def fake_storage_delete(prefix: str):
+        deleted_prefixes.append(prefix)
+
     await raw_conn.execute(
         "UPDATE organizations SET deletion_scheduled_at = now() - interval '31 days' "
         "WHERE id = %s",
         (seeded["acme"],),
     )
     await raw_conn.execute(
-        "CREATE ROLE test_no_privilege_caller LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD 'x'"
+        "CREATE ROLE test_purge_job_runner LOGIN NOSUPERUSER NOBYPASSRLS NOINHERIT "
+        "PASSWORD 'x'"
     )
     # Schema USAGE only -- a real migration runner obviously has this (it
-    # created every object in the schema). No table-level grant on
-    # `organizations` itself, which is the one privilege this test is
-    # actually about.
-    await raw_conn.execute("GRANT USAGE ON SCHEMA public TO test_no_privilege_caller")
+    # created every object in the schema). No table-level grant of any kind
+    # on `organizations` itself; only the three EXECUTE grants a deployed
+    # job needs.
+    await raw_conn.execute("GRANT USAGE ON SCHEMA public TO test_purge_job_runner")
     await raw_conn.execute(
         "GRANT EXECUTE ON FUNCTION organizations_pending_purge(interval) "
-        "TO test_no_privilege_caller"
+        "TO test_purge_job_runner"
+    )
+    await raw_conn.execute(
+        "GRANT EXECUTE ON FUNCTION purge_scheduled_orgs(interval) TO test_purge_job_runner"
+    )
+    await raw_conn.execute(
+        "GRANT EXECUTE ON FUNCTION accounts_pending_identity_purge() TO test_purge_job_runner"
     )
     await raw_conn.commit()
 
-    caller_url = db_url.replace("postgres:postgres", "test_no_privilege_caller:x")
+    restricted_url = db_url.replace("postgres:postgres", "test_purge_job_runner:x")
     try:
-        conn = await psycopg.AsyncConnection.connect(caller_url, autocommit=True)
+        probe = await psycopg.AsyncConnection.connect(restricted_url, autocommit=True)
         try:
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
-                await conn.execute("SELECT id FROM organizations")
-
-            cur = await conn.execute(
-                "SELECT id FROM organizations_pending_purge(interval '30 days')"
-            )
-            assert await cur.fetchall() == [(seeded["acme"],)]
+                await probe.execute("SELECT id FROM organizations")
         finally:
-            await conn.close()
+            await probe.close()
+
+        n = await run_purge(restricted_url, storage_delete=fake_storage_delete)
+        assert n == 1
+        assert deleted_prefixes == [f"{seeded['acme']}/"]
+
+        cur = await raw_conn.execute(
+            "SELECT count(*) FROM organizations WHERE id = %s", (seeded["acme"],)
+        )
+        assert (await cur.fetchone())[0] == 0, "run_purge must have actually purged the org"
     finally:
         await raw_conn.execute(
             "REVOKE EXECUTE ON FUNCTION organizations_pending_purge(interval) "
-            "FROM test_no_privilege_caller"
+            "FROM test_purge_job_runner"
         )
-        await raw_conn.execute("REVOKE USAGE ON SCHEMA public FROM test_no_privilege_caller")
-        await raw_conn.execute("DROP ROLE test_no_privilege_caller")
+        await raw_conn.execute(
+            "REVOKE EXECUTE ON FUNCTION purge_scheduled_orgs(interval) "
+            "FROM test_purge_job_runner"
+        )
+        await raw_conn.execute(
+            "REVOKE EXECUTE ON FUNCTION accounts_pending_identity_purge() "
+            "FROM test_purge_job_runner"
+        )
+        await raw_conn.execute("REVOKE USAGE ON SCHEMA public FROM test_purge_job_runner")
+        await raw_conn.execute("DROP ROLE test_purge_job_runner")
         await raw_conn.commit()
 
 
@@ -370,14 +438,14 @@ async def test_purge_pending_identities_calls_the_documented_admin_api_endpoint(
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         n = await purge_pending_identities(
             db_url,
-            supabase_url="https://khohfrfqzbieaiikqlsa.supabase.co",
+            supabase_url="https://x.supabase.co",
             service_role_key="sr-key-abc",
             http=client,
         )
 
     assert n == 1
     assert seen["method"] == "DELETE"
-    assert seen["url"] == f"https://khohfrfqzbieaiikqlsa.supabase.co/auth/v1/admin/users/{carol}"
+    assert seen["url"] == f"https://x.supabase.co/auth/v1/admin/users/{carol}"
     assert seen["apikey"] == "sr-key-abc"
     assert seen["authorization"] == "Bearer sr-key-abc"
     assert await _tombstone(raw_conn, carol) == 0
@@ -455,9 +523,14 @@ async def test_purge_pending_identities_treats_a_race_with_another_run_as_succes
 async def test_purge_pending_identities_does_not_abort_when_one_identity_fails(
     raw_conn, seeded, db_url
 ):
-    """One bad identity must not stop the rest of an unattended run --
+    """One bad identity must not stop the REST of an unattended run --
     otherwise a single persistently-failing account (or just one bad HTTP
     response) would silently block every other deletion behind it forever.
+    That is still true: the loop below processes `bad` and `good` regardless
+    of order. But review Important-2: the run as a WHOLE must not then
+    report success -- `purge_pending_identities` now raises
+    `PartialIdentityPurgeError` (carrying the split) once every pending id
+    has been attempted, rather than silently returning a lower count.
     """
     good = await make_user(raw_conn, "good@acme-diner.example.com")
     bad = await make_user(raw_conn, "bad@acme-diner.example.com")
@@ -475,11 +548,13 @@ async def test_purge_pending_identities_does_not_abort_when_one_identity_fails(
         return httpx.Response(200, json={"id": str(good)})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        n = await purge_pending_identities(
-            db_url, supabase_url="https://x.supabase.co", service_role_key="k", http=client,
-        )
+        with pytest.raises(purge_module.PartialIdentityPurgeError) as exc_info:
+            await purge_pending_identities(
+                db_url, supabase_url="https://x.supabase.co", service_role_key="k", http=client,
+            )
 
-    assert n == 1, "the good identity must still be purged despite the bad one failing"
+    assert exc_info.value.purged == 1, "the good identity must still be purged"
+    assert exc_info.value.failed == 1
     assert await _tombstone(raw_conn, good) == 0
     assert await _tombstone(raw_conn, bad) == 1, "the failed one must survive for a retry"
 
@@ -491,8 +566,9 @@ async def test_purge_pending_identities_does_not_clear_a_tombstone_that_lied_abo
     tombstone for an identity that still exists? Simulated with an Admin
     API that returns 200 without actually removing the row -- a
     misbehaving or misconfigured endpoint. The job must not trust the
-    status code alone; it must not count this as purged, and the tombstone
-    must survive for the next run to catch.
+    status code alone; it must not count this as purged, the tombstone must
+    survive for the next run to catch, and (review Important-2) the run
+    must be reported as failed rather than a quiet `0`.
     """
     erin = await make_user(raw_conn, "erin@acme-diner.example.com")
     await raw_conn.execute("DELETE FROM profiles WHERE user_id = %s", (erin,))
@@ -503,12 +579,63 @@ async def test_purge_pending_identities_does_not_clear_a_tombstone_that_lied_abo
         return httpx.Response(200, json={"id": str(erin)})  # never actually deletes anything
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(lying_handler)) as client:
-        n = await purge_pending_identities(
-            db_url, supabase_url="https://x.supabase.co", service_role_key="k", http=client,
-        )
+        with pytest.raises(purge_module.PartialIdentityPurgeError) as exc_info:
+            await purge_pending_identities(
+                db_url, supabase_url="https://x.supabase.co", service_role_key="k", http=client,
+            )
 
-    assert n == 0, "a 200 that did not actually remove the identity must not count as purged"
+    assert exc_info.value.purged == 0, "a 200 that did not actually remove the identity must not count as purged"
+    assert exc_info.value.failed == 1
     assert await _tombstone(raw_conn, erin) == 1, "the tombstone must survive for a retry"
+
+
+async def test_run_all_is_non_zero_when_every_pending_identity_fails(raw_conn, seeded, db_url):
+    """Review Important-2's exact reproduction: with the Admin API returning
+    500 for every one of three pending identities, the previous version of
+    this job had `purge_pending_identities` return `0` and raise nothing,
+    `run_all` return `(0, 0)`, and `__main__` exit 0 -- a permanently broken
+    Supabase credential or a total Admin API outage was indistinguishable
+    from an idle night with nothing pending, for the exact half of this job
+    that exists to satisfy App Store 5.1.1(v). Driven through `run_all`
+    itself (not just `purge_pending_identities` in isolation), with the org
+    half a no-op, so the ONLY thing that can make this fail is the identity
+    half's own accounting.
+    """
+    ids = [
+        await make_user(raw_conn, f"allfail{i}@acme-diner.example.com") for i in range(3)
+    ]
+    for uid in ids:
+        await raw_conn.execute("DELETE FROM profiles WHERE user_id = %s", (uid,))
+        await raw_conn.execute("INSERT INTO deleted_accounts (user_id) VALUES (%s)", (uid,))
+    await raw_conn.commit()
+
+    async def always_500(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="Supabase Admin API unreachable")
+
+    async def fake_orgs(db_url, storage_delete=None):
+        return 0
+
+    async def real_identities_with_failing_transport(db_url, **kwargs):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(always_500)) as client:
+            return await purge_pending_identities(
+                db_url, supabase_url="https://x.supabase.co", service_role_key="k",
+                http=client,
+            )
+
+    import unittest.mock
+    with unittest.mock.patch.object(purge_module, "run_purge", fake_orgs), \
+         unittest.mock.patch.object(
+             purge_module, "purge_pending_identities", real_identities_with_failing_transport
+         ):
+        with pytest.raises(RuntimeError, match="identities") as exc_info:
+            await run_all(db_url)
+
+    assert exc_info.value.orgs_purged == 0
+    assert exc_info.value.identities_purged == 0, (
+        "all three failed, so zero identities were actually purged this run"
+    )
+    for uid in ids:
+        assert await _tombstone(raw_conn, uid) == 1, "every failed identity must survive for a retry"
 
 
 async def test_purge_pending_identities_requires_supabase_credentials(db_url, seeded):
@@ -547,10 +674,11 @@ async def test_purge_pending_identities_never_logs_the_service_role_key(
 
     with caplog.at_level("DEBUG"):
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            await purge_pending_identities(
-                db_url, supabase_url="https://x.supabase.co", service_role_key=secret,
-                http=client,
-            )
+            with pytest.raises(purge_module.PartialIdentityPurgeError):
+                await purge_pending_identities(
+                    db_url, supabase_url="https://x.supabase.co", service_role_key=secret,
+                    http=client,
+                )
     assert secret not in caplog.text
 
 
