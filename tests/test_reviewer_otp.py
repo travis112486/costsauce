@@ -24,12 +24,27 @@ Two deviations from the brief, both noted in task-8-report.md:
    read, not a false pass. Confirmed by running them.
 """
 import jwt
+import pytest
 
+import api.routes.identity as identity_module
 from tests.test_auth import ISSUER, SECRET, mint
 
 REVIEWER_EMAIL = "reviewer@example.com"
 REVIEWER_CODE = "424242"
 REVIEWER_USER_ID = "00000000-0000-7000-8000-0000000000f1"
+
+
+@pytest.fixture(autouse=True)
+def _reset_reviewer_otp_throttle(monkeypatch):
+    """Security fix (rate limiting): the throttle counters are in-process
+    module state, not a DB row, so they persist across `app_client`'s fresh
+    per-test FastAPI app unless explicitly cleared. `monkeypatch` is already
+    function-scoped for every env var this file sets; resetting the throttle
+    state through it the same way keeps isolation uniform -- nothing any
+    test here does can leak into the next one, regardless of run order.
+    """
+    monkeypatch.setattr(identity_module, "_reviewer_otp_ip_window", {})
+    monkeypatch.setattr(identity_module, "_reviewer_otp_global_failures", 0)
 
 
 async def test_reviewer_otp_disabled_by_default(app_client):
@@ -107,3 +122,91 @@ async def test_reviewer_otp_refuses_when_expected_code_is_unset(app_client, monk
     r = await app_client.post("/auth/reviewer-otp",
                               json={"email": REVIEWER_EMAIL, "code": ""})
     assert r.status_code == 403
+
+
+async def test_reviewer_otp_refuses_when_expected_email_is_unset(app_client, monkeypatch):
+    """Minor left open by the Task 8 review: the REVIEWER_EMAIL-unset arm of
+    the same fail-closed guard was only argued (EmailStr blocks `email: ""`,
+    so `ok_email` can never be true against an empty expected value), never
+    exercised. A misconfigured deployment (REVIEWER_OTP_ENABLED=1 but
+    REVIEWER_EMAIL never set) must not become an open door for anyone who
+    knows/guesses the reviewer code.
+    """
+    monkeypatch.setenv("REVIEWER_OTP_ENABLED", "1")
+    monkeypatch.delenv("REVIEWER_EMAIL", raising=False)
+    monkeypatch.setenv("REVIEWER_CODE", REVIEWER_CODE)
+    r = await app_client.post("/auth/reviewer-otp",
+                              json={"email": "anyone@example.com", "code": REVIEWER_CODE})
+    assert r.status_code == 403
+
+
+async def test_reviewer_otp_throttles_repeated_wrong_codes_per_ip(app_client, monkeypatch):
+    monkeypatch.setenv("REVIEWER_OTP_ENABLED", "1")
+    monkeypatch.setenv("REVIEWER_EMAIL", REVIEWER_EMAIL)
+    monkeypatch.setenv("REVIEWER_CODE", REVIEWER_CODE)
+
+    for _ in range(identity_module._REVIEWER_OTP_IP_MAX_ATTEMPTS):
+        r = await app_client.post("/auth/reviewer-otp",
+                                  json={"email": REVIEWER_EMAIL, "code": "000000"})
+        assert r.status_code == 403
+
+    r = await app_client.post("/auth/reviewer-otp",
+                              json={"email": REVIEWER_EMAIL, "code": "000000"})
+    assert r.status_code == 429
+    assert "Retry-After" in r.headers
+
+
+async def test_reviewer_otp_does_not_throttle_a_correct_code(app_client, monkeypatch):
+    """Do not throttle successes, only failures -- a reviewer retrying a
+    correct code (e.g. after a flaky network call) must never be locked out
+    by their own prior successes."""
+    monkeypatch.setenv("REVIEWER_OTP_ENABLED", "1")
+    monkeypatch.setenv("REVIEWER_EMAIL", REVIEWER_EMAIL)
+    monkeypatch.setenv("REVIEWER_CODE", REVIEWER_CODE)
+    monkeypatch.setenv("REVIEWER_USER_ID", REVIEWER_USER_ID)
+
+    for _ in range(identity_module._REVIEWER_OTP_IP_MAX_ATTEMPTS + 2):
+        r = await app_client.post("/auth/reviewer-otp",
+                                  json={"email": REVIEWER_EMAIL, "code": REVIEWER_CODE})
+        assert r.status_code == 200
+
+
+async def test_reviewer_otp_disabled_flag_beats_active_throttle(app_client, monkeypatch):
+    """A throttled response must never reveal the endpoint exists when the
+    flag is off -- the disabled check runs first, unchanged."""
+    monkeypatch.setenv("REVIEWER_OTP_ENABLED", "1")
+    monkeypatch.setenv("REVIEWER_EMAIL", REVIEWER_EMAIL)
+    monkeypatch.setenv("REVIEWER_CODE", REVIEWER_CODE)
+    for _ in range(identity_module._REVIEWER_OTP_IP_MAX_ATTEMPTS):
+        await app_client.post("/auth/reviewer-otp",
+                              json={"email": REVIEWER_EMAIL, "code": "000000"})
+    # Confirm it is actually throttled first, so the next assertion proves
+    # the disabled check pre-empts it rather than the throttle never firing.
+    r = await app_client.post("/auth/reviewer-otp",
+                              json={"email": REVIEWER_EMAIL, "code": "000000"})
+    assert r.status_code == 429
+
+    monkeypatch.delenv("REVIEWER_OTP_ENABLED", raising=False)
+    r2 = await app_client.post("/auth/reviewer-otp",
+                               json={"email": REVIEWER_EMAIL, "code": "000000"})
+    assert r2.status_code == 404
+
+
+async def test_reviewer_otp_global_ceiling_disables_endpoint_across_ips(app_client, monkeypatch):
+    """A few dozen total failed attempts disables the endpoint regardless of
+    source IP -- IP rotation must not defeat the backstop. Failures are
+    simulated across many distinct IPs (bypassing the HTTP layer, which
+    cannot vary the test client's real transport IP per request) so the
+    per-IP cap never trips, isolating the global ceiling specifically.
+    """
+    monkeypatch.setenv("REVIEWER_OTP_ENABLED", "1")
+    monkeypatch.setenv("REVIEWER_EMAIL", REVIEWER_EMAIL)
+    monkeypatch.setenv("REVIEWER_CODE", REVIEWER_CODE)
+
+    for i in range(identity_module._REVIEWER_OTP_GLOBAL_FAILURE_CEILING):
+        identity_module._reviewer_otp_record_failure(f"203.0.113.{i % 254 + 1}")
+
+    r = await app_client.post("/auth/reviewer-otp",
+                              json={"email": REVIEWER_EMAIL, "code": REVIEWER_CODE})
+    assert r.status_code == 429
+    assert "Retry-After" in r.headers

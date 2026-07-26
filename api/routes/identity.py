@@ -158,7 +158,64 @@ async def verify_contact_email(
     return {"verified": True}
 
 
-async def reviewer_otp(body: ReviewerOtpIn):
+# --- reviewer_otp throttling ------------------------------------------------
+# Security fix: this endpoint accepted unlimited POSTs with no backoff. The
+# flag is not hypothetical -- it WILL be set during App Store review, which
+# runs for days, and a short numeric code with no throttle falls in minutes.
+# In-process state, deliberately: this is one short-lived, deliberately
+# narrow path (App Review only), not general-purpose rate-limiting
+# middleware, and a dependency is not warranted for it.
+#
+# Two independent guards, both counting FAILURES ONLY -- a correct code must
+# never cost a reviewer their own budget, and one caller's mistakes must not
+# spend another caller's:
+#   1. Per-IP fixed window: a small cap of wrong attempts per source IP per
+#      window, then 429 + Retry-After until the window rolls over.
+#   2. Global failure ceiling: since IP rotation defeats guard 1, a few dozen
+#      total failed attempts across the whole process disables the endpoint
+#      (429) until restart -- App Review signs in a handful of times; well
+#      past that is an attack, not an operational hiccup.
+# Neither guard runs before the disabled check: a throttled response must
+# never reveal the endpoint exists when REVIEWER_OTP_ENABLED is off.
+_REVIEWER_OTP_IP_WINDOW_SECONDS = 60
+_REVIEWER_OTP_IP_MAX_ATTEMPTS = 5
+_REVIEWER_OTP_GLOBAL_FAILURE_CEILING = 30
+
+_reviewer_otp_ip_window: dict[str, tuple[float, int]] = {}
+_reviewer_otp_global_failures = 0
+
+
+def _reviewer_otp_client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def _reviewer_otp_ip_retry_after(ip: str) -> int | None:
+    """Seconds to wait if `ip` is currently over its window cap, else None.
+
+    Read-only: does not record anything, so a legitimate call under the cap
+    is never charged just for being checked.
+    """
+    window_start, count = _reviewer_otp_ip_window.get(ip, (0.0, 0))
+    elapsed = time.time() - window_start
+    if elapsed >= _REVIEWER_OTP_IP_WINDOW_SECONDS:
+        return None
+    if count >= _REVIEWER_OTP_IP_MAX_ATTEMPTS:
+        return max(1, int(_REVIEWER_OTP_IP_WINDOW_SECONDS - elapsed))
+    return None
+
+
+def _reviewer_otp_record_failure(ip: str) -> None:
+    """Called once per rejected attempt only -- never for a success."""
+    global _reviewer_otp_global_failures
+    _reviewer_otp_global_failures += 1
+    now = time.time()
+    window_start, count = _reviewer_otp_ip_window.get(ip, (now, 0))
+    if now - window_start >= _REVIEWER_OTP_IP_WINDOW_SECONDS:
+        window_start, count = now, 0
+    _reviewer_otp_ip_window[ip] = (window_start, count + 1)
+
+
+async def reviewer_otp(body: ReviewerOtpIn, request: Request):
     """Fixed-credential sign-in for App Review only. Feature-flagged off.
 
     Registered on a bare /auth/reviewer-otp path in api/main.py, not under
@@ -166,11 +223,28 @@ async def reviewer_otp(body: ReviewerOtpIn):
     """
     if os.environ.get("REVIEWER_OTP_ENABLED") != "1":
         raise HTTPException(404, "not found")
+
+    if _reviewer_otp_global_failures >= _REVIEWER_OTP_GLOBAL_FAILURE_CEILING:
+        raise HTTPException(
+            429,
+            "reviewer sign-in is temporarily disabled after repeated failures",
+            headers={"Retry-After": str(_REVIEWER_OTP_IP_WINDOW_SECONDS)},
+        )
+
+    ip = _reviewer_otp_client_ip(request)
+    retry_after = _reviewer_otp_ip_retry_after(ip)
+    if retry_after is not None:
+        raise HTTPException(
+            429, "too many attempts, try again later",
+            headers={"Retry-After": str(retry_after)},
+        )
+
     expected_email = os.environ.get("REVIEWER_EMAIL", "")
     expected_code = os.environ.get("REVIEWER_CODE", "")
     ok_email = hmac.compare_digest(body.email.lower(), expected_email.lower())
     ok_code = hmac.compare_digest(body.code, expected_code)
     if not (expected_email and expected_code and ok_email and ok_code):
+        _reviewer_otp_record_failure(ip)
         raise HTTPException(403, "invalid reviewer credentials")
     token = jwt.encode(
         {"sub": os.environ["REVIEWER_USER_ID"], "aud": "authenticated",
