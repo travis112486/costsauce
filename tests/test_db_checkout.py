@@ -3,7 +3,7 @@ import json
 import psycopg
 import pytest
 from tests.conftest import apply_migrations
-from api.db import pool_open, tenant_connection
+from api.db import ClaimsLeakError, pool_open, tenant_connection
 
 
 def app_url(url: str) -> str:
@@ -37,10 +37,21 @@ async def test_app_user_cannot_bypass_rls_by_any_route(raw_conn):
        ROW LEVEL SECURITY. So "app_user has no BYPASSRLS" means nothing if a
        future migration ever leaves app_user owning a table.
 
-    Both are checked with pg_has_role(..., 'MEMBER'), which is transitive, so
-    they keep holding however deep a future grant chain gets.
+    Both are checked with pg_has_role(..., 'MEMBER') -- membership, not
+    'USAGE' -- because SET ROLE follows membership regardless of NOINHERIT,
+    and pg_has_role is transitive, so this keeps holding however deep a future
+    grant chain gets.
+
+    Uniquely in this file, this test applies EVERY migration (`upto=None`)
+    rather than stopping at 3. The regression it names is a *future*
+    migration -- an `ALTER TABLE ... OWNER TO app_user` landing in 0004+ --
+    and `raw_conn` rebuilds schema `public` per test, so `upto=3` would mean
+    later migrations are never applied and the guarantee would be asserted
+    only against tables this task already knows about. This test reads
+    catalogs only, so enabling RLS in Task 4 cannot destabilise it; the other
+    tests keep `upto=3` deliberately.
     """
-    await apply_migrations(raw_conn, upto=3)
+    await apply_migrations(raw_conn, upto=None)
     cur = await raw_conn.execute(
         "SELECT rolname FROM pg_roles"
         " WHERE (rolbypassrls OR rolsuper)"
@@ -52,10 +63,14 @@ async def test_app_user_cannot_bypass_rls_by_any_route(raw_conn):
         "RLS is bypassable and every Task 4 policy is decoration"
     )
 
+    # 'auth' as well as 'public': auth.users lives there and 0003 grants it to
+    # authenticated. relkind 'p' as well as 'r': partitioned tables carry RLS
+    # policies exactly like ordinary ones, so an owned partitioned table is the
+    # same bypass.
     cur = await raw_conn.execute(
-        "SELECT c.relname FROM pg_class c"
+        "SELECT n.nspname || '.' || c.relname FROM pg_class c"
         "  JOIN pg_namespace n ON n.oid = c.relnamespace"
-        " WHERE n.nspname = 'public' AND c.relkind = 'r'"
+        " WHERE n.nspname IN ('public', 'auth') AND c.relkind IN ('r', 'p')"
         "   AND pg_has_role('app_user', c.relowner, 'MEMBER')"
     )
     owned = [row[0] for row in await cur.fetchall()]
@@ -90,6 +105,36 @@ async def test_claims_are_cleared_after_rollback(raw_conn, db_url):
         cur = await conn.execute("SELECT current_setting('request.jwt.claims', true)")
         (claims,) = await cur.fetchone()
         assert json.loads(claims)["sub"] == "user-d"
+    await pool.close()
+
+
+async def test_a_leaked_claim_from_a_bare_set_is_detected(raw_conn, db_url):
+    """Covers the ClaimsLeakError canary, which nothing else touches.
+
+    Deleting the canary from api/db.py leaves every other test in this file
+    green, which makes it read as dead code to a future refactor. It is not:
+    it is the *only* detector for a whole class of leak. Note that removing it
+    composes with a second defect to defeat the suite entirely -- with the
+    canary gone AND the claims set session-wide instead of SET LOCAL, checkout
+    1 writes `user-a` and reads `user-a`, checkout 2 overwrites with `user-b`
+    and reads `user-b`, so test_claims_do_not_survive_checkout passes while
+    claims are in fact persisting on the pooled connection the whole time.
+
+    So simulate the leak directly: poison a pooled connection with a bare SET,
+    commit it so it survives the pool's rollback-on-return, and require the
+    next tenant_connection to refuse to hand it out. This is also the only
+    direct assertion on ClaimsLeakError, which the brief lists as a Produced
+    interface.
+    """
+    await apply_migrations(raw_conn, upto=3)
+    pool = await pool_open(app_url(db_url))
+    async with pool.connection() as conn:
+        await conn.execute("SET request.jwt.claims = '{\"sub\": \"ghost\"}'")
+        await conn.commit()
+
+    with pytest.raises(ClaimsLeakError, match="ghost"):
+        async with tenant_connection(pool, {"sub": "user-g"}):
+            pass  # pragma: no cover -- checkout must fail before the body runs
     await pool.close()
 
 
