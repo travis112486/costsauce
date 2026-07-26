@@ -38,15 +38,6 @@ async def test_linking_by_matching_email_is_refused(app_client, raw_conn, seeded
     assert r.json()["memberships"] == [], "linked on email — account takeover"
 
 
-async def test_link_confirm_requires_valid_token(app_client, seeded):
-    r = await app_client.post(
-        "/identity/apple/link-confirm",
-        json={"token": "not-a-real-token"},
-        headers={"Authorization": f"Bearer {mint(str(seeded['alice']))}"},
-    )
-    assert r.status_code == 400
-
-
 async def test_contact_email_starts_unverified(app_client, seeded):
     hdr = {"Authorization": f"Bearer {mint(str(seeded['alice']))}"}
     # Review fix (Important-5): a real, non-reserved domain, not `.test` --
@@ -183,150 +174,31 @@ async def test_contact_email_verify_token_is_single_use(app_client, raw_conn, se
 
 
 # ---------------------------------------------------------------------------
-# Review fix (Important-6): apple/link-request had zero test coverage.
+# Apple account linking (POST /identity/apple/link-request and
+# /apple/link-confirm) is DESCOPED to Phase 2a -- Travis's call, Task 7
+# review. The tests that exercised those two endpoints (including the one
+# proving the account-takeover primitive is absent, and the one pinning the
+# cross-account RLS defect below) are removed along with the endpoints. The
+# knowledge is NOT discarded -- it lives in api/routes/identity.py's
+# module-level comment and in task-7-report.md ("apple_sub coherence"):
+#
+#   Migration 0004's `apple_link_self` RLS policy restricts
+#   `apple_link_requests` to rows whose `apple_sub` equals the CALLER'S OWN
+#   sub (`USING (apple_sub = current_jwt_sub())`, a FOR ALL policy). Since
+#   `apple_link_request` inserted the requesting session's own `caller.user_id`
+#   as `apple_sub`, a *different*, existing account could never see or delete
+#   a row a brand-new Apple session created -- RLS silently returned zero
+#   rows for a token that was, in fact, perfectly valid, making cross-account
+#   confirm (the feature's entire purpose) structurally unreachable. Confirmed
+#   empirically in Task 7, and the underlying mechanism is independently
+#   pinned by tests/test_rls_policies.py::test_update_or_delete_of_another_tenants_row_touches_nothing.
+#
+# When Phase 2a rebuilds these endpoints (target-account column, a
+# SECURITY DEFINER token_hash lookup, and identity resolution that consults
+# apple_sub -- see identity.py's comment for all three), re-add tests
+# covering: happy-path link-request, happy-path cross-account confirm asserting
+# profiles.apple_sub actually changed, cross-user token rejection, invalid/
+# expired token rejection, no-profile-to-link-to, and the UNIQUE collision on
+# profiles.apple_sub surfacing as a 409 rather than a 500 -- all of which
+# existed here before this descope and were removed with the endpoints.
 # ---------------------------------------------------------------------------
-async def test_apple_link_request_creates_a_pending_row(app_client, raw_conn, seeded):
-    hdr = {"Authorization": f"Bearer {mint(str(seeded['bob']))}"}
-    r = await app_client.post("/identity/apple/link-request", headers=hdr)
-    assert r.status_code == 200
-    assert r.json() == {"link_token_sent": True}
-
-    cur = await raw_conn.execute(
-        "SELECT apple_sub, expires_at > now() FROM apple_link_requests WHERE apple_sub = %s",
-        (str(seeded["bob"]),),
-    )
-    row = await cur.fetchone()
-    assert row is not None, "no pending row was created for the requesting caller"
-    assert row[0] == str(seeded["bob"])
-    assert row[1] is True, "expires_at must be in the future"
-
-
-# ---------------------------------------------------------------------------
-# Review fix (Important-2): apple_link_confirm must not report success when
-# nothing was actually linked.
-# ---------------------------------------------------------------------------
-async def test_apple_link_confirm_reports_failure_when_nothing_to_link(app_client, raw_conn, seeded):
-    """A valid, unexpired token whose caller has no `profiles` row must not
-    return {"linked": True} -- there is nothing to link it to."""
-    new_sub = "00000000-0000-7000-8000-0000000000dd"
-    await raw_conn.execute(
-        "INSERT INTO auth.users (id, email) VALUES (%s, 'relay3@privaterelay.appleid.com')",
-        (new_sub,),
-    )
-    # Deliberately no profiles row for new_sub.
-    token = "no-profile-to-link-token"
-    await raw_conn.execute(
-        "INSERT INTO apple_link_requests (apple_sub, token_hash, expires_at) VALUES (%s, %s, %s)",
-        (new_sub, _hash(token), datetime.now(timezone.utc) + timedelta(minutes=30)),
-    )
-    await raw_conn.commit()
-
-    r = await app_client.post(
-        "/identity/apple/link-confirm", json={"token": token},
-        headers={"Authorization": f"Bearer {mint(new_sub)}"},
-    )
-    assert r.status_code == 400
-
-
-# ---------------------------------------------------------------------------
-# Review fix (Important-3): a UNIQUE collision on profiles.apple_sub must
-# surface as a clean 4xx, not an unhandled 500.
-# ---------------------------------------------------------------------------
-async def test_apple_link_confirm_returns_409_not_500_on_already_linked_apple_id(
-    app_client, raw_conn, seeded
-):
-    """`profiles.apple_sub` is UNIQUE. Plants the "already linked elsewhere"
-    precondition directly via raw_conn -- the legitimate cross-account path
-    to reach this state is currently blocked by the RLS defect tracked
-    separately (see task-7-report.md, "apple_sub coherence" / Finding 4,
-    left untouched this round per the coordinator) -- but the constraint and
-    this error-handling path are both real regardless of how the precondition
-    arises, and become the primary failure mode once that RLS gap is fixed.
-    """
-    colliding_value = str(seeded["alice"])
-    await raw_conn.execute(
-        "UPDATE profiles SET apple_sub = %s WHERE user_id = %s",
-        (colliding_value, seeded["bob"]),
-    )
-    token = "collision-token"
-    await raw_conn.execute(
-        "INSERT INTO apple_link_requests (apple_sub, token_hash, expires_at) VALUES (%s, %s, %s)",
-        (colliding_value, _hash(token), datetime.now(timezone.utc) + timedelta(minutes=30)),
-    )
-    await raw_conn.commit()
-
-    r = await app_client.post(
-        "/identity/apple/link-confirm", json={"token": token},
-        headers={"Authorization": f"Bearer {mint(str(seeded['alice']))}"},
-    )
-    assert r.status_code == 409
-    assert "already linked" in r.json()["detail"].lower()
-    cur = await raw_conn.execute(
-        "SELECT apple_sub FROM profiles WHERE user_id = %s", (seeded["bob"],)
-    )
-    assert (await cur.fetchone())[0] == colliding_value, "Bob's existing link must be untouched"
-
-
-# ---------------------------------------------------------------------------
-# Known limitation, not a Task 7 fix this round -- see task-7-report.md,
-# "apple_sub coherence" (Finding 4, explicitly deferred to the human partner
-# as a scope decision). Migration 0004's `apple_link_self` RLS policy
-# restricts `apple_link_requests` to rows whose `apple_sub` equals the
-# CALLER'S OWN sub, so a *different*, existing account can never see a row
-# created by a brand-new Apple session -- making the feature's actual
-# purpose (cross-account linking) structurally unreachable. Task 5's own
-# regression suite already proves the underlying mechanism
-# (tests/test_rls_policies.py::test_update_or_delete_of_another_tenants_row_touches_nothing);
-# this test shows the same gap from the HTTP surface, and additionally
-# confirms (Important-2 fix) that the one case RLS *does* allow --
-# self-referential confirm -- genuinely writes profiles.apple_sub rather
-# than just returning a 200 with nothing changed.
-# ---------------------------------------------------------------------------
-async def test_apple_link_confirm_cannot_complete_cross_account_link(app_client, raw_conn, seeded):
-    apple_sub = "00000000-0000-7000-8000-0000000000cc"
-    await raw_conn.execute(
-        "INSERT INTO auth.users (id, email) VALUES (%s, 'relay2@privaterelay.appleid.com')",
-        (apple_sub,),
-    )
-    # Gives the fabricated Apple session a profiles row, so the one path RLS
-    # currently allows (self-referential confirm) can genuinely succeed
-    # rather than being masked by the Important-2 "no profile to link" guard.
-    await raw_conn.execute(
-        "INSERT INTO profiles (user_id, contact_email) VALUES (%s, 'relay2@privaterelay.appleid.com')",
-        (apple_sub,),
-    )
-    token = "a-known-plaintext-token-for-testing-only"
-    await raw_conn.execute(
-        "INSERT INTO apple_link_requests (apple_sub, token_hash, expires_at) VALUES (%s, %s, %s)",
-        (apple_sub, _hash(token), datetime.now(timezone.utc) + timedelta(minutes=30)),
-    )
-    await raw_conn.commit()
-
-    # Alice -- an existing, different account -- tries to confirm the link
-    # with the real token. This is the product's actual flow, and it fails.
-    r = await app_client.post(
-        "/identity/apple/link-confirm",
-        json={"token": token},
-        headers={"Authorization": f"Bearer {mint(str(seeded['alice']))}"},
-    )
-    assert r.status_code == 400, (
-        "cross-account confirm succeeded -- if migration 0004's RLS was "
-        "fixed, rewrite this test to assert success and profiles.apple_sub"
-    )
-
-    # The row is untouched -- RLS filtered it out of the DELETE entirely, it
-    # was not consumed -- so the *same* Apple session can still confirm its
-    # own (self-referential, and thus product-useless) request. This is the
-    # only case the current RLS policy actually permits, and it must
-    # genuinely write profiles.apple_sub, not just return 200.
-    r2 = await app_client.post(
-        "/identity/apple/link-confirm",
-        json={"token": token},
-        headers={"Authorization": f"Bearer {mint(apple_sub)}"},
-    )
-    assert r2.status_code == 200
-    assert r2.json() == {"linked": True}
-    cur = await raw_conn.execute("SELECT apple_sub FROM profiles WHERE user_id = %s", (apple_sub,))
-    row = await cur.fetchone()
-    assert row is not None and row[0] == apple_sub, \
-        "the 200 response must correspond to an actual write, not a no-op"
