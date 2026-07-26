@@ -34,6 +34,30 @@ async def _require_owner(conn, user_id: str, org_id: str):
         raise HTTPException(403, "owner role required")
 
 
+async def _lock_org(conn, org_id: str) -> None:
+    """Serialize every owner-count-sensitive decision for one org.
+
+    Critical-2 fix (Task 9 review round 1): `_owner_count` alone is an
+    unlocked `SELECT count(*)`. Under READ COMMITTED, two concurrent
+    transactions each removing/demoting a DIFFERENT owner row of the SAME
+    org neither sees the other's uncommitted change, both read the same
+    stale higher count, both pass their own last-owner check, both commit --
+    zero owners survive. This is textbook write skew; a plain re-check
+    (even inside a trigger) does not fix it without an actual lock, because
+    the same READ COMMITTED visibility rules apply there too.
+
+    Every one of the four call sites that can add, remove, or change an
+    owner's role for an org (this file's create_invite max_members check,
+    change_role, remove_member, and migration 0006's accept_invite_tx) takes
+    this SAME `FOR UPDATE` lock on the org's own row FIRST. A concurrent
+    second transaction touching the same org blocks here until the first
+    commits, then reads counts fresh against the now-committed state --
+    closing the race for any pair of these four operations on one org,
+    without affecting concurrency across different orgs at all.
+    """
+    await conn.execute("SELECT 1 FROM organizations WHERE id = %s FOR UPDATE", (org_id,))
+
+
 async def _owner_count(conn, org_id: str) -> int:
     cur = await conn.execute(
         "SELECT count(*) FROM memberships WHERE org_id = %s AND role = 'owner'", (org_id,)
@@ -51,7 +75,12 @@ async def _check_member_limit(conn, org_id: str) -> None:
     pending (unaccepted, unexpired) invites: counting accepted members
     alone would let an owner fire off ten invites in one sitting and blow
     straight past the limit the moment they are all accepted.
+
+    Important-4 fix: this used to be an unlocked read, so N concurrent
+    POST /invites at count == limit-1 could all read the same pre-insert
+    count and all pass. `_lock_org` closes it the same way as Critical-2.
     """
+    await _lock_org(conn, org_id)
     cur = await conn.execute("SELECT plan FROM organizations WHERE id = %s", (org_id,))
     row = await cur.fetchone()
     if not row:
@@ -115,12 +144,15 @@ async def accept_invite(
     # every query fails with `relation "invites" does not exist`), so this
     # goes through tenant_connection like everything else and lets the one
     # narrow SQL function do the bypassing. It is still one row, found only
-    # by an unguessable token hash, writing only the caller's own membership.
+    # by an unguessable token hash whose caller-derived email must match,
+    # writing only the caller's own membership -- the function derives the
+    # caller's user_id itself (public.current_user_id(), same GUC
+    # tenant_connection sets), it is not passed in as an argument.
     token_hash = hashlib.sha256(body.token.encode()).hexdigest()
     async with tenant_connection(request.app.state.pool, caller.claims) as conn:
         cur = await conn.execute(
-            "SELECT status, out_org_id, out_role FROM accept_invite_tx(%s, %s)",
-            (token_hash, caller.user_id),
+            "SELECT status, out_org_id, out_role FROM accept_invite_tx(%s)",
+            (token_hash,),
         )
         status, org_id, role = await cur.fetchone()
     if status == "invalid":
@@ -139,6 +171,7 @@ async def change_role(
         raise HTTPException(422, "unknown role")
     async with tenant_connection(request.app.state.pool, caller.claims) as conn:
         await _require_owner(conn, caller.user_id, org_id)
+        await _lock_org(conn, org_id)
         if body.role != "owner" and await _owner_count(conn, org_id) == 1:
             cur = await conn.execute(
                 "SELECT 1 FROM memberships WHERE org_id = %s AND user_id = %s AND role = 'owner'",
@@ -168,6 +201,7 @@ async def remove_member(
 ):
     async with tenant_connection(request.app.state.pool, caller.claims) as conn:
         await _require_owner(conn, caller.user_id, org_id)
+        await _lock_org(conn, org_id)
         cur = await conn.execute(
             "SELECT role FROM memberships WHERE org_id = %s AND user_id = %s", (org_id, user_id)
         )
