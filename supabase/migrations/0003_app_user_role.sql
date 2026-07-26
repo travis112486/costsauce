@@ -1,8 +1,45 @@
 -- The role FastAPI connects as. Deliberately powerless.
+--
+-- Task 14 credential fix: this file used to read
+-- `CREATE ROLE app_user LOGIN PASSWORD 'app_pw' ...`. That literal is
+-- committed to git, so applying this migration verbatim to Supabase would
+-- make 'app_pw' the PRODUCTION password for the role the API server
+-- authenticates as -- readable by anyone who has ever cloned this
+-- repository. Two options considered and rejected: (1) a GUC/env-driven
+-- placeholder the runner substitutes -- rejected because nothing in this
+-- codebase's migration path does text substitution before executing a
+-- file (`tests/conftest.py`'s `apply_migrations` and Supabase's own
+-- `apply_migration` both send the file's bytes verbatim), so building that
+-- would be new untested infrastructure solely to smuggle a secret through a
+-- public file; (2) splitting CREATE ROLE from a same-file ALTER ROLE ...
+-- PASSWORD -- rejected because the password would still have to be a
+-- literal in a committed file, which is the exact defect being fixed, not
+-- a different file for it to live in.
+--
+-- Chosen instead: `app_user` is created NOLOGIN. It exists and (via the
+-- GRANT below) may become `authenticated`, but cannot authenticate AT ALL --
+-- with any password, known or not -- until an operator deliberately enables
+-- login out of band, against the running database directly, never through a
+-- file this repository tracks:
+--
+--     ALTER ROLE app_user WITH LOGIN PASSWORD '<a freshly generated secret>';
+--
+-- then puts the resulting connection string in `DATABASE_URL`. See
+-- docs/runbooks/phase-1a-deploy.md for the full step. This makes it
+-- structurally impossible to accidentally deploy a known password: there is
+-- no password for this migration to deploy, known or otherwise, and the
+-- role is inert until someone takes the deliberate, separate, unversioned
+-- step above.
+--
+-- The local test harness performs the disposable-container equivalent of
+-- that same operator step itself, immediately after every call to
+-- `apply_migrations` (tests/conftest.py) -- not here, so this file reads
+-- identically in every environment and a literal password never has a
+-- chance to reach git again.
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_user') THEN
-    CREATE ROLE app_user LOGIN PASSWORD 'app_pw' NOINHERIT NOBYPASSRLS NOSUPERUSER;
+    CREATE ROLE app_user NOLOGIN NOINHERIT NOBYPASSRLS NOSUPERUSER;
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
     CREATE ROLE authenticated NOLOGIN NOINHERIT NOBYPASSRLS NOSUPERUSER;

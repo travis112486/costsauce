@@ -111,6 +111,21 @@ async def apply_migrations(conn, upto: int | None = None) -> None:
         if upto is not None and number > upto:
             continue
         await conn.execute(path.read_text())
+    if upto is None or upto >= 3:
+        # Task 14 credential fix: migration 0003 creates `app_user` NOLOGIN,
+        # deliberately without a password -- see that file's header comment.
+        # A real deploy sets the password out of band, by hand, directly
+        # against Supabase (docs/runbooks/phase-1a-deploy.md); this harness
+        # performs the disposable-container equivalent of that same operator
+        # step right here, with a fixed, non-secret password every test
+        # file's own `app_url()` helper already assumes ("app_user:app_pw").
+        # Idempotent and safe to run every time this function runs, even
+        # when `app_user` already existed from an earlier call in the same
+        # session (roles are cluster-level and survive the `DROP SCHEMA
+        # public CASCADE` every test performs, per `_roles_bootstrapped`'s
+        # own docstring) -- ALTER ROLE ... PASSWORD is not additive, so
+        # repeating it cannot leave two passwords active.
+        await conn.execute("ALTER ROLE app_user LOGIN PASSWORD 'app_pw'")
     await conn.commit()
 
 
