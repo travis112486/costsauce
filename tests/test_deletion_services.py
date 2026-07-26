@@ -189,21 +189,42 @@ async def test_cancel_subscription_raises_when_key_missing_but_customer_present(
     assert fake.calls == []
 
 
-async def test_cancel_subscription_deletes_every_active_subscription(monkeypatch):
+async def test_cancel_subscription_deletes_every_billable_subscription(monkeypatch):
+    """Task 11 correction 5: this used to pass `status="active"` to Stripe,
+    which silently skipped `trialing`, `past_due` and `paused` subscriptions.
+    For a DELETION flow that is a money bug, not a nicety -- a trialing
+    subscription converts and starts charging a customer whose organization
+    no longer exists. The status filter is gone (Stripe's documented default
+    is "everything not canceled") and only genuinely terminal statuses are
+    skipped client-side. Fixture data below deliberately mixes statuses so a
+    regression back to active-only fails here.
+    """
     monkeypatch.setenv("STRIPE_API_KEY", "sk_test_fake")
+    deleted = []
 
     def handler(method, url, headers, post_data):
         if method == "get":
             body = json.dumps({
                 "object": "list",
-                "data": [{"id": "sub_1", "object": "subscription",
-                          "customer": "cus_123", "status": "active"}],
+                "data": [
+                    {"id": "sub_active", "object": "subscription",
+                     "customer": "cus_123", "status": "active"},
+                    {"id": "sub_trial", "object": "subscription",
+                     "customer": "cus_123", "status": "trialing"},
+                    {"id": "sub_pastdue", "object": "subscription",
+                     "customer": "cus_123", "status": "past_due"},
+                    {"id": "sub_paused", "object": "subscription",
+                     "customer": "cus_123", "status": "paused"},
+                    {"id": "sub_dead", "object": "subscription",
+                     "customer": "cus_123", "status": "incomplete_expired"},
+                ],
                 "has_more": False,
                 "url": "/v1/subscriptions",
             })
             return body, 200, {}
         if method == "delete":
-            body = json.dumps({"id": "sub_1", "object": "subscription",
+            deleted.append(url.rsplit("/", 1)[1])
+            body = json.dumps({"id": url.rsplit("/", 1)[1], "object": "subscription",
                                 "status": "canceled"})
             return body, 200, {}
         raise AssertionError(f"unexpected method {method}")
@@ -214,11 +235,11 @@ async def test_cancel_subscription_deletes_every_active_subscription(monkeypatch
     await cancel_subscription("cus_123")
 
     assert fake.calls[0]["method"] == "get"
-    assert fake.calls[0]["url"] == (
-        "https://api.stripe.com/v1/subscriptions?customer=cus_123&status=active"
+    assert fake.calls[0]["url"] == "https://api.stripe.com/v1/subscriptions?customer=cus_123"
+    assert deleted == ["sub_active", "sub_trial", "sub_pastdue", "sub_paused"], (
+        "every subscription that can still bill must be cancelled; a terminal "
+        "incomplete_expired one must not be re-deleted"
     )
-    assert fake.calls[1]["method"] == "delete"
-    assert fake.calls[1]["url"] == "https://api.stripe.com/v1/subscriptions/sub_1"
 
 
 async def test_cancel_subscription_wraps_stripe_errors(monkeypatch):
