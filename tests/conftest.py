@@ -1,6 +1,8 @@
 # tests/conftest.py
+import atexit
 import os
 import pathlib
+import signal
 import subprocess
 import time
 import uuid
@@ -8,6 +10,49 @@ import pytest
 import psycopg
 
 MIGRATIONS = pathlib.Path(__file__).parent.parent / "supabase" / "migrations"
+
+
+def _install_container_reaper(name: str):
+    """Defence in depth for the disposable container's cleanup.
+
+    The fixture's own `yield url` / `docker kill` teardown below only runs on a
+    normal pytest finalization pass. If the test process is interrupted before
+    that point -- SIGINT, SIGTERM from a CI job timeout, or an uncaught
+    exception elsewhere during session setup -- that teardown code never runs,
+    and `--rm` alone does not help: it only auto-removes a container after it
+    stops, it does not stop a still-running one. So without this, the
+    container leaks indefinitely.
+
+    This registers the same cleanup both as an `atexit` callback (covers
+    KeyboardInterrupt/SIGINT and uncaught exceptions, since Python still runs
+    atexit callbacks as it unwinds to a normal process exit) and as a SIGTERM
+    handler (Python installs no default handler for SIGTERM, so without this
+    the process would simply die without running atexit callbacks at all).
+
+    This is explicitly best-effort, not a guarantee: a SIGKILL or an OOM-kill
+    of this process leaves no code running in-process to catch it, and no
+    signal handler or atexit hook can change that. The residual leak risk in
+    that narrow case is accepted; everything else is now covered.
+    """
+
+    def cleanup(*_a):
+        subprocess.run(["docker", "kill", name], capture_output=True)
+
+    atexit.register(cleanup)
+    prior_sigterm = signal.getsignal(signal.SIGTERM)
+
+    def _on_sigterm(signum, frame):
+        cleanup()
+        signal.signal(signal.SIGTERM, prior_sigterm)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
+
+    def uninstall():
+        atexit.unregister(cleanup)
+        signal.signal(signal.SIGTERM, prior_sigterm)
+
+    return cleanup, uninstall
 
 
 @pytest.fixture(scope="session")
@@ -23,6 +68,7 @@ def db_url() -> str:
          "-e", "POSTGRES_PASSWORD=postgres", "-P", "postgres:17"],
         check=True, capture_output=True,
     )
+    cleanup, uninstall = _install_container_reaper(name)
     port = subprocess.run(
         ["docker", "port", name, "5432/tcp"],
         check=True, capture_output=True, text=True,
@@ -37,7 +83,8 @@ def db_url() -> str:
     else:
         raise RuntimeError("test postgres never became ready")
     yield url
-    subprocess.run(["docker", "kill", name], capture_output=True)
+    cleanup()
+    uninstall()
 
 
 async def apply_migrations(conn, upto: int | None = None) -> None:
