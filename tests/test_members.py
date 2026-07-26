@@ -1,6 +1,7 @@
 # tests/test_members.py
 import asyncio
 import hashlib
+import uuid
 import pytest
 from fastapi import HTTPException
 from tests.conftest import apply_migrations, MIGRATIONS
@@ -733,3 +734,140 @@ async def test_accept_invite_tx_has_no_orphaned_two_arg_overload(raw_conn):
     assert signatures == ["p_token_hash text"], (
         f"expected exactly the 1-arg overload after the migration's DROP, found: {signatures}"
     )
+
+
+# Critical-2, round 3 (a THIRD distinct cause, introduced by round 2's own
+# advisory-lock fix): hashtextextended hashes whatever TEXT it is given, and
+# different valid spellings of the identical uuid ("...", "...".upper(), no
+# hyphens, braces) hash to DIFFERENT keys, even though every spelling
+# resolves to the same row everywhere else in this file (a `uuid` column
+# comparison normalizes case/format; a hash of the raw client-supplied
+# string does not). Round 1's row lock (`WHERE id = %s FOR UPDATE` against
+# a `uuid` column) never had this problem; switching to an advisory lock on
+# raw text is what introduced it. Fixed at the boundary: every route in
+# this file now types org_id/user_id path parameters as `uuid.UUID`, so
+# FastAPI/Pydantic normalizes every spelling to the identical object before
+# any handler runs.
+#
+# This proves the fix end-to-end: one side is a real HTTP request through
+# the actual (now uuid.UUID-typed) route, deliberately spelled with a
+# DIFFERENT case than the other side. `uuid.UUID(spelling)` is used to
+# derive the "held" side's key -- exactly what FastAPI/Pydantic does
+# internally to a path parameter, not a reimplementation of the fix.
+
+async def test_concurrent_removals_with_different_uuid_spellings_still_serialize(
+    pool, app_client, raw_conn, seeded
+):
+    # Each side removes ITSELF, with its OWN JWT -- not one side removing the
+    # other. (An earlier draft of this test had alice's request remove boss
+    # while alice's own membership was concurrently deleted by the other
+    # side: once alice's own row was gone, RLS's membership_select policy
+    # correctly hid boss's row from her too -- current_user_memberships()
+    # has nothing to return for a caller who is no longer a member of
+    # anything, so EVERY row in that org becomes invisible to her, not just
+    # her own. That is correct RLS behavior, not the bug under test, and it
+    # produced a misleading 404. Self-removal on both sides avoids it.)
+    boss = await make_user(raw_conn, "boss@acme.example.com")
+    await add_member(raw_conn, boss, seeded["acme"], "owner")
+    await raw_conn.commit()
+
+    org_id_canonical = uuid.UUID(str(seeded["acme"]))
+    org_id_uppercase_url = str(seeded["acme"]).upper()
+    assert org_id_uppercase_url != str(org_id_canonical), "fixture value must not already be upper"
+
+    lock_acquired = asyncio.Event()
+    proceed = asyncio.Event()
+
+    async def hold_lock_removing_alice():
+        async with tenant_connection(pool, {"sub": str(seeded["alice"])}) as conn:
+            await members_module._require_owner(conn, str(seeded["alice"]), org_id_canonical)
+            await members_module._lock_org(conn, org_id_canonical)
+            lock_acquired.set()
+            await proceed.wait()
+            cur = await conn.execute(
+                "SELECT role FROM memberships WHERE org_id = %s AND user_id = %s",
+                (org_id_canonical, seeded["alice"]),
+            )
+            (role,) = await cur.fetchone()
+            if role == "owner" and await members_module._owner_count(conn, org_id_canonical) == 1:
+                return "refused"
+            await conn.execute(
+                "DELETE FROM memberships WHERE org_id = %s AND user_id = %s",
+                (org_id_canonical, seeded["alice"]),
+            )
+            return "removed"
+
+    async def boss_removes_self_via_http_uppercase_spelling():
+        # boss removing himself, using his OWN JWT -- the org_id in the URL
+        # is deliberately spelled uppercase (a different, equally valid
+        # spelling from org_id_canonical above).
+        return await app_client.delete(
+            f"/orgs/{org_id_uppercase_url}/members/{boss}",
+            headers={"Authorization": f"Bearer {mint(str(boss))}"},
+        )
+
+    async def racer():
+        await lock_acquired.wait()
+        task = asyncio.create_task(boss_removes_self_via_http_uppercase_spelling())
+        await asyncio.sleep(0.3)
+        assert not task.done(), (
+            "a request spelled with a different (but equal) uuid case must still "
+            "block on the SAME org lock"
+        )
+        proceed.set()
+        return await task
+
+    alice_result, boss_response = await asyncio.gather(hold_lock_removing_alice(), racer())
+    assert alice_result == "removed"
+    assert boss_response.status_code == 409
+    assert "last owner" in str(boss_response.json()).lower()
+
+    cur = await raw_conn.execute(
+        "SELECT count(*) FROM memberships WHERE org_id = %s AND role = 'owner'",
+        (seeded["acme"],),
+    )
+    (n,) = await cur.fetchone()
+    assert n == 1, "org must be left with exactly one owner, never zero, regardless of URL spelling"
+
+    cur = await raw_conn.execute(
+        "SELECT count(*) FROM memberships WHERE org_id = %s AND role = 'owner'",
+        (seeded["acme"],),
+    )
+    (n,) = await cur.fetchone()
+    assert n == 1, "org must be left with exactly one owner, never zero, regardless of URL spelling"
+
+
+async def test_malformed_org_id_in_path_is_422_not_500(app_client, seeded):
+    """The uuid.UUID path typing that fixes the spelling-divergence race
+    above also closes this deferred minor as a side effect: a malformed id
+    now fails FastAPI/Pydantic validation before any handler runs, instead
+    of reaching Postgres and 500ing."""
+    r = await app_client.post(
+        "/orgs/not-a-uuid/invites",
+        json={"email": "dave@acme.example.com", "role": "manager"},
+        headers={"Authorization": f"Bearer {mint(str(seeded['alice']))}"},
+    )
+    assert r.status_code == 422
+
+
+# Minor (Task 9 review round 2): tests/conftest.py's app_client fixture sets
+# RETURN_INVITE_TOKEN_ENABLED=1 for every test so the rest of this file can
+# drive the accept_invite round trip, but nothing asserted the default
+# itself -- reverting the gate to an unconditional echo would break zero
+# tests. The gate itself is correct; this closes the missing coverage.
+
+async def test_create_invite_does_not_echo_token_without_the_enable_flag(
+    app_client, monkeypatch, raw_conn, seeded
+):
+    monkeypatch.delenv("RETURN_INVITE_TOKEN_ENABLED", raising=False)
+    await raw_conn.execute("UPDATE organizations SET plan = 'growth' WHERE id = %s",
+                            (seeded["acme"],))
+    await raw_conn.commit()
+    r = await app_client.post(
+        f"/orgs/{seeded['acme']}/invites",
+        json={"email": "dave@acme.example.com", "role": "manager"},
+        headers={"Authorization": f"Bearer {mint(str(seeded['alice']))}"},
+    )
+    assert r.status_code == 200
+    assert "token" not in r.json(), "token must not be echoed when the flag is unset"
+    assert "invite_id" in r.json()

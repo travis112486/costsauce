@@ -2,6 +2,7 @@
 import hashlib
 import os
 import secrets
+import uuid
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr
@@ -26,7 +27,7 @@ class RoleIn(BaseModel):
     role: str
 
 
-async def _require_owner(conn, user_id: str, org_id: str):
+async def _require_owner(conn, user_id: str, org_id: uuid.UUID):
     cur = await conn.execute(
         "SELECT 1 FROM memberships WHERE org_id = %s AND user_id = %s AND role = 'owner'",
         (org_id, user_id),
@@ -35,7 +36,7 @@ async def _require_owner(conn, user_id: str, org_id: str):
         raise HTTPException(403, "owner role required")
 
 
-async def _lock_org(conn, org_id: str) -> None:
+async def _lock_org(conn, org_id: uuid.UUID) -> None:
     """Serialize every owner-count-sensitive decision for one org.
 
     Critical-2 fix (Task 9 review round 1): `_owner_count` alone is an
@@ -67,13 +68,39 @@ async def _lock_org(conn, org_id: str) -> None:
     COMMIT/ROLLBACK), then reads counts fresh against the now-committed
     state -- closing the race for any pair of these four operations on one
     org, without affecting concurrency across different orgs at all.
+
+    Round 3 found a THIRD way this can fail: `hashtextextended` hashes
+    whatever TEXT it is given, and a `uuid` compared/cast in a WHERE clause
+    is normalized by Postgres, but a hash of the raw client-supplied string
+    is not -- "0198f1a2-...", "0198F1A2-...", the same value with no
+    hyphens, and the same value wrapped in braces all hash to FOUR DIFFERENT
+    keys, even though every one of them resolves to the identical `uuid` row
+    everywhere else in this file. Before this fix, `org_id` arrived here as
+    whatever string FastAPI pulled off the URL path, unvalidated. Reproduced
+    live: a SINGLE owner, one JWT, no second actor -- two concurrent
+    `DELETE .../members/<id>` requests for the SAME org, one spelled
+    lowercase and one spelled uppercase in the URL, BOTH succeeded, final
+    owner count 0. Round 1's row lock never had this problem (`WHERE id =
+    %s` against a `uuid` column coerces every spelling to the same value);
+    switching to an advisory lock on raw text is what introduced it.
+
+    Fixed at the boundary, not here: every route in this file now types its
+    `org_id`/`user_id` path parameters as `uuid.UUID` (see create_invite,
+    change_role, remove_member below), so FastAPI/Pydantic parses and
+    normalizes every valid spelling to the same object before any handler
+    runs -- `str(uuid.UUID(...))` is always canonical lowercase-hyphenated
+    form, so whatever reaches this function (and therefore whatever
+    `hashtextextended` hashes) is already uniform, regardless of how the
+    caller originally spelled it in the URL. This also means a malformed id
+    in the URL now 422s automatically instead of reaching Postgres and
+    500ing.
     """
     await conn.execute(
         "SELECT pg_advisory_xact_lock(hashtextextended(%s::text, 0))", (org_id,)
     )
 
 
-async def _owner_count(conn, org_id: str) -> int:
+async def _owner_count(conn, org_id: uuid.UUID) -> int:
     cur = await conn.execute(
         "SELECT count(*) FROM memberships WHERE org_id = %s AND role = 'owner'", (org_id,)
     )
@@ -81,7 +108,7 @@ async def _owner_count(conn, org_id: str) -> int:
     return n
 
 
-async def _check_member_limit(conn, org_id: str) -> None:
+async def _check_member_limit(conn, org_id: uuid.UUID) -> None:
     """Refuse to create another invite if doing so would exceed the org's
     plan's max_members.
 
@@ -123,7 +150,7 @@ async def _check_member_limit(conn, org_id: str) -> None:
 
 @router.post("/orgs/{org_id}/invites")
 async def create_invite(
-    org_id: str, body: InviteIn, request: Request,
+    org_id: uuid.UUID, body: InviteIn, request: Request,
     caller: CallerIdentity = Depends(require_caller),
 ):
     if body.role not in ROLES:
@@ -194,7 +221,7 @@ async def accept_invite(
 
 @router.patch("/orgs/{org_id}/members/{user_id}")
 async def change_role(
-    org_id: str, user_id: str, body: RoleIn, request: Request,
+    org_id: uuid.UUID, user_id: uuid.UUID, body: RoleIn, request: Request,
     caller: CallerIdentity = Depends(require_caller),
 ):
     if body.role not in ROLES:
@@ -226,7 +253,7 @@ async def change_role(
 
 @router.delete("/orgs/{org_id}/members/{user_id}")
 async def remove_member(
-    org_id: str, user_id: str, request: Request,
+    org_id: uuid.UUID, user_id: uuid.UUID, request: Request,
     caller: CallerIdentity = Depends(require_caller),
 ):
     async with tenant_connection(request.app.state.pool, caller.claims) as conn:
