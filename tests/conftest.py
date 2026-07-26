@@ -11,6 +11,23 @@ import psycopg
 
 MIGRATIONS = pathlib.Path(__file__).parent.parent / "supabase" / "migrations"
 
+# Every table that carries tenancy RLS. `test_rls_cross_org.py` and
+# `test_rls_policies.py` both bind to this one tuple so their coverage cannot
+# drift apart -- previously each named its own list, and the cross-org gate's
+# list was the shorter of the two.
+#
+# It is still an allowlist, so it cannot be the only guard: a table added by a
+# later migration and forgotten here would be invisible to every test that
+# iterates it. That gap is closed separately, and without an allowlist, by
+# `test_every_table_in_public_enables_and_forces_rls`, which walks pg_class.
+# Adding a tenant table means adding it here AND giving it a row in that
+# file's `spec` fixture; miss the latter and the parametrised tests raise
+# KeyError rather than quietly testing one table fewer.
+TENANT_TABLES = (
+    "organizations", "memberships", "locations", "invites",
+    "profiles", "email_verifications", "apple_link_requests",
+)
+
 
 def _install_container_reaper(name: str):
     """Defence in depth for the disposable container's cleanup.

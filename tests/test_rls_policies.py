@@ -11,13 +11,8 @@ through `raw_conn`. `raw_conn` is the superuser/owner connection: it bypasses
 RLS, so a policy checked through it appears to pass while being skipped.
 """
 import pytest
-from tests.conftest import apply_migrations
+from tests.conftest import apply_migrations, TENANT_TABLES
 from api.db import pool_open, tenant_connection
-
-TENANT_TABLES = (
-    "organizations", "memberships", "locations", "invites",
-    "profiles", "email_verifications", "apple_link_requests",
-)
 
 ALICE = "11111111-1111-7111-8111-111111111111"   # owner      of Acme
 CAROL = "33333333-3333-7333-8333-333333333333"   # manager    of Acme
