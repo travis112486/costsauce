@@ -10,7 +10,7 @@ from api.services.apple import revoke_apple_token, AppleRevokeError
 from api.services.billing import cancel_subscription, BillingError
 from api.services.export import build_export, ExportError
 from api.db import pool_open, tenant_connection
-from tests.factories import make_location
+from tests.factories import make_location, make_org
 import api.services.apple as apple_module
 
 
@@ -42,6 +42,11 @@ async def test_export_contains_every_table_as_csv(raw_conn, seeded):
     with zipfile.ZipFile(io.BytesIO(blob)) as z:
         names = set(z.namelist())
     assert {"organization.csv", "locations.csv", "members.csv"} <= names
+    # Review round 1, Important-1: invites carries org_id (migration 0002,
+    # NOT NULL FK to organizations) and is one of the seven TENANT_TABLES --
+    # the first version of this file omitted it, which would have silently
+    # dropped real org data from every export.
+    assert "invites.csv" in names
 
 
 # ---------------------------------------------------------------------------
@@ -147,13 +152,22 @@ class _FakeStripeHTTPClient(stripe_http_client.HTTPClient):
         pass
 
 
-async def test_cancel_subscription_is_a_noop_without_a_customer_id():
-    # organizations.stripe_customer_id does not exist until Task 11, so this
-    # is the only path every org takes today. If it touched Stripe at all
-    # with no fake client installed, it would try (and fail) to reach the
-    # real API -- so a clean return here is itself evidence of the early
-    # exit, not merely an assertion of it.
+async def test_cancel_subscription_is_a_noop_without_a_customer_id(monkeypatch):
+    """organizations.stripe_customer_id does not exist until Task 11, so
+    this is the only path every org takes today. Review round 1, Minor:
+    the original version of this test had no assertion at all -- its only
+    pass criterion was "didn't raise". Install a fake transport that fails
+    loudly if touched at all, matching the pattern used two tests below,
+    so "no network call was made" is an actual assertion."""
+    def handler(method, url, headers, post_data):
+        raise AssertionError("must not call Stripe when there is no customer_id")
+
+    fake = _FakeStripeHTTPClient(handler)
+    monkeypatch.setattr(stripe, "default_http_client", fake)
+
     await cancel_subscription(None)
+
+    assert fake.calls == []
 
 
 async def test_cancel_subscription_raises_when_key_missing_but_customer_present(monkeypatch):
@@ -258,6 +272,54 @@ async def test_export_excludes_other_orgs_rows(raw_conn, seeded):
     assert "bob@bistro.test" not in members_csv, (
         "TENANCY LEAK: acme's export contained bistro's member"
     )
+
+
+async def test_export_excludes_other_orgs_invites(raw_conn, seeded):
+    """Same tenancy-leak check as locations/members, for the table Important-1
+    added. Real (non-.test) domains per this plan's global constraint --
+    unlike `seeded`'s pre-existing emails, these are new strings I'm
+    introducing, inserted directly via SQL so no EmailStr validation
+    boundary applies either way."""
+    await raw_conn.execute(
+        "INSERT INTO invites (org_id, email, role, token_hash, invited_by, expires_at)"
+        " VALUES (%s, 'newhire@acme-diner.com', 'manager', 'tok-acme',"
+        " %s, now() + interval '7 days')",
+        (seeded["acme"], seeded["alice"]),
+    )
+    await raw_conn.execute(
+        "INSERT INTO invites (org_id, email, role, token_hash, invited_by, expires_at)"
+        " VALUES (%s, 'newhire@bistro-nine.com', 'manager', 'tok-bistro',"
+        " %s, now() + interval '7 days')",
+        (seeded["bistro"], seeded["bob"]),
+    )
+    await raw_conn.commit()
+
+    blob = await build_export(raw_conn, str(seeded["acme"]))
+    with zipfile.ZipFile(io.BytesIO(blob)) as z:
+        invites_csv = z.read("invites.csv").decode()
+
+    assert "newhire@acme-diner.com" in invites_csv
+    assert "newhire@bistro-nine.com" not in invites_csv, (
+        "TENANCY LEAK: acme's export contained bistro's invite"
+    )
+
+
+async def test_export_raises_when_members_is_unexpectedly_empty(raw_conn, seeded):
+    """Important-2: `organization.csv`'s completeness guard was the only
+    one -- a bug in the `members.csv` WHERE clause, or (under a
+    tenant_connection) an RLS-visible set that shifts mid-export, would
+    otherwise still produce a well-formed zip with a silently-empty
+    members.csv. That must never happen for an org build_export can already
+    see: remove_member/change_role/accept_invite_tx all refuse to let an
+    org's owner count reach zero. Simulated directly here with an org that
+    has zero memberships (make_org alone, no add_member) -- exactly the bug
+    class this guard exists to catch, whether the zero memberships come
+    from a real invariant violation or a WHERE-clause defect."""
+    lonely_org = await make_org(raw_conn, "Nobody Home")
+    await raw_conn.commit()
+
+    with pytest.raises(ExportError):
+        await build_export(raw_conn, str(lonely_org))
 
 
 async def test_export_raises_for_a_nonexistent_org(raw_conn, seeded):
