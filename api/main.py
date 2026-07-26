@@ -68,6 +68,14 @@ async def deletion_guard(request: Request, call_next):
         # Scheduling and cancelling are the two writes that must still work on
         # an org that is already scheduled. Both handlers do their own
         # authorization and their own grace-window checks.
+        #
+        # Nothing else is exempt, including `DELETE /orgs/{id}/members/{uid}`.
+        # Migration 0007's trigger deliberately does not guard row DELETEs (the
+        # purge and its cascade are deletes, and `DELETE /me` must keep
+        # working), but roster churn on an org its owner has already condemned
+        # is org state change, which is what this guard exists to stop. The
+        # member-facing route that must keep working is `DELETE /me`, which is
+        # not org-scoped and never matches here.
         or request.url.path.endswith("/deletion")
     ):
         return await call_next(request)

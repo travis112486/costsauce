@@ -21,6 +21,7 @@ write-skew race that Task 9 needed three rounds to close.
 """
 import asyncio
 import pytest
+from fastapi import HTTPException
 from tests.conftest import apply_migrations
 from tests.test_auth import mint
 from tests.factories import make_user, make_org, add_member
@@ -623,6 +624,61 @@ async def test_concurrent_account_deletions_cannot_zero_out_owners(pool, raw_con
     assert (await cur.fetchone())[0] == 1, "the org must keep exactly one owner, never zero"
 
 
+async def test_membership_committed_after_the_fixed_point_is_still_deleted(
+    pool, raw_conn, seeded
+):
+    """Review round 1, Critical-1.
+
+    `_lock_caller_orgs` reaches a fixed point on the caller's org set. A
+    membership committed AFTER that final read cannot have been locked --
+    the caller was not a member yet, so `accept_invite_tx`'s own org lock
+    never contended -- and an earlier version scoped the DELETE to that
+    frozen set. `DELETE /me` then returned 200, with `profiles` gone and a
+    LIVE membership surviving in another tenant's org: `GET /me` renders a
+    null contact_email, and that org's `members.csv` exports a NULL address.
+
+    Reproduced here with a forced interleave rather than hopeful scheduling.
+    """
+    # A second owner of Acme, so Alice is not the sole owner and the deletion
+    # actually proceeds rather than 409ing before it can be tested.
+    boss = await make_user(raw_conn, "boss@acme.example.com")
+    await add_member(raw_conn, boss, seeded["acme"], "owner")
+    await raw_conn.execute("UPDATE organizations SET plan = 'growth' WHERE id = %s",
+                           (seeded["bistro"],))
+    await raw_conn.execute(
+        "UPDATE profiles SET contact_email_verified_at = now() WHERE user_id = %s",
+        (seeded["alice"],))
+    await raw_conn.execute(
+        "INSERT INTO invites (org_id, email, role, token_hash, invited_by, expires_at) "
+        "VALUES (%s, 'alice@acme.test', 'manager', 'hash-late', %s, "
+        "        now() + interval '7 days')",
+        (seeded["bistro"], seeded["bob"]),
+    )
+    await raw_conn.commit()
+
+    from api.routes import deletion as deletion_module
+
+    async with tenant_connection(pool, {"sub": str(seeded["alice"])}) as conn:
+        orgs = await deletion_module._lock_caller_orgs(conn, str(seeded["alice"]))
+        assert [str(o) for o in orgs] == [str(seeded["acme"])]
+
+        # A second, fully independent transaction commits the new membership
+        # while the first is still open and past its fixed point.
+        async with tenant_connection(pool, {"sub": str(seeded["alice"])}) as other:
+            cur = await other.execute(
+                "SELECT status FROM accept_invite_tx('hash-late')")
+            assert (await cur.fetchone())[0] == "ok"
+
+        assert not await deletion_module._sole_owner_blocking_orgs(
+            conn, str(seeded["alice"]))
+        await deletion_module._purge_caller_rows(conn, str(seeded["alice"]), orgs)
+
+    cur = await raw_conn.execute(
+        "SELECT count(*) FROM memberships WHERE user_id = %s", (seeded["alice"],))
+    assert (await cur.fetchone())[0] == 0, (
+        "a membership committed after the fixed point survived a 200 deletion")
+
+
 async def test_purge_and_cancel_cannot_interleave_to_resurrect_an_org(
     pool, raw_conn, seeded, db_url
 ):
@@ -801,17 +857,25 @@ async def test_double_delete_me(app_client, raw_conn, seeded):
 
 
 async def test_cancel_racing_account_deletion_cannot_orphan(pool, raw_conn, seeded, db_url):
-    """THE ORPHAN RACE, and the reason both /deletion handlers take the org
-    lock BEFORE checking ownership rather than after.
+    """A cancel racing an ex-sole-owner's account deletion must not leave an
+    org UNSCHEDULED with ZERO members -- invisible to every tenant under RLS,
+    administrable by nobody, and invisible to the purge job forever.
 
-    A sole owner of a scheduled org may delete their account (the org is
-    already doomed, so there is nothing left to orphan). If they cancel the
-    org deletion at the same moment, and the cancel's owner check runs
-    outside the lock, it passes against a membership the other transaction is
-    about to remove -- and the org ends up UNSCHEDULED with ZERO members:
-    invisible to every tenant, administrable by nobody, and permanently
-    invisible to the purge job. Under the lock the two serialize and the
-    cancel correctly sees it is no longer an owner."""
+    Review round 1, Important-3 corrected what this pins. It is NOT lock
+    ordering. `org_update` (0004) re-evaluates `current_user_memberships()`
+    against the UPDATE's OWN snapshot, so once the membership delete has
+    committed the row is filtered out and the UPDATE matches zero rows --
+    regardless of whether the handler locked before or after authorizing. The
+    load-bearing line is therefore cancel_org_deletion's `cur.rowcount != 1`
+    check, which turns that zero into a refusal instead of a cheerful
+    `{"cancelled": true}` over an org that is still scheduled. An earlier
+    version of this test omitted the rowcount check from its inline copy of
+    the handler, so it pinned a status code rather than the orphan its
+    docstring described.
+
+    `inner()` below mirrors cancel_org_deletion's real statement sequence,
+    rowcount check included. Deleting that check makes this test fail.
+    """
     from api.routes import deletion as D, members as M
     await raw_conn.execute(
         "UPDATE organizations SET deletion_scheduled_at = now() WHERE id=%s", (seeded["acme"],))
@@ -834,30 +898,39 @@ async def test_cancel_racing_account_deletion_cannot_orphan(pool, raw_conn, seed
 
         async def inner():
             async with tenant_connection(pool, {"sub": str(seeded["alice"])}) as conn:
-                await M._lock_org(conn, seeded["acme"])
                 try:
                     await M._require_owner(conn, str(seeded["alice"]), seeded["acme"])
                 except Exception:
                     return "403"
-                await conn.execute(
-                    "UPDATE organizations SET deletion_scheduled_at=NULL WHERE id=%s",
+                await M._lock_org(conn, seeded["acme"])
+                cur = await conn.execute(
+                    "UPDATE organizations SET deletion_scheduled_at = NULL "
+                    "WHERE id = %s AND deletion_scheduled_at IS NOT NULL",
                     (seeded["acme"],))
+                if cur.rowcount != 1:
+                    raise HTTPException(409, "the deletion could not be cancelled; retry")
                 return "cancelled"
 
         t = asyncio.create_task(inner())
         await asyncio.sleep(0.3)
-        assert not t.done(), "cancel must block on the org lock"
+        assert not t.done(), "the cancel must serialize behind the org lock"
         go.set()
-        return await t
+        try:
+            return await t
+        except HTTPException as e:
+            return f"{e.status_code}"
 
     a, b = await asyncio.gather(delete_account(), cancel())
-    assert (a, b) == ("deleted", "403"), (a, b)
+    assert a == "deleted"
+    assert b in ("403", "409"), b
+
     cur = await raw_conn.execute(
         "SELECT deletion_scheduled_at IS NOT NULL, "
         "(SELECT count(*) FROM memberships m WHERE m.org_id=o.id) "
         "FROM organizations o WHERE id=%s", (seeded["acme"],))
     scheduled, members = await cur.fetchone()
-    assert scheduled is True and members == 0, (scheduled, members)
+    assert (scheduled, members) != (False, 0), "orphaned: unscheduled with zero members"
+    assert scheduled is True and members == 0
 
 
 async def test_multi_org_deletions_do_not_deadlock(pool, raw_conn, seeded):
@@ -934,3 +1007,227 @@ async def test_locations_write_blocked(pool, raw_conn, seeded):
             await conn.execute(
                 "INSERT INTO locations (org_id, name) VALUES (%s, 'zombie')", (seeded["acme"],))
         assert e.value.sqlstate == "CS410"
+
+
+async def test_a_non_member_cannot_reach_the_org_advisory_lock(pool, app_client, seeded):
+    """Review round 1, Important-3: why both /deletion handlers authorize
+    BEFORE locking.
+
+    An earlier version locked first, to keep the ownership check inside the
+    lock. That was unnecessary -- `org_update` (0004) re-evaluates
+    `current_user_memberships()` on the UPDATE's own snapshot, so the race it
+    was defending against was already closed -- and it was not free: any
+    authenticated caller could take and hold the advisory lock on an arbitrary
+    org id, one they have no relationship with and whose existence RLS
+    otherwise hides, just by POSTing here. That serializes every
+    owner-count-sensitive operation on the victim org.
+
+    Held here deterministically: with Bistro's lock taken by another
+    transaction, Alice -- an owner of Acme and a stranger to Bistro -- must be
+    refused immediately rather than queueing behind it.
+    """
+    from api.routes import members as members_module
+    async with tenant_connection(pool, {"sub": str(seeded["bob"])}) as holder:
+        await members_module._lock_org(holder, seeded["bistro"])
+        r = await asyncio.wait_for(
+            app_client.post(
+                f"/orgs/{seeded['bistro']}/deletion",
+                headers={"Authorization": f"Bearer {mint(str(seeded['alice']))}"},
+            ),
+            timeout=5,
+        )
+    assert r.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# The account tombstone (review round 1, Critical-2)
+# ---------------------------------------------------------------------------
+async def test_deleted_account_leaves_a_tombstone_for_the_identity_purge(
+    app_client, raw_conn, seeded
+):
+    """`DELETE /me` cannot remove the `auth.users` row, so something
+    privileged has to finish the job. Once `profiles` is deleted, the only
+    surviving record of the account is that same `auth.users` row -- which no
+    code on the request path can read. Without this tombstone, every account
+    deleted before Task 12 lands is permanently unenumerable and therefore
+    permanently unpurgeable, and the set grows with each deletion.
+    """
+    carol = await make_user(raw_conn, "carol@acme.example.com")
+    await add_member(raw_conn, carol, seeded["acme"], "manager")
+    await raw_conn.commit()
+
+    r = await app_client.delete("/me", headers={"Authorization": f"Bearer {mint(str(carol))}"})
+    assert r.status_code == 200
+    cur = await raw_conn.execute(
+        "SELECT count(*) FROM deleted_accounts WHERE user_id = %s", (carol,))
+    assert (await cur.fetchone())[0] == 1, "no record of the account to purge later"
+    cur = await raw_conn.execute("SELECT count(*) FROM profiles WHERE user_id = %s", (carol,))
+    assert (await cur.fetchone())[0] == 0
+
+
+async def test_the_purge_job_can_actually_enumerate_pending_identities(raw_conn, seeded):
+    """A write-only tombstone is no better than none. `deleted_accounts` is
+    FORCE RLS with no SELECT policy for the migration runner, so a job
+    connecting as `postgres` would read ZERO rows and silently purge nothing
+    -- Task 4's carry note, applied to the very table that exists to stop
+    deletions being lost. The SECURITY DEFINER reader is what closes it.
+    """
+    await raw_conn.execute(
+        "INSERT INTO deleted_accounts (user_id) VALUES (%s)", (seeded["alice"],))
+    cur = await raw_conn.execute("SELECT user_id FROM accounts_pending_identity_purge()")
+    assert [r[0] for r in await cur.fetchall()] == [seeded["alice"]]
+
+
+async def test_tombstone_disappears_when_the_identity_is_finally_removed(raw_conn, seeded):
+    """The FK cascades from auth.users, so the table means exactly "identities
+    still awaiting purge" and Task 12 needs no second cleanup step."""
+    await raw_conn.execute(
+        "INSERT INTO deleted_accounts (user_id) VALUES (%s)", (seeded["alice"],))
+    await raw_conn.execute("DELETE FROM auth.users WHERE id = %s", (seeded["alice"],))
+    cur = await raw_conn.execute("SELECT count(*) FROM deleted_accounts")
+    assert (await cur.fetchone())[0] == 0
+
+
+async def test_a_tenant_cannot_read_or_forge_the_tombstone_list(pool, raw_conn, seeded):
+    """0003's ALTER DEFAULT PRIVILEGES hands `authenticated` full DML on every
+    new table in this schema automatically, so the ABSENCE of
+    SELECT/UPDATE/DELETE policies is what actually confines this one. A tenant
+    must not read the global list of deleted accounts, un-delete itself, or
+    tombstone somebody else.
+    """
+    import psycopg
+    await raw_conn.execute(
+        "INSERT INTO deleted_accounts (user_id) VALUES (%s)", (seeded["bob"],))
+    await raw_conn.commit()
+    async with tenant_connection(pool, {"sub": str(seeded["alice"])}) as conn:
+        cur = await conn.execute("SELECT count(*) FROM deleted_accounts")
+        assert (await cur.fetchone())[0] == 0, "the tombstone list is not tenant-readable"
+        cur = await conn.execute("DELETE FROM deleted_accounts")
+        assert cur.rowcount == 0, "a tenant must not be able to un-delete an account"
+    async with tenant_connection(pool, {"sub": str(seeded["alice"])}) as conn:
+        with pytest.raises(psycopg.Error):
+            await conn.execute(
+                "INSERT INTO deleted_accounts (user_id) VALUES (%s)", (seeded["bob"],))
+
+
+# ---------------------------------------------------------------------------
+# Billing remediation (review round 1, Important-4)
+# ---------------------------------------------------------------------------
+async def test_a_failed_billing_cancellation_is_retried_on_every_confirm(
+    app_client, raw_conn, seeded, monkeypatch
+):
+    """The durable `billing_cancelled_at IS NULL` record needs a remediation
+    path, or it is just a permanent alert nobody can clear.
+
+    Gating the side effect on `not already_scheduled` sent every retry down
+    the already-scheduled branch: it never re-attempted, and returned
+    `billing_cancelled: false` with an EMPTY `warnings` list -- quietly
+    downgrading a live billing discrepancy to silence. The gate is now the
+    record itself.
+    """
+    monkeypatch.delenv("STRIPE_API_KEY", raising=False)
+    await raw_conn.execute(
+        "UPDATE organizations SET stripe_customer_id = 'cus_orphan' WHERE id = %s",
+        (seeded["acme"],))
+    await raw_conn.commit()
+    hdr = {"Authorization": f"Bearer {mint(str(seeded['alice']))}"}
+
+    first = await app_client.post(f"/orgs/{seeded['acme']}/deletion", headers=hdr)
+    assert first.json()["billing_cancelled"] is False
+    assert first.json()["warnings"]
+
+    retry = await app_client.post(f"/orgs/{seeded['acme']}/deletion", headers=hdr)
+    assert retry.status_code == 200
+    assert retry.json()["billing_cancelled"] is False
+    assert retry.json()["warnings"], (
+        "an unresolved billing failure must keep surfacing, not fall silent on retry")
+
+    # ...and once the misconfiguration is fixed, confirming again settles it.
+    calls = []
+
+    async def ok(customer_id):
+        calls.append(customer_id)
+
+    monkeypatch.setattr("api.routes.deletion.cancel_subscription", ok)
+    healed = await app_client.post(f"/orgs/{seeded['acme']}/deletion", headers=hdr)
+    assert calls == ["cus_orphan"], "the retry must re-attempt the cancellation"
+    assert healed.json()["billing_cancelled"] is True
+    assert healed.json()["warnings"] == []
+    cur = await raw_conn.execute(
+        "SELECT billing_cancelled_at IS NOT NULL, deletion_scheduled_at IS NOT NULL "
+        "FROM organizations WHERE id = %s", (seeded["acme"],))
+    assert await cur.fetchone() == (True, True)
+
+
+async def test_a_settled_billing_cancellation_is_not_re_attempted(
+    app_client, raw_conn, seeded, monkeypatch
+):
+    """The re-attempt is gated on the record, so a settled org must not call
+    Stripe again on every confirm."""
+    calls = []
+
+    async def ok(customer_id):
+        calls.append(customer_id)
+
+    monkeypatch.setattr("api.routes.deletion.cancel_subscription", ok)
+    await raw_conn.execute(
+        "UPDATE organizations SET stripe_customer_id = 'cus_live' WHERE id = %s",
+        (seeded["acme"],))
+    await raw_conn.commit()
+    hdr = {"Authorization": f"Bearer {mint(str(seeded['alice']))}"}
+    await app_client.post(f"/orgs/{seeded['acme']}/deletion", headers=hdr)
+    await app_client.post(f"/orgs/{seeded['acme']}/deletion", headers=hdr)
+    assert calls == ["cus_live"]
+
+
+# ---------------------------------------------------------------------------
+# Guard coverage (review round 1, Important-5)
+# ---------------------------------------------------------------------------
+async def test_every_org_scoped_table_carries_the_deletion_guard_trigger(raw_conn):
+    """Deliberately NOT an allowlist -- the same reasoning as
+    `test_every_table_in_public_enables_and_forces_rls` in
+    tests/test_rls_cross_org.py.
+
+    Migration 0007 argues that the trigger, not the URL middleware, is the
+    real invariant: it fires "regardless of route, role, or SECURITY DEFINER
+    indirection". That claim only holds for tables that actually HAVE the
+    trigger, and it is three hand-written CREATE TRIGGER statements with
+    nothing checking them. A Phase 1b table with an `org_id` and no trigger
+    would be silently writable on an org scheduled for deletion, with nothing
+    failing anywhere to say so.
+
+    So this derives the expected set from the catalog instead: every ordinary
+    table in `public` carrying an `org_id` column must have a row-level BEFORE
+    INSERT OR UPDATE trigger running `reject_write_to_scheduled_org`.
+    `organizations` is correctly absent -- it keys on `id`, and
+    scheduling/cancelling are updates to it.
+    """
+    await apply_migrations(raw_conn)
+    cur = await raw_conn.execute(
+        "SELECT c.relname FROM pg_class c "
+        "JOIN pg_attribute a ON a.attrelid = c.oid AND a.attname = 'org_id' "
+        "                   AND a.attnum > 0 AND NOT a.attisdropped "
+        "WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'p')"
+    )
+    org_scoped = {r[0] for r in await cur.fetchall()}
+    assert org_scoped, "sanity: some table in public must carry an org_id"
+
+    # tgtype bits: 1 = ROW, 2 = BEFORE, 4 = INSERT, 16 = UPDATE.
+    cur = await raw_conn.execute(
+        "SELECT c.relname FROM pg_trigger t "
+        "JOIN pg_class c ON c.oid = t.tgrelid "
+        "JOIN pg_proc  p ON p.oid = t.tgfoid "
+        "WHERE NOT t.tgisinternal AND p.proname = 'reject_write_to_scheduled_org' "
+        "  AND (t.tgtype & 1) <> 0 AND (t.tgtype & 2) <> 0 "
+        "  AND (t.tgtype & 4) <> 0 AND (t.tgtype & 16) <> 0"
+    )
+    guarded = {r[0] for r in await cur.fetchall()}
+
+    assert guarded == org_scoped, (
+        f"unguarded org-scoped tables: {sorted(org_scoped - guarded)}; "
+        f"guarded non-org tables: {sorted(guarded - org_scoped)}. Every table in "
+        "`public` with an org_id must carry a BEFORE INSERT OR UPDATE row trigger "
+        "running reject_write_to_scheduled_org(), or writes to an organization "
+        "scheduled for deletion succeed through any path the URL middleware "
+        "cannot see (POST /invites/accept is one; a future POST /sync is another)."
+    )

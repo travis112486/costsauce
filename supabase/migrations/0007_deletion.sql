@@ -66,6 +66,50 @@ CREATE POLICY membership_self_leave ON memberships FOR DELETE TO authenticated
 
 
 -- ---------------------------------------------------------------------------
+-- 1b. The account tombstone.
+--
+-- Review round 1, Critical-2. `DELETE /me` removes memberships, profile and
+-- the caller's single-use tokens, but it CANNOT remove the `auth.users` row:
+-- 0003 deliberately grants nothing on `auth.users` (a `GRANT SELECT` there was
+-- measured to leak every tenant's full user list) and on Supabase that table
+-- is owned by `supabase_auth_admin`, so a migration running as `postgres`
+-- cannot grant itself access either -- the statement would fail at deploy
+-- time. Removing the identity needs Supabase's Admin API from the service
+-- role, which is Task 12's job.
+--
+-- That job needs a list of user ids to act on. Once `profiles` is deleted, the
+-- only surviving record of a deleted account is the `auth.users` row that no
+-- code on the request path can read -- so without this table, every account
+-- deleted before Task 12 lands is permanently unenumerable and therefore
+-- permanently unpurgeable, and the set grows with each deletion. The row is
+-- written in the SAME transaction as the profile delete.
+--
+-- The FK cascades from `auth.users`, so the tombstone disappears by itself the
+-- moment the identity is actually removed. The table is therefore exactly
+-- "identities still awaiting purge" and needs no separate cleanup.
+--
+-- It holds a bare user id and a timestamp -- no email, no name, nothing that
+-- was in the profile. That is the minimum needed to finish a deletion the user
+-- asked for.
+CREATE TABLE deleted_accounts (
+  user_id    uuid PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  deleted_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE deleted_accounts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE deleted_accounts FORCE  ROW LEVEL SECURITY;
+
+-- INSERT-only, own row only. 0003's ALTER DEFAULT PRIVILEGES hands
+-- `authenticated` full DML on every new table in this schema automatically, so
+-- the absence of SELECT/UPDATE/DELETE policies is what actually confines it:
+-- under FORCE RLS with no matching policy those commands see and affect
+-- nothing. A tenant must be able to record its own deletion and must NOT be
+-- able to read the global list of deleted accounts, un-delete itself, or
+-- tombstone somebody else.
+CREATE POLICY deleted_account_self_insert ON deleted_accounts FOR INSERT TO authenticated
+  WITH CHECK (user_id = current_user_id());
+
+
+-- ---------------------------------------------------------------------------
 -- 2. The deletion guard, at the database rather than the URL.
 --
 -- api/main.py carries an HTTP middleware that 410s writes to `/orgs/{id}/...`
@@ -151,9 +195,19 @@ ALTER FUNCTION reject_write_to_scheduled_org() OWNER TO deletion_definer;
 -- below, which need no runtime EXECUTE grant of their own.
 REVOKE ALL ON FUNCTION reject_write_to_scheduled_org() FROM PUBLIC;
 
--- DELETEs are intentionally NOT guarded. A member must still be able to leave
--- (or delete their account out of) an org that is on its way out, and the
--- purge itself is a delete. Only resurrection is blocked.
+-- DELETEs are intentionally NOT guarded HERE, at the database. `DELETE /me`
+-- must still work for a member of a doomed org (that is the whole point of the
+-- already-scheduled escape hatch in `_sole_owner_blocking_orgs`), the purge
+-- itself is a delete, and the cascade behind it is a delete. Only resurrection
+-- is blocked.
+--
+-- Review round 1, Minor: this is NOT the same as saying every HTTP DELETE is
+-- allowed. `DELETE /orgs/{id}/members/{uid}` -- an owner editing the roster of
+-- an org they have already condemned -- is blocked by the middleware in
+-- api/main.py, deliberately: it is org state churn on a doomed org, exactly
+-- what the guard exists to stop. The member-facing route that must keep
+-- working is `DELETE /me`, which is not org-scoped and never reaches either
+-- guard.
 CREATE TRIGGER memberships_reject_write_to_scheduled_org
   BEFORE INSERT OR UPDATE ON memberships
   FOR EACH ROW EXECUTE FUNCTION reject_write_to_scheduled_org();
@@ -185,12 +239,33 @@ END $$;
 GRANT purge_definer TO CURRENT_USER;
 
 GRANT USAGE ON SCHEMA public TO purge_definer;
-GRANT SELECT, DELETE ON organizations TO purge_definer;
+GRANT SELECT, DELETE ON organizations   TO purge_definer;
+GRANT SELECT         ON deleted_accounts TO purge_definer;
 
 CREATE POLICY purge_definer_org_read ON organizations FOR SELECT TO purge_definer
   USING (true);
 CREATE POLICY purge_definer_org_delete ON organizations FOR DELETE TO purge_definer
   USING (true);
+CREATE POLICY purge_definer_tombstone_read ON deleted_accounts FOR SELECT TO purge_definer
+  USING (true);
+
+-- The read path Task 12 needs. Without it the tombstone table is write-only in
+-- practice: `deleted_accounts` is FORCE RLS and has no SELECT policy for the
+-- migration runner, so a job connecting as `postgres` reads ZERO rows and
+-- silently purges nothing -- the exact failure mode Task 4's carry note warns
+-- about, now applied to the table that exists to stop deletions being lost.
+-- Same SECURITY DEFINER discipline as the purge below, and the same grant
+-- posture: revoked from PUBLIC, never reachable from the request path.
+CREATE OR REPLACE FUNCTION accounts_pending_identity_purge()
+RETURNS TABLE(user_id uuid, deleted_at timestamptz)
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+  SELECT d.user_id, d.deleted_at FROM public.deleted_accounts d ORDER BY d.deleted_at
+$$;
+ALTER FUNCTION accounts_pending_identity_purge() OWNER TO purge_definer;
+REVOKE ALL ON FUNCTION accounts_pending_identity_purge() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION accounts_pending_identity_purge() TO CURRENT_USER;
 
 CREATE OR REPLACE FUNCTION purge_scheduled_orgs(grace interval)
 RETURNS int

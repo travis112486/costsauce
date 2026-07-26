@@ -139,24 +139,52 @@ async def _sole_owner_blocking_orgs(conn, user_id: str) -> list[str]:
 async def _purge_caller_rows(conn, user_id: str, orgs: list[uuid.UUID]) -> int:
     """Remove everything this connection is actually able to remove.
 
-    Scoped to `orgs` -- the set `_lock_caller_orgs` locked and reached a
-    fixed point on -- so this can never delete a membership whose org was
-    not locked and owner-counted, no matter what committed in between. The
-    rowcount is checked against that same set: `memberships` is under FORCE
-    RLS and, before migration 0007's `membership_self_leave`, a non-owner
-    deleting their own row matched ZERO rows while the handler cheerfully
-    returned 200. Never report a deletion that did not happen.
+    The DELETE is UNSCOPED (`WHERE user_id = %s`) and deliberately so.
+
+    Review round 1, Critical-1: an earlier version scoped it to `orgs`, the
+    set `_lock_caller_orgs` reached a fixed point on. A membership committed
+    AFTER that final read is outside both the scope and the rowcount
+    assertion -- and `_lock_caller_orgs` could not have locked its org,
+    because the caller was not a member yet, so `accept_invite_tx`'s own org
+    lock never contended. Reproduced: Alice, a member of Acme only, holds a
+    pending invite to Bistro; `DELETE /me` reaches its fixed point,
+    `POST /invites/accept` commits a `manager` membership in Bistro, and
+    `DELETE /me` then commits and returns 200 with a LIVE membership in
+    another tenant's org and no `profiles` row -- so `GET /me` renders a null
+    contact_email and that org's `members.csv` exports a NULL address. A
+    snapshot taken earlier in the transaction is not something to trust for a
+    destructive statement; the statement's own snapshot is.
+
+    The surviving-rows check is what makes this honest, and it is NOT
+    vacuous under RLS. `membership_select` (0004) admits rows whose org is in
+    `current_user_memberships()` -- which is derived from the very rows being
+    checked for. If a membership survived, this re-evaluation sees it (it is
+    committed, and this transaction did not delete it) and the policy admits
+    it, so the count is non-zero. If none survived, the count is zero and RLS
+    agrees. Either way the answer is the true one.
+
+    The rowcount floor is a second, independent check: `memberships` is under
+    FORCE RLS and, before migration 0007's `membership_self_leave`, a
+    non-owner deleting their own row matched ZERO rows while the handler
+    cheerfully returned 200. Never report a deletion that did not happen.
     """
-    cur = await conn.execute(
-        "DELETE FROM memberships WHERE user_id = %s AND org_id = ANY(%s)",
-        (user_id, orgs),
-    )
+    cur = await conn.execute("DELETE FROM memberships WHERE user_id = %s", (user_id,))
     removed = cur.rowcount
-    if removed != len(orgs):
+    cur = await conn.execute(
+        "SELECT count(*) FROM memberships WHERE user_id = %s", (user_id,)
+    )
+    (survivors,) = await cur.fetchone()
+    if survivors:
         raise HTTPException(
             500,
-            f"expected to remove {len(orgs)} membership(s) but removed {removed}; "
-            "refusing to report a deletion that did not happen",
+            f"{survivors} membership(s) survived the deletion; refusing to report "
+            "an account as deleted while it still holds access to an organization",
+        )
+    if removed < len(orgs):
+        raise HTTPException(
+            500,
+            f"expected to remove at least {len(orgs)} membership(s) but removed "
+            f"{removed}; refusing to report a deletion that did not happen",
         )
     # Single-use tokens the caller owns. Both cascade from `auth.users`,
     # which this endpoint cannot delete, so without this they outlive the
@@ -166,6 +194,26 @@ async def _purge_caller_rows(conn, user_id: str, orgs: list[uuid.UUID]) -> int:
         "DELETE FROM apple_link_requests WHERE apple_sub = %s", (user_id,)
     )
     await conn.execute("DELETE FROM profiles WHERE user_id = %s", (user_id,))
+    # The tombstone, written in the SAME transaction as the profile delete.
+    #
+    # Review round 1, Critical-2. This endpoint cannot remove the `auth.users`
+    # row (see the module docstring), so the identity survives and something
+    # privileged has to finish the job later. Once `profiles` is gone, the ONLY
+    # surviving record of the account is that same `auth.users` row -- which no
+    # code on the request path can read (0003 grants nothing on it, and on
+    # Supabase it is owned by supabase_auth_admin). Without this row, every
+    # account deleted before Task 12 lands would be permanently unenumerable,
+    # and therefore permanently unpurgeable.
+    #
+    # `ON CONFLICT DO NOTHING` keeps DELETE /me idempotent for a retrying
+    # client. The row's FK cascades from `auth.users`, so it disappears by
+    # itself the moment the identity is actually removed -- the table is
+    # exactly "identities still awaiting purge", with no second job to keep it
+    # tidy.
+    await conn.execute(
+        "INSERT INTO deleted_accounts (user_id) VALUES (%s) ON CONFLICT DO NOTHING",
+        (user_id,),
+    )
     return removed
 
 
@@ -258,15 +306,23 @@ async def schedule_org_deletion(
     org_id: uuid.UUID, request: Request, caller: CallerIdentity = Depends(require_caller)
 ):
     async with tenant_connection(request.app.state.pool, caller.claims) as conn:
-        # Lock BEFORE the owner check, not after. The check has to be inside
-        # the lock or a cancel can pass its own owner check against a
-        # membership that a concurrent DELETE /me is about to remove, block,
-        # and then un-schedule an org that no longer has any owner at all.
-        # The cost is that a non-owner can briefly hold an advisory lock on
-        # an org id they already know; the transaction is three statements
-        # long, so there is nothing to stretch.
-        await members._lock_org(conn, org_id)
+        # Authorize BEFORE locking. Review round 1, Important-3: an earlier
+        # version locked first, on the theory that a cancel could otherwise
+        # pass its owner check against a membership a concurrent DELETE /me
+        # was about to remove and leave an unscheduled, zero-member org. That
+        # orphan does not reproduce -- `org_update` (0004) re-evaluates
+        # `current_user_memberships()` against the UPDATE's own snapshot, sees
+        # the committed membership delete, and filters the row out, which the
+        # rowcount check below turns into a refusal. RLS had already closed it.
+        #
+        # The ordering was not free: locking first lets ANY authenticated
+        # caller take and hold the advisory lock on an arbitrary org id --
+        # one they have no relationship with, whose existence RLS otherwise
+        # hides -- just by POSTing here, serializing every owner-count
+        # operation on that org. A non-member must not be able to reach a lock
+        # at all, so the owner check comes first.
         await members._require_owner(conn, caller.user_id, org_id)
+        await members._lock_org(conn, org_id)
         cur = await conn.execute(
             "SELECT deletion_scheduled_at, stripe_customer_id, billing_cancelled_at "
             "FROM organizations WHERE id = %s",
@@ -295,15 +351,31 @@ async def schedule_org_deletion(
 
     warnings: list[str] = []
     billing_cancelled = billing_cancelled_at is not None
-    if not already_scheduled:
-        # Side effects run AFTER the commit, and only on the transition. A
+
+    # Review round 1, Important-4: this used to be gated on
+    # `not already_scheduled`, so a confirm that failed to cancel billing was
+    # unrecoverable through the API -- the retry took the already-scheduled
+    # branch, never re-attempted, and returned `billing_cancelled: false` with
+    # an EMPTY `warnings` list, quietly downgrading a live discrepancy to
+    # silence. The gate is now the durable record itself: as long as
+    # `billing_cancelled_at` is NULL there is cancellation still owed, so every
+    # confirm re-attempts it and every response carries the warning until it is
+    # settled. Re-attempting is safe -- cancelling an already-cancelled
+    # subscription lists nothing to cancel.
+    if not billing_cancelled:
+        # Side effects run AFTER the schedule commits, never before. A
         # cancellation issued for a transaction that then rolled back would
-        # stop a live customer's billing for an org that was never scheduled.
+        # stop a live customer's billing for an org that was never scheduled --
+        # user-visible harm, and the wrong direction to fail in. The reverse
+        # gap (scheduled, billing not yet recorded) is the safe one and is now
+        # self-healing: it is exactly the state this block re-enters.
         try:
-            # Blocking Stripe HTTP calls: `cancel_subscription` now runs its
+            # Blocking Stripe HTTP calls: `cancel_subscription` runs its
             # synchronous stripe-python work on a worker thread (see
             # api/services/billing.py) instead of stalling the event loop for
-            # the length of a third-party round trip.
+            # the length of a third-party round trip. Deliberately NOT inside
+            # the transaction above -- that would hold the org advisory lock
+            # across a third-party round trip.
             await cancel_subscription(customer_id)
             billing_cancelled = True
         except BillingError:
@@ -314,7 +386,8 @@ async def schedule_org_deletion(
             )
             warnings.append(
                 "Subscription cancellation failed and must be completed manually; "
-                "the organization is still scheduled for deletion."
+                "the organization is still scheduled for deletion. Confirming the "
+                "deletion again re-attempts the cancellation."
             )
 
     if billing_cancelled and billing_cancelled_at is None:
@@ -342,8 +415,13 @@ async def cancel_org_deletion(
     org_id: uuid.UUID, request: Request, caller: CallerIdentity = Depends(require_caller)
 ):
     async with tenant_connection(request.app.state.pool, caller.claims) as conn:
-        await members._lock_org(conn, org_id)
+        # Authorize, then lock -- see the note in schedule_org_deletion. The
+        # rowcount check on the UPDATE below is what actually makes a cancel
+        # racing an ex-owner's account deletion safe: `org_update`'s USING
+        # clause is re-evaluated on that statement's own snapshot, so a caller
+        # whose membership has just been deleted matches zero rows here.
         await members._require_owner(conn, caller.user_id, org_id)
+        await members._lock_org(conn, org_id)
         cur = await conn.execute(
             "SELECT deletion_scheduled_at, "
             "       deletion_scheduled_at > now() - %s::interval "
