@@ -63,10 +63,10 @@ async def test_app_user_cannot_bypass_rls_by_any_route(raw_conn):
         "RLS is bypassable and every Task 4 policy is decoration"
     )
 
-    # 'auth' as well as 'public': auth.users lives there and 0003 grants it to
-    # authenticated. relkind 'p' as well as 'r': partitioned tables carry RLS
-    # policies exactly like ordinary ones, so an owned partitioned table is the
-    # same bypass.
+    # 'auth' as well as 'public': auth.users lives there, and ownership is the
+    # one property that still matters for a schema we hold no grants on.
+    # relkind 'p' as well as 'r': partitioned tables carry RLS policies exactly
+    # like ordinary ones, so an owned partitioned table is the same bypass.
     cur = await raw_conn.execute(
         "SELECT n.nspname || '.' || c.relname FROM pg_class c"
         "  JOIN pg_namespace n ON n.oid = c.relnamespace"
@@ -178,11 +178,54 @@ async def test_table_access_arrives_only_with_the_role_swap(raw_conn, db_url):
     async with tenant_connection(pool, {"sub": "user-f"}) as conn:
         cur = await conn.execute("SELECT count(*) FROM organizations")
         assert (await cur.fetchone())[0] == 1, "authenticated must be able to read"
-        cur = await conn.execute("SELECT count(*) FROM auth.users")
-        assert (await cur.fetchone())[0] == 0, "authenticated must be able to read auth.users"
+        # A second, unseeded table: proves the grant is the blanket ON ALL
+        # TABLES IN SCHEMA public rather than something specific to the one
+        # table this test happens to populate.
+        cur = await conn.execute("SELECT count(*) FROM memberships")
+        assert (await cur.fetchone())[0] == 0, "the public grant must cover every table"
 
     async with pool.connection() as conn:
         with pytest.raises(psycopg.Error):
             await conn.execute("SELECT count(*) FROM organizations")
         await conn.rollback()
+    await pool.close()
+
+
+async def test_authenticated_cannot_read_auth_users(raw_conn, db_url):
+    """auth.users must stay unreadable on the request path. Regression test.
+
+    0003 used to `GRANT SELECT ON auth.users TO authenticated`. auth.users has
+    no RLS and will never have any -- it is Supabase's table, not ours -- so
+    that one line handed every tenant the full cross-org user list. Probed
+    through this same path, an Acme owner saw both her own address and another
+    tenant's while `profiles` correctly showed her one row; on real Supabase the
+    table also carries encrypted_password, phone and identity metadata.
+
+    Checked through tenant_connection rather than the catalog alone, because
+    the catalog cannot see a grant arriving by another route -- PUBLIC, a future
+    role grant, or a later migration reinstating the line directly. The
+    has_table_privilege assertion is kept alongside it only to name the exact
+    privilege when this fails, so the failure reads as "the grant came back"
+    rather than "some query broke".
+
+    Note the failure mode is InsufficientPrivilege, not UndefinedTable:
+    authenticated does hold USAGE on schema auth (0003), so the table is
+    visible and it is specifically SELECT that must be refused.
+    """
+    await apply_migrations(raw_conn, upto=3)
+    await raw_conn.execute(
+        "INSERT INTO auth.users (id, email) VALUES (uuid_generate_v7(), 'victim@other.test')"
+    )
+    await raw_conn.commit()
+    pool = await pool_open(app_url(db_url))
+
+    async with tenant_connection(pool, {"sub": "user-h"}) as conn:
+        cur = await conn.execute(
+            "SELECT has_table_privilege('authenticated', 'auth.users', 'SELECT')"
+        )
+        (has_select,) = await cur.fetchone()
+        assert has_select is False, "0003 must not grant authenticated SELECT on auth.users"
+
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            await conn.execute("SELECT email FROM auth.users")
     await pool.close()
