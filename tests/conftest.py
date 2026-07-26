@@ -1,5 +1,6 @@
 # tests/conftest.py
 import atexit
+import asyncio
 import os
 import pathlib
 import signal
@@ -126,3 +127,76 @@ async def raw_conn(db_url):
     await conn.commit()
     yield conn
     await conn.close()
+
+
+from httpx import AsyncClient, ASGITransport
+
+
+@pytest.fixture
+async def seeded(raw_conn):
+    from tests.factories import make_user, make_org, add_member, make_location
+    await apply_migrations(raw_conn, upto=6)
+    alice = await make_user(raw_conn, "alice@acme.test")
+    bob = await make_user(raw_conn, "bob@bistro.test")
+    acme = await make_org(raw_conn, "Acme Diner")
+    bistro = await make_org(raw_conn, "Bistro Nine")
+    await add_member(raw_conn, alice, acme, "owner")
+    await add_member(raw_conn, bob, bistro, "owner")
+    await make_location(raw_conn, acme, "Acme Main")
+    await raw_conn.commit()
+    return dict(alice=alice, bob=bob, acme=acme, bistro=bistro)
+
+
+@pytest.fixture(scope="session")
+def _roles_bootstrapped(db_url):
+    """Guarantee `app_user`/`authenticated` exist before any `app_client` pool
+    ever opens, independent of which test happens to run first.
+
+    `db_url` hands out ONE Postgres container for the whole session, but every
+    other fixture that applies migrations (`raw_conn` + `seeded`) is
+    function-scoped: it only runs when a specific test asks for it, and it
+    drops/recreates `public`/`auth` at the START of that test, not before the
+    session. `app_client` authenticates as `app_user` -- a role migration 0003
+    creates -- but nothing upstream forced 0003 to have run yet. Empirically,
+    `test_missing_token_is_401` (the first test pytest collects) requests only
+    `app_client`, and even tests that request both `app_client` and `seeded`
+    still fail: pytest sets up same-scope fixtures in the order they appear as
+    parameters, and every test here lists `app_client` first, so its pool-open
+    races ahead of `seeded`'s migrations. Reproduced directly: all 7 tests in
+    this file failed with `psycopg_pool.PoolTimeout` / `FATAL: password
+    authentication failed for user "app_user"` before this fixture existed.
+
+    Migrating once here, before any pool exists, removes the ordering
+    dependency entirely. It is safe to run only once per session: the roles
+    migration 0003 creates are cluster-level, not schema objects, so they
+    survive every later `DROP SCHEMA ... CASCADE` that `raw_conn` performs,
+    and 0003/0004 are written to be idempotent (`IF NOT EXISTS` role guards,
+    `CREATE OR REPLACE` functions) so a later from-scratch re-application by
+    `seeded` never conflicts with this bootstrap having already run.
+    """
+
+    async def _bootstrap():
+        conn = await psycopg.AsyncConnection.connect(db_url, autocommit=False)
+        await conn.execute("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public")
+        await conn.execute("DROP SCHEMA IF EXISTS auth CASCADE; CREATE SCHEMA auth")
+        await conn.execute(
+            "CREATE TABLE auth.users ("
+            "  id uuid PRIMARY KEY, email text, raw_user_meta_data jsonb DEFAULT '{}')"
+        )
+        await conn.commit()
+        await apply_migrations(conn)
+        await conn.close()
+
+    asyncio.run(_bootstrap())
+
+
+@pytest.fixture
+async def app_client(db_url, monkeypatch, _roles_bootstrapped):
+    monkeypatch.setenv("JWT_SECRET", "test-jwt-secret")
+    monkeypatch.setenv("JWT_ISSUER", "https://khohfrfqzbieaiikqlsa.supabase.co/auth/v1")
+    monkeypatch.setenv("DATABASE_URL", db_url.replace("postgres:postgres", "app_user:app_pw"))
+    from api.main import create_app
+    app = create_app()
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            yield c
