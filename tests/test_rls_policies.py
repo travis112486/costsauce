@@ -161,9 +161,17 @@ async def test_reads_are_scoped_to_the_callers_org(pool):
         assert {r[0] for r in await cur.fetchall()} == {ALICE}
 
 
-async def test_caller_sees_every_membership_of_their_own_org_only(pool):
-    """Task 9's last-owner protection counts owners org-wide; it needs this."""
-    async with tenant_connection(pool, {"sub": ALICE}) as conn:
+@pytest.mark.parametrize("sub", [ALICE, CAROL, DAVE])
+async def test_caller_sees_every_membership_of_their_own_org_only(pool, sub):
+    """Task 9's last-owner protection counts owners org-wide; it needs this.
+
+    Parametrised over all three roles because ALICE alone does not exercise
+    `membership_select`: she is an owner, so `membership_write` -- a FOR ALL
+    policy, whose USING also serves SELECT -- already returns the same rows.
+    Drop `membership_select` and ALICE still sees 3 while CAROL and DAVE see 0.
+    Same masking as location_write/location_select.
+    """
+    async with tenant_connection(pool, {"sub": sub}) as conn:
         cur = await conn.execute("SELECT user_id FROM memberships")
         assert {str(r[0]) for r in await cur.fetchall()} == {ALICE, CAROL, DAVE}
 
@@ -341,13 +349,37 @@ async def test_rls_definer_cannot_be_logged_into_or_escalated(raw_conn):
 
     cur = await raw_conn.execute(
         "SELECT cmd, qual FROM pg_policies WHERE policyname = 'membership_definer_read'")
-    (cmd, _qual) = await cur.fetchone()
+    (cmd, qual) = await cur.fetchone()
     assert cmd == "SELECT", "the definer bypass must be read-only"
+    assert qual == "true", (
+        "membership_definer_read must stay a permissive USING (true). Narrowing it to "
+        "anything that reads memberships makes current_user_memberships() recurse into "
+        f"itself at runtime -- 'stack depth limit exceeded'. Found: {qual!r}")
 
     cur = await raw_conn.execute(
         "SELECT count(*) FROM pg_class c JOIN pg_roles r ON r.oid = c.relowner "
         "WHERE r.rolname = 'rls_definer'")
     assert (await cur.fetchone())[0] == 0, "rls_definer must own no table"
+
+
+async def test_nothing_is_left_a_member_of_rls_definer(raw_conn):
+    """The migration grants itself rls_definer to reassign ownership, then
+    gives it back. If the REVOKE is ever dropped, FORCE is measurably softened:
+    RLS role matching uses has_privs_of_role(), so `membership_definer_read`
+    reaches any INHERIT member and a non-superuser migration runner reads every
+    membership row unfiltered.
+
+    Checked against pg_auth_members, not pg_has_role() -- the latter answers
+    true for a superuser no matter what, so it cannot see this regression in a
+    harness whose `postgres` is a superuser.
+    """
+    await apply_migrations(raw_conn, upto=4)
+    cur = await raw_conn.execute(
+        "SELECT g.rolname FROM pg_auth_members m "
+        "JOIN pg_roles r ON r.oid = m.roleid "
+        "JOIN pg_roles g ON g.oid = m.member "
+        "WHERE r.rolname = 'rls_definer'")
+    assert await cur.fetchall() == [], "rls_definer must be left with no members"
 
 
 async def test_definer_read_policy_is_load_bearing(pool, raw_conn):
