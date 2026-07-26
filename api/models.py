@@ -8,18 +8,29 @@ PLAN_LIMITS = {
 }
 
 
-class MembershipOut(BaseModel):
-    org_id: str
-    org_name: str
-    role: str
-
-
 class EntitlementOut(BaseModel):
     plan: str
     max_locations: int
     max_invoices_per_month: int | None
     max_recipes: int | None
     max_members: int
+
+
+class MembershipOut(BaseModel):
+    org_id: str
+    org_name: str
+    role: str
+    # Entitlement lives here, per org, not on MeResponse. A caller can belong
+    # to multiple orgs on different plans (the bookkeeper-channel use case:
+    # an accountant managing several restaurants), and organizations.plan is
+    # an org-level attribute -- there is no single coherent "the caller's
+    # plan" once more than one membership exists. A prior version collapsed
+    # this to one top-level MeResponse.entitlement by picking rows[0] after
+    # ORDER BY o.name, which silently handed a multi-org caller some other
+    # org's limits by alphabetical accident. Not a security leak (the row
+    # picked was always one of the caller's own orgs, never a stranger's),
+    # but a correctness defect for exactly the users this product targets.
+    entitlement: EntitlementOut
 
 
 class MeResponse(BaseModel):
@@ -38,5 +49,5 @@ class MeResponse(BaseModel):
     contact_email: str | None
     contact_email_verified: bool
     apple_linked: bool
+    # No top-level entitlement: see the comment on MembershipOut.entitlement.
     memberships: list[MembershipOut]
-    entitlement: EntitlementOut

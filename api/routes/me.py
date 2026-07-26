@@ -26,13 +26,17 @@ async def me(request: Request, caller: CallerIdentity = Depends(require_caller))
         )
         rows = await cur.fetchall()
 
-    memberships = [MembershipOut(org_id=r[0], org_name=r[1], role=r[2]) for r in rows]
-    plan = rows[0][3] if rows else "starter"
+    memberships = [
+        MembershipOut(
+            org_id=r[0], org_name=r[1], role=r[2],
+            entitlement=EntitlementOut(plan=r[3], **PLAN_LIMITS[r[3]]),
+        )
+        for r in rows
+    ]
     return MeResponse(
         user_id=caller.user_id,
         contact_email=contact_email,
         contact_email_verified=bool(verified),
         apple_linked=bool(apple_linked),
         memberships=memberships,
-        entitlement=EntitlementOut(plan=plan, **PLAN_LIMITS[plan]),
     )
