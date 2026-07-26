@@ -23,7 +23,7 @@ import asyncio
 import pytest
 from tests.conftest import apply_migrations
 from tests.test_auth import mint
-from tests.factories import make_user, add_member
+from tests.factories import make_user, make_org, add_member
 from api.db import pool_open, tenant_connection
 from api.services.apple import AppleRevokeError
 
@@ -742,3 +742,195 @@ async def test_deletion_columns_and_index_exist(raw_conn):
         "SELECT count(*) FROM pg_indexes WHERE schemaname = 'public' "
         "AND indexname = 'organizations_deletion_idx'")
     assert (await cur.fetchone())[0] == 1
+
+
+# ---------------------------------------------------------------------------
+# Self-review probes. Written after the implementation, as deliberate attempts
+# to break it, and kept because each one pins a distinct property that nothing
+# above covers: cross-org blast radius on a refusal, the non-canonical-UUID
+# spelling that Task 9 needed three rounds to close, the orphan race between a
+# cancel and an ex-sole-owner's account deletion, multi-org lock ordering, and
+# the claim that the database trigger -- not the URL middleware -- is what
+# actually stops writes.
+# ---------------------------------------------------------------------------
+async def test_refusal_does_not_delete_the_other_orgs_membership(app_client, raw_conn, seeded):
+    """Blast radius of a 409: the caller's memberships in OTHER orgs must
+    survive untouched. A refusal is a refusal, not a partial deletion."""
+    other = await make_org(raw_conn, "Other Co")
+    await add_member(raw_conn, seeded["alice"], other, "manager")
+    await raw_conn.commit()
+    r = await app_client.delete("/me", headers={"Authorization": f"Bearer {mint(str(seeded['alice']))}"})
+    assert r.status_code == 409
+    cur = await raw_conn.execute("SELECT count(*) FROM memberships WHERE user_id=%s", (seeded["alice"],))
+    assert (await cur.fetchone())[0] == 2
+
+
+async def test_uppercase_org_id_still_guarded(app_client, seeded):
+    """Correction 3, reached through the guard rather than the lock. Task 9
+    reproduced two concurrent removals -- one URL lowercase, one uppercase --
+    both succeeding and leaving zero owners, because hashtextextended hashes
+    the raw string. Everything here types its path param as uuid.UUID and the
+    middleware parses the captured segment the same way, so every spelling of
+    the same org resolves to one value before any handler or lock sees it."""
+    hdr = {"Authorization": f"Bearer {mint(str(seeded['alice']))}"}
+    await app_client.post(f"/orgs/{seeded['acme']}/deletion", headers=hdr)
+    upper = str(seeded["acme"]).upper()
+    r = await app_client.post(f"/orgs/{upper}/invites",
+                              json={"email": "z@a.example.com", "role": "manager"}, headers=hdr)
+    assert r.status_code == 410, r.text
+
+
+async def test_malformed_org_id(app_client, seeded):
+    """A bad org id in the URL must never reach Postgres and 500."""
+    hdr = {"Authorization": f"Bearer {mint(str(seeded['alice']))}"}
+    for bad in ("not-a-uuid", "------------------------------------", "%00"):
+        r = await app_client.post(f"/orgs/{bad}/deletion", headers=hdr)
+        assert r.status_code in (404, 422), (bad, r.status_code, r.text)
+
+
+async def test_double_delete_me(app_client, raw_conn, seeded):
+    """Deleting an already-deleted account is a no-op, not a 500. A retrying
+    client must not be told something went wrong."""
+    carol = await make_user(raw_conn, "carol@acme.example.com")
+    await add_member(raw_conn, carol, seeded["acme"], "manager")
+    await raw_conn.commit()
+    h = {"Authorization": f"Bearer {mint(str(carol))}"}
+    assert (await app_client.delete("/me", headers=h)).status_code == 200
+    r2 = await app_client.delete("/me", headers=h)
+    assert r2.status_code == 200, r2.text
+
+
+async def test_cancel_racing_account_deletion_cannot_orphan(pool, raw_conn, seeded, db_url):
+    """THE ORPHAN RACE, and the reason both /deletion handlers take the org
+    lock BEFORE checking ownership rather than after.
+
+    A sole owner of a scheduled org may delete their account (the org is
+    already doomed, so there is nothing left to orphan). If they cancel the
+    org deletion at the same moment, and the cancel's owner check runs
+    outside the lock, it passes against a membership the other transaction is
+    about to remove -- and the org ends up UNSCHEDULED with ZERO members:
+    invisible to every tenant, administrable by nobody, and permanently
+    invisible to the purge job. Under the lock the two serialize and the
+    cancel correctly sees it is no longer an owner."""
+    from api.routes import deletion as D, members as M
+    await raw_conn.execute(
+        "UPDATE organizations SET deletion_scheduled_at = now() WHERE id=%s", (seeded["acme"],))
+    await raw_conn.commit()
+
+    locked = asyncio.Event()
+    go = asyncio.Event()
+
+    async def delete_account():
+        async with tenant_connection(pool, {"sub": str(seeded["alice"])}) as conn:
+            orgs = await D._lock_caller_orgs(conn, str(seeded["alice"]))
+            locked.set()
+            await go.wait()
+            assert not await D._sole_owner_blocking_orgs(conn, str(seeded["alice"]))
+            await D._purge_caller_rows(conn, str(seeded["alice"]), orgs)
+            return "deleted"
+
+    async def cancel():
+        await locked.wait()
+
+        async def inner():
+            async with tenant_connection(pool, {"sub": str(seeded["alice"])}) as conn:
+                await M._lock_org(conn, seeded["acme"])
+                try:
+                    await M._require_owner(conn, str(seeded["alice"]), seeded["acme"])
+                except Exception:
+                    return "403"
+                await conn.execute(
+                    "UPDATE organizations SET deletion_scheduled_at=NULL WHERE id=%s",
+                    (seeded["acme"],))
+                return "cancelled"
+
+        t = asyncio.create_task(inner())
+        await asyncio.sleep(0.3)
+        assert not t.done(), "cancel must block on the org lock"
+        go.set()
+        return await t
+
+    a, b = await asyncio.gather(delete_account(), cancel())
+    assert (a, b) == ("deleted", "403"), (a, b)
+    cur = await raw_conn.execute(
+        "SELECT deletion_scheduled_at IS NOT NULL, "
+        "(SELECT count(*) FROM memberships m WHERE m.org_id=o.id) "
+        "FROM organizations o WHERE id=%s", (seeded["acme"],))
+    scheduled, members = await cur.fetchone()
+    assert scheduled is True and members == 0, (scheduled, members)
+
+
+async def test_multi_org_deletions_do_not_deadlock(pool, raw_conn, seeded):
+    """Two callers deleting their accounts out of the SAME two orgs. Locking
+    several orgs at once is a deadlock risk unless every acquirer agrees on an
+    order; _lock_caller_orgs and purge_scheduled_orgs both use ORDER BY
+    org_id, so neither can hold one org while waiting on another."""
+    from api.routes import deletion as D
+    o1 = await make_org(raw_conn, "One")
+    o2 = await make_org(raw_conn, "Two")
+    keeper = await make_user(raw_conn, "keeper@x.example.com")
+    u1 = await make_user(raw_conn, "u1@x.example.com")
+    u2 = await make_user(raw_conn, "u2@x.example.com")
+    for o in (o1, o2):
+        await add_member(raw_conn, keeper, o, "owner")
+        await add_member(raw_conn, u1, o, "manager")
+        await add_member(raw_conn, u2, o, "manager")
+    await raw_conn.commit()
+
+    async def run(uid):
+        async with tenant_connection(pool, {"sub": str(uid)}) as conn:
+            orgs = await D._lock_caller_orgs(conn, str(uid))
+            await asyncio.sleep(0.15)
+            if await D._sole_owner_blocking_orgs(conn, str(uid)):
+                return "refused"
+            await D._purge_caller_rows(conn, str(uid), orgs)
+            return "deleted"
+
+    res = await asyncio.wait_for(asyncio.gather(run(u1), run(u2)), timeout=10)
+    assert res == ["deleted", "deleted"], res
+
+
+@pytest.mark.parametrize("role", ["manager", "bookkeeper"])
+async def test_non_owner_roles_locked_out(app_client, raw_conn, seeded, role):
+    """Every new org-scoped endpoint is owner-only. Roles are exactly owner,
+    manager, bookkeeper."""
+    u = await make_user(raw_conn, f"{role}@acme.example.com")
+    await add_member(raw_conn, u, seeded["acme"], role)
+    await raw_conn.commit()
+    h = {"Authorization": f"Bearer {mint(str(u))}"}
+    assert (await app_client.get(f"/orgs/{seeded['acme']}/export", headers=h)).status_code == 403
+    assert (await app_client.post(f"/orgs/{seeded['acme']}/deletion", headers=h)).status_code == 403
+    assert (await app_client.delete(f"/orgs/{seeded['acme']}/deletion", headers=h)).status_code == 403
+
+
+async def test_unauthenticated(app_client, seeded):
+    """The middleware runs before authentication, so it must fall through
+    rather than answering for an anonymous caller."""
+    assert (await app_client.delete("/me")).status_code == 401
+    assert (await app_client.post(f"/orgs/{seeded['acme']}/deletion")).status_code == 401
+    assert (await app_client.get(f"/orgs/{seeded['acme']}/export")).status_code == 401
+
+
+async def test_future_scheduled_at_is_not_purged(raw_conn, seeded):
+    """Clock skew must never shorten the grace window."""
+    await raw_conn.execute(
+        "UPDATE organizations SET deletion_scheduled_at = now() + interval '5 days' WHERE id=%s",
+        (seeded["acme"],))
+    cur = await raw_conn.execute("SELECT purge_scheduled_orgs(interval '30 days')")
+    assert (await cur.fetchone())[0] == 0
+
+
+async def test_locations_write_blocked(pool, raw_conn, seeded):
+    """Pins the migration's future-proofing claim directly at the database.
+    No /locations route exists yet, so this is reachable only through raw SQL
+    on a tenant connection -- which is exactly the point: the trigger, not the
+    URL middleware, is what a future POST /sync will be relying on."""
+    import psycopg
+    await raw_conn.execute(
+        "UPDATE organizations SET deletion_scheduled_at = now() WHERE id=%s", (seeded["acme"],))
+    await raw_conn.commit()
+    async with tenant_connection(pool, {"sub": str(seeded["alice"])}) as conn:
+        with pytest.raises(psycopg.Error) as e:
+            await conn.execute(
+                "INSERT INTO locations (org_id, name) VALUES (%s, 'zombie')", (seeded["acme"],))
+        assert e.value.sqlstate == "CS410"
