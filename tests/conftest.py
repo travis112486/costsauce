@@ -207,6 +207,14 @@ async def app_client(db_url, monkeypatch, _roles_bootstrapped):
     monkeypatch.setenv("JWT_SECRET", "test-jwt-secret")
     monkeypatch.setenv("JWT_ISSUER", "https://khohfrfqzbieaiikqlsa.supabase.co/auth/v1")
     monkeypatch.setenv("DATABASE_URL", db_url.replace("postgres:postgres", "app_user:app_pw"))
+    # Task 9 review round 2, Important-3: create_invite's raw-token echo is
+    # gated OFF by default (production must never leak it -- no mailer
+    # exists yet, so the response body is the only channel a token could
+    # otherwise reach a non-invitee through). Tests need the token back to
+    # drive the accept_invite round trip, so it's explicitly opted IN here,
+    # the same way api/routes/identity.py's reviewer_otp is opted in via
+    # REVIEWER_OTP_ENABLED in the tests that need it.
+    monkeypatch.setenv("RETURN_INVITE_TOKEN_ENABLED", "1")
     from api.main import create_app
     app = create_app()
     async with app.router.lifespan_context(app):

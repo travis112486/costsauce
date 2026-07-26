@@ -1,12 +1,18 @@
 # tests/factories.py
-async def make_user(conn, email: str):
+async def make_user(conn, email: str, *, contact_email_verified: bool = False):
     cur = await conn.execute(
         "INSERT INTO auth.users (id, email) VALUES (uuid_generate_v7(), %s) RETURNING id",
         (email,),
     )
     (user_id,) = await cur.fetchone()
+    # contact_email_verified defaults False (existing callers' behavior is
+    # unchanged); Task 9 review round 2 requires an invite's acceptance to be
+    # bound to a VERIFIED profiles.contact_email, so tests exercising that
+    # path pass contact_email_verified=True explicitly.
     await conn.execute(
-        "INSERT INTO profiles (user_id, contact_email) VALUES (%s, %s)", (user_id, email)
+        "INSERT INTO profiles (user_id, contact_email, contact_email_verified_at) "
+        "VALUES (%s, %s, CASE WHEN %s THEN now() ELSE NULL END)",
+        (user_id, email, contact_email_verified),
     )
     return user_id
 

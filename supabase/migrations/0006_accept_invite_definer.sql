@@ -74,20 +74,47 @@
 -- sees the other's uncommitted change), both pass their own check, both
 -- commit -- zero owners, textbook write skew. A naive re-check inside a
 -- trigger does not fix this either (same READ COMMITTED visibility rules
--- apply inside a trigger); it requires an actual lock. Chosen fix, applied
--- identically in all four owner-count-sensitive call sites (create_invite's
--- max_members check, change_role, remove_member, and here): each first
--- takes `SELECT 1 FROM organizations WHERE id = <org> FOR UPDATE` before
--- reading any count. A concurrent second transaction touching the SAME org
--- blocks on that single row lock until the first commits, and then reads
--- the count fresh, seeing the first transaction's already-committed change
--- -- closing the race for any pair of these four operations on the same
--- org, without touching cross-org concurrency at all. (A deferrable
--- constraint trigger was considered -- it is the more failure-proof choice
--- long-term, since it can't be forgotten by a future write path -- but it
--- would need this SAME lock inside it to actually work, so for this phase
--- the lock is applied at the four known call sites directly rather than
--- adding trigger machinery on top of it.)
+-- apply inside a trigger); it requires an actual lock.
+--
+-- Round 1's chosen fix -- `SELECT 1 FROM organizations WHERE id = <org> FOR
+-- UPDATE` -- was itself broken here, found in review round 2: Postgres
+-- applies UPDATE policies (not just SELECT) to `SELECT ... FOR UPDATE`, and
+-- `invite_definer` only ever had a FOR SELECT policy on organizations
+-- (`invite_definer_org_read`, since removed). With no UPDATE policy, RLS
+-- filtered the row out entirely, `PERFORM` matched zero rows, and NO LOCK
+-- WAS TAKEN -- `FOR UPDATE` fails OPEN (returns nothing rather than
+-- erroring), so nothing noticed. Reproduced live: two owners, a pending
+-- invite; remove_member(owner B) held its (correctly-working, Python-side)
+-- lock uncommitted while accept_invite (as owner A, demoting to a lower
+-- role) ran concurrently -- accept_invite's dead lock never blocked,
+-- returned 200, final owner count 0.
+--
+-- Fixed by switching EVERY owner-count-sensitive lock -- the three Python
+-- call sites in api/routes/members.py (`_lock_org`) AND this function --
+-- to `pg_advisory_xact_lock(hashtextextended(org_id::text, 0))` instead of
+-- a row lock. Two reasons this is the right fix, not just a patch for the
+-- one broken instance:
+--   1. Advisory locks are NOT subject to RLS at all -- no policy, no role
+--      grant, nothing to get out of sync with a table's policies ever
+--      again. This removes the whole CLASS of failure the row-lock
+--      approach was exposed to, not just this one occurrence of it.
+--   2. Row locks and advisory locks are two independent Postgres locking
+--      systems that do not interact. If only this SQL function had moved to
+--      an advisory lock while the three Python call sites kept the row
+--      lock, accept_invite_tx would never serialize against
+--      change_role/remove_member/create_invite at all (different lock
+--      spaces) -- the exact cross-call-site race above would persist,
+--      just moved. All four call sites MUST use the identical lock
+--      derivation to actually block each other.
+-- A deferrable constraint trigger was considered and rejected again for the
+-- same reason as round 1: it would need this same lock inside it, so it
+-- adds indirection without adding safety on its own.
+--
+-- `organizations` no longer needs any grant or policy for `invite_definer`
+-- at all -- pg_advisory_xact_lock needs neither table privilege nor an RLS
+-- policy match, so the round-1 `GRANT SELECT, UPDATE ON organizations` and
+-- `invite_definer_org_read` policy (the direct cause of the broken lock
+-- above) are both removed as dead weight.
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'invite_definer') THEN
@@ -103,29 +130,36 @@ GRANT invite_definer TO CURRENT_USER;
 GRANT USAGE ON SCHEMA public TO invite_definer;
 GRANT SELECT, UPDATE ON invites      TO invite_definer;
 GRANT SELECT, INSERT, UPDATE ON memberships TO invite_definer;
--- SELECT alone is not enough for `FOR UPDATE` -- Postgres requires the
--- UPDATE privilege too, even though no column here is ever actually
--- written; the lock is the only reason this grant exists.
-GRANT SELECT, UPDATE ON organizations TO invite_definer;
 GRANT SELECT ON profiles TO invite_definer;
+-- No grant on organizations: the org lock is now an advisory lock, which
+-- needs no table privilege at all (see the Critical-2 note above).
 
--- All four permissive USING (true) policies mirror `membership_definer_read`
+-- Both permissive USING (true) policies mirror `membership_definer_read`
 -- (0004): the constant is what lets the definer function see anything at
--- all, and none of these table policies reference memberships recursively,
--- so there is no repeat of that recursion. None is reachable except through
+-- all, and neither table policy references memberships recursively, so
+-- there is no repeat of that recursion. Neither is reachable except through
 -- the function below -- invite_definer is NOLOGIN and, after the REVOKE at
--- the end of this file, has no members. organizations/profiles are
--- READ-ONLY for this role (SELECT-only grant, FOR ALL policy is harmless
--- since no INSERT/UPDATE/DELETE privilege was granted to exercise it, but
--- scoped FOR SELECT explicitly below to say so directly).
+-- the end of this file, has no members. profiles is READ-ONLY for this
+-- role (SELECT-only grant; scoped FOR SELECT explicitly to say so
+-- directly).
 CREATE POLICY invite_definer_rw ON invites FOR ALL TO invite_definer
   USING (true) WITH CHECK (true);
 CREATE POLICY membership_definer_write ON memberships FOR ALL TO invite_definer
   USING (true) WITH CHECK (true);
-CREATE POLICY invite_definer_org_read ON organizations FOR SELECT TO invite_definer
-  USING (true);
 CREATE POLICY invite_definer_profile_read ON profiles FOR SELECT TO invite_definer
   USING (true);
+
+-- Review round 2, new Important: the earlier version of this file defined
+-- accept_invite_tx(text, uuid) (the caller-steerable, temp-shadowable
+-- signature CREATE OR REPLACE below does NOT touch -- a different
+-- parameter list is a genuinely different function in Postgres, not a
+-- replacement). In any environment where that version was already applied
+-- before this fix landed, both overloads would otherwise coexist, leaving
+-- the vulnerable one live and EXECUTE-granted to `authenticated` even
+-- though no application code calls it anymore. IF EXISTS makes this safe
+-- on a fresh schema (this harness's raw_conn drops/recreates `public` every
+-- test, so the 2-arg version never existed there to begin with).
+DROP FUNCTION IF EXISTS accept_invite_tx(text, uuid);
 
 CREATE OR REPLACE FUNCTION accept_invite_tx(p_token_hash text)
 -- Output columns are prefixed (out_*), NOT org_id/role: PL/pgSQL implicitly
@@ -153,9 +187,21 @@ BEGIN
     RETURN;
   END IF;
 
+  -- Review round 2, Important-3 (still open after round 1): matching on
+  -- contact_email alone let an attacker holding a leaked/shared token defeat
+  -- the binding with one extra request -- POST /identity/contact-email to
+  -- self-set (UNVERIFIED) contact_email to the invite's target address,
+  -- then retry. Reproduced live: mallory's own accept attempt 400s, she
+  -- self-sets contact_email to the invite's address, retries, 200. Fixed by
+  -- requiring contact_email_verified_at IS NOT NULL here -- an invitee must
+  -- have completed Task 7's /identity/contact-email/verify flow BEFORE
+  -- accepting. v_caller_email stays NULL (never matches anything) for a
+  -- caller with no profile or an unverified one, so this fails closed the
+  -- same way a missing profile already did.
   SELECT contact_email INTO v_caller_email
     FROM public.profiles
-   WHERE user_id = v_user_id;
+   WHERE user_id = v_user_id
+     AND contact_email_verified_at IS NOT NULL;
 
   -- The email match is folded into the SAME UPDATE that consumes the
   -- token: a caller whose contact_email does not match the invite's email
@@ -176,12 +222,14 @@ BEGIN
     RETURN;
   END IF;
 
-  -- Critical-2 fix: lock the org row before reading anything the
-  -- last-owner decision depends on. A concurrent remove_member/change_role/
-  -- another accept_invite on this SAME org blocks here until whichever
-  -- transaction got here first commits, then this SELECT re-reads
-  -- post-commit state instead of a stale, concurrently-invalidated count.
-  PERFORM 1 FROM public.organizations WHERE id = v_org_id FOR UPDATE;
+  -- Critical-2 fix (round 2: advisory lock, not a row lock -- see the file
+  -- header). Same key derivation as api/routes/members.py's `_lock_org`,
+  -- required for the two to actually block each other. A concurrent
+  -- remove_member/change_role/create_invite/another accept_invite on this
+  -- SAME org blocks here until whichever transaction got here first
+  -- commits (xact-scoped: released automatically at COMMIT/ROLLBACK), then
+  -- this read sees post-commit state instead of a stale count.
+  PERFORM pg_advisory_xact_lock(hashtextextended(v_org_id::text, 0));
 
   SELECT m.role INTO v_current_role
     FROM public.memberships m

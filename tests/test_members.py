@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import pytest
 from fastapi import HTTPException
+from tests.conftest import apply_migrations, MIGRATIONS
 from tests.test_auth import mint
 from tests.factories import make_user, add_member
 from api.db import pool_open, tenant_connection
@@ -62,7 +63,7 @@ async def test_owner_can_invite_and_invitee_joins(app_client, raw_conn, seeded):
     # Important-3 fix (Task 9 review round 1): acceptance is now bound to the
     # caller's own profiles.contact_email matching the invite's email, so
     # dave's profile must carry the SAME address the invite was created for.
-    dave = await make_user(raw_conn, "dave@acme.example.com")
+    dave = await make_user(raw_conn, "dave@acme.example.com", contact_email_verified=True)
     await raw_conn.commit()
     r2 = await app_client.post("/invites/accept", json={"token": token},
                                headers={"Authorization": f"Bearer {mint(str(dave))}"})
@@ -187,8 +188,9 @@ async def test_accept_invite_cannot_demote_the_last_owner(app_client, raw_conn, 
     # profile's contact_email is bumped to a real domain here -- this changes
     # neither her identity (JWT `sub`) nor her auth.users row, only the
     # address this one test's invite is addressed to and matched against.
-    await raw_conn.execute("UPDATE profiles SET contact_email = 'alice@acme.example.com' "
-                            "WHERE user_id = %s", (seeded["alice"],))
+    await raw_conn.execute("UPDATE profiles SET contact_email = 'alice@acme.example.com', "
+                            "contact_email_verified_at = now() WHERE user_id = %s",
+                            (seeded["alice"],))
     await raw_conn.commit()
     alice_headers = {"Authorization": f"Bearer {mint(str(seeded['alice']))}"}
 
@@ -325,11 +327,59 @@ async def test_accept_invite_refuses_a_caller_whose_email_does_not_match(app_cli
 
     # The token must still be usable by the actual invitee: a wrong-email
     # attempt must not have consumed it.
-    dave = await make_user(raw_conn, "dave@acme.example.com")
+    dave = await make_user(raw_conn, "dave@acme.example.com", contact_email_verified=True)
     await raw_conn.commit()
     r = await app_client.post("/invites/accept", json={"token": token},
                                headers={"Authorization": f"Bearer {mint(str(dave))}"})
     assert r.status_code == 200
+
+
+async def test_accept_invite_email_binding_requires_verification_not_just_a_self_set_match(
+    app_client, raw_conn, seeded
+):
+    """Task 9 review round 2: matching on contact_email alone (round 1's
+    fix) was defeated by one extra request -- an attacker holding a leaked
+    token, refused on their first attempt, could POST
+    /identity/contact-email to self-set an UNVERIFIED contact_email to the
+    invite's target address and retry successfully. Reproduces the
+    reviewer's exact live sequence and proves the retry still fails now
+    that the binding requires contact_email_verified_at IS NOT NULL."""
+    await raw_conn.execute("UPDATE organizations SET plan = 'growth' WHERE id = %s",
+                            (seeded["acme"],))
+    await raw_conn.commit()
+    r = await app_client.post(
+        f"/orgs/{seeded['acme']}/invites",
+        json={"email": "victim@acme.example.com", "role": "owner"},
+        headers={"Authorization": f"Bearer {mint(str(seeded['alice']))}"},
+    )
+    assert r.status_code == 200
+    token = r.json()["token"]
+
+    mallory = await make_user(raw_conn, "mallory@acme.example.com")
+    await raw_conn.commit()
+    mallory_headers = {"Authorization": f"Bearer {mint(str(mallory))}"}
+
+    # 1. mallory's own attempt -- binding correctly refuses the mismatch.
+    r = await app_client.post("/invites/accept", json={"token": token}, headers=mallory_headers)
+    assert r.status_code == 400
+
+    # 2. mallory self-sets contact_email to the invite's target address.
+    # This succeeds (set_contact_email has no ownership proof beyond what
+    # this finding requires -- explicitly out of scope, see report) but
+    # leaves contact_email_verified_at NULL.
+    r = await app_client.post(
+        "/identity/contact-email", json={"email": "victim@acme.example.com"},
+        headers=mallory_headers,
+    )
+    assert r.status_code == 200
+
+    # 3. Retrying with the SAME token must still fail: an unverified
+    # self-set address must not satisfy the binding.
+    r = await app_client.post("/invites/accept", json={"token": token}, headers=mallory_headers)
+    assert r.status_code == 400, (
+        "an unverified, self-set contact_email must not be sufficient to accept "
+        "someone else's invite"
+    )
 
 
 # Important-5: accept_invite's failure branches (invalid, expired, replayed
@@ -354,7 +404,7 @@ async def test_accept_invite_with_expired_token_is_400(app_client, raw_conn, see
     )
     assert r.status_code == 200
     token = r.json()["token"]
-    dave = await make_user(raw_conn, "dave@acme.example.com")
+    dave = await make_user(raw_conn, "dave@acme.example.com", contact_email_verified=True)
     await raw_conn.execute(
         "UPDATE invites SET expires_at = now() - interval '1 hour' "
         "WHERE token_hash = %s",
@@ -377,7 +427,7 @@ async def test_accept_invite_replay_is_400(app_client, raw_conn, seeded):
     )
     assert r.status_code == 200
     token = r.json()["token"]
-    dave = await make_user(raw_conn, "dave@acme.example.com")
+    dave = await make_user(raw_conn, "dave@acme.example.com", contact_email_verified=True)
     await raw_conn.commit()
     headers = {"Authorization": f"Bearer {mint(str(dave))}"}
     r1 = await app_client.post("/invites/accept", json={"token": token}, headers=headers)
@@ -531,7 +581,7 @@ async def test_concurrent_invites_cannot_exceed_member_limit(pool, raw_conn, see
 # reference inside the function is schema-qualified with `public.`).
 
 async def test_accept_invite_tx_is_not_shadowable_by_a_forged_temp_table(pool, raw_conn, seeded):
-    mallory = await make_user(raw_conn, "mallory@bistro.example.com")
+    mallory = await make_user(raw_conn, "mallory@bistro.example.com", contact_email_verified=True)
     await raw_conn.commit()
 
     async with tenant_connection(pool, {"sub": str(mallory)}) as conn:
@@ -564,3 +614,122 @@ async def test_accept_invite_tx_is_not_shadowable_by_a_forged_temp_table(pool, r
     )
     assert await cur.fetchone() is None, \
         "mallory must not have gained a forged 'owner' membership in bistro"
+
+
+# Critical-2 round 2: the round-1 concurrency tests above only ever drove
+# the Python `_lock_org` (change_role/remove_member/create_invite), where
+# the org-row lock genuinely worked -- neither exercised accept_invite_tx's
+# OWN lock, which review round 2 found was silently a no-op (RLS filtered
+# `invite_definer`'s FOR-UPDATE row out entirely, since it only had a
+# SELECT policy on organizations, not an UPDATE one -- `FOR UPDATE` fails
+# OPEN). This reproduces the reviewer's exact live sequence: two owners, a
+# pending lower-role invite addressed to one of them; remove_member(the
+# OTHER owner) holds the org lock uncommitted while accept_invite (via the
+# real HTTP endpoint, exercising the real accept_invite_tx) runs
+# concurrently. It must genuinely block, and once unblocked, must correctly
+# refuse to leave the org with zero owners.
+
+async def test_concurrent_accept_invite_and_remove_member_cannot_zero_out_owners(
+    pool, app_client, raw_conn, seeded
+):
+    boss = await make_user(raw_conn, "boss@acme.example.com")
+    await add_member(raw_conn, boss, seeded["acme"], "owner")
+    await raw_conn.execute("UPDATE organizations SET plan = 'growth' WHERE id = %s",
+                            (seeded["acme"],))
+    await raw_conn.execute(
+        "UPDATE profiles SET contact_email = 'alice@acme.example.com', "
+        "contact_email_verified_at = now() WHERE user_id = %s",
+        (seeded["alice"],),
+    )
+    await raw_conn.commit()
+    alice_headers = {"Authorization": f"Bearer {mint(str(seeded['alice']))}"}
+
+    r = await app_client.post(f"/orgs/{seeded['acme']}/invites",
+                               json={"email": "alice@acme.example.com", "role": "manager"},
+                               headers=alice_headers)
+    assert r.status_code == 200
+    token = r.json()["token"]
+
+    org_id = str(seeded["acme"])
+    lock_acquired = asyncio.Event()
+    proceed = asyncio.Event()
+
+    async def hold_remove_lock():
+        async with tenant_connection(pool, {"sub": str(seeded["alice"])}) as conn:
+            await members_module._require_owner(conn, str(seeded["alice"]), org_id)
+            await members_module._lock_org(conn, org_id)
+            lock_acquired.set()
+            await proceed.wait()
+            cur = await conn.execute(
+                "SELECT role FROM memberships WHERE org_id = %s AND user_id = %s",
+                (org_id, boss),
+            )
+            (role,) = await cur.fetchone()
+            if role == "owner" and await members_module._owner_count(conn, org_id) == 1:
+                return "refused"
+            await conn.execute(
+                "DELETE FROM memberships WHERE org_id = %s AND user_id = %s", (org_id, boss)
+            )
+            return "removed"
+
+    async def accept_via_http():
+        return await app_client.post(
+            "/invites/accept", json={"token": token}, headers=alice_headers
+        )
+
+    async def racer():
+        await lock_acquired.wait()
+        task = asyncio.create_task(accept_via_http())
+        await asyncio.sleep(0.3)
+        # If accept_invite_tx's lock were the round-1-broken row lock (or
+        # any lock not sharing this key space with _lock_org), this call
+        # would have no reason to still be running here.
+        assert not task.done(), "accept_invite_tx must block on the same org lock too"
+        proceed.set()
+        return await task
+
+    remove_result, accept_response = await asyncio.gather(hold_remove_lock(), racer())
+    assert remove_result == "removed"
+    assert accept_response.status_code == 409
+    assert "last owner" in str(accept_response.json()).lower()
+
+    cur = await raw_conn.execute(
+        "SELECT count(*) FROM memberships WHERE org_id = %s AND role = 'owner'",
+        (seeded["acme"],),
+    )
+    (n,) = await cur.fetchone()
+    assert n == 1, "org must be left with exactly one owner, never zero"
+
+
+# New Important (introduced by the round-1 fix diff): CREATE OR REPLACE
+# FUNCTION accept_invite_tx(p_token_hash text) does NOT touch a
+# pre-existing accept_invite_tx(text, uuid) -- a different parameter list is
+# a genuinely different function to Postgres, not a replacement. Simulates
+# the reviewer's exact scenario: a database that already had the pre-fix
+# 2-arg signature applied, before this migration's current content
+# (including its explicit DROP) runs on top of it.
+
+async def test_accept_invite_tx_has_no_orphaned_two_arg_overload(raw_conn):
+    await apply_migrations(raw_conn, upto=5)
+    await raw_conn.execute(
+        "CREATE FUNCTION accept_invite_tx(p_token_hash text, p_user_id uuid) "
+        "RETURNS TABLE(status text, out_org_id uuid, out_role text) "
+        "LANGUAGE sql AS $$ SELECT 'stale'::text, NULL::uuid, NULL::text $$"
+    )
+    await raw_conn.commit()
+    # NOT apply_migrations(upto=6) again -- that would re-run 0001-0005 from
+    # scratch (it has no "already applied" tracking) and fail on the
+    # non-idempotent CREATE TABLEs. Only 0006's own content simulates
+    # "the current migration runs on top of an already-migrated database".
+    migration_0006 = sorted(MIGRATIONS.glob("0006_*.sql"))[0]
+    await raw_conn.execute(migration_0006.read_text())
+    await raw_conn.commit()
+
+    cur = await raw_conn.execute(
+        "SELECT pg_get_function_identity_arguments(oid) FROM pg_proc "
+        "WHERE proname = 'accept_invite_tx'"
+    )
+    signatures = [row[0] for row in await cur.fetchall()]
+    assert signatures == ["p_token_hash text"], (
+        f"expected exactly the 1-arg overload after the migration's DROP, found: {signatures}"
+    )

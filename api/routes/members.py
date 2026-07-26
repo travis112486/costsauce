@@ -1,5 +1,6 @@
 # api/routes/members.py
 import hashlib
+import os
 import secrets
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -46,16 +47,30 @@ async def _lock_org(conn, org_id: str) -> None:
     (even inside a trigger) does not fix it without an actual lock, because
     the same READ COMMITTED visibility rules apply there too.
 
-    Every one of the four call sites that can add, remove, or change an
-    owner's role for an org (this file's create_invite max_members check,
-    change_role, remove_member, and migration 0006's accept_invite_tx) takes
-    this SAME `FOR UPDATE` lock on the org's own row FIRST. A concurrent
-    second transaction touching the same org blocks here until the first
-    commits, then reads counts fresh against the now-committed state --
-    closing the race for any pair of these four operations on one org,
-    without affecting concurrency across different orgs at all.
+    Round 1 used `SELECT 1 FROM organizations WHERE id = %s FOR UPDATE` --
+    review round 2 found this looked correct here (this role, `authenticated`,
+    genuinely has both the grant and a matching RLS policy on organizations)
+    but was silently broken in migration 0006's accept_invite_tx, which runs
+    as `invite_definer`: Postgres requires an UPDATE policy (not just SELECT)
+    to satisfy `FOR UPDATE`, `invite_definer` only had a SELECT policy, RLS
+    filtered the row out, and the lock was never taken -- `FOR UPDATE` fails
+    OPEN, not closed. Switched to `pg_advisory_xact_lock`, which is NOT
+    subject to RLS at all (no policy/grant to ever get out of sync again),
+    used with the IDENTICAL key derivation in the SQL function -- row locks
+    and advisory locks are two independent locking systems that do not
+    interact, so all four call sites (this file's create_invite max_members
+    check, change_role, remove_member, and 0006's accept_invite_tx) MUST use
+    the same lock to actually serialize against each other.
+
+    A concurrent second transaction touching the same org blocks here until
+    the first commits (xact-scoped: released automatically at
+    COMMIT/ROLLBACK), then reads counts fresh against the now-committed
+    state -- closing the race for any pair of these four operations on one
+    org, without affecting concurrency across different orgs at all.
     """
-    await conn.execute("SELECT 1 FROM organizations WHERE id = %s FOR UPDATE", (org_id,))
+    await conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s::text, 0))", (org_id,)
+    )
 
 
 async def _owner_count(conn, org_id: str) -> int:
@@ -124,7 +139,22 @@ async def create_invite(
              caller.user_id, datetime.now(timezone.utc) + timedelta(days=7)),
         )
         (invite_id,) = await cur.fetchone()
-    return {"invite_id": str(invite_id), "token": token}
+    response = {"invite_id": str(invite_id)}
+    # Review round 2, Important-3 (second half): the raw token in this
+    # response is the ONLY channel by which a token reaches anyone but the
+    # requesting owner today (no mailer exists until Phase 3). Gated behind
+    # an explicit env flag the same way reviewer_otp is gated
+    # (api/routes/identity.py) -- read at REQUEST time, not at import time,
+    # so tests can monkeypatch it per-session (see tests/conftest.py's
+    # app_client fixture) while a real deployment defaults to OFF and never
+    # leaks it. Until Phase 3 wires actual delivery, this means invite
+    # acceptance depends on a token that isn't mailed to anyone -- that is
+    # the correct, honest state: the flow is incomplete until delivery
+    # exists, and it must fail closed (no token echoed) rather than be
+    # permissive in the meantime.
+    if os.environ.get("RETURN_INVITE_TOKEN_ENABLED") == "1":
+        response["token"] = token
+    return response
 
 
 @router.post("/invites/accept")
