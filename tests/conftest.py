@@ -135,15 +135,19 @@ from httpx import AsyncClient, ASGITransport
 @pytest.fixture
 async def seeded(raw_conn):
     from tests.factories import make_user, make_org, add_member, make_location
-    # Renumbering note (Task 7 fix report): this cap was chosen as "everything
-    # through Task 13's sample-org migration" when that migration was still
-    # numbered 0006. Task 7 took 0005 for email_verification_binding, which
-    # bumped Task 11's deletion migration to 0006 and Task 13's sample-org
-    # migration to 0007 -- so the cap moved to 7 to preserve the original
-    # intent (a stale `upto=6` would now stop one migration short, silently
-    # excluding Task 13's once it lands). Harmless today: migrations 0006/0007
-    # don't exist yet, so this applies everything that does (currently 0001-5).
-    await apply_migrations(raw_conn, upto=7)
+    # Renumbering note (Task 7 fix report, then Task 9): this cap was chosen
+    # as "everything through Task 13's sample-org migration" when that
+    # migration was still numbered 0006. Task 7 took 0005 for
+    # email_verification_binding, bumping Task 11's deletion migration to
+    # 0006 and Task 13's sample-org migration to 0007 (cap moved 6->7). Task 9
+    # then took 0006 for accept_invite_tx (the plan's accept_invite mechanism
+    # did not work as written -- see task-9-report.md -- and the fix needed a
+    # migration, which the plan had not budgeted a number for), bumping
+    # Task 11's migration to 0007 and Task 13's to 0008 (cap moved 7->8). A
+    # stale cap would silently stop one migration short once those land.
+    # Harmless today: migrations 0007/0008 don't exist yet, so this applies
+    # everything that does (currently 0001-6).
+    await apply_migrations(raw_conn, upto=8)
     alice = await make_user(raw_conn, "alice@acme.test")
     bob = await make_user(raw_conn, "bob@bistro.test")
     acme = await make_org(raw_conn, "Acme Diner")
