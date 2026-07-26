@@ -70,6 +70,11 @@ class TokenIn(BaseModel):
 
 
 class ReviewerOtpIn(BaseModel):
+    # Plain EmailStr, deliberately: it rejects `.test` addresses (see
+    # ContactEmailIn's comment above). Task 8's own tests need a real,
+    # non-reserved domain (e.g. reviewer@example.com) for this field, or
+    # they'll 422 before reviewer_otp ever runs -- that's this validator
+    # doing its job, not a routing bug.
     email: EmailStr
     code: str
 
@@ -89,11 +94,22 @@ async def set_contact_email(
         )
     token = secrets.token_urlsafe(32)
     async with tenant_connection(request.app.state.pool, caller.claims) as conn:
-        await conn.execute(
+        cur = await conn.execute(
             "UPDATE profiles SET contact_email = %s, contact_email_verified_at = NULL "
             "WHERE user_id = %s",
             (body.email, caller.user_id),
         )
+        # Important-2 fix (round 3): this UPDATE previously went unchecked,
+        # so a caller with no `profiles` row yet (e.g. a brand-new Apple
+        # sign-in that hasn't onboarded -- see
+        # test_apple_signin_with_no_membership_does_not_autocreate_org for
+        # exactly this state) got a silent no-op reported as 200 success:
+        # nothing was persisted, and no verification token could ever match a
+        # profile that doesn't exist. There is no profile to update, which is
+        # a 404 (the resource this call targets doesn't exist), not a 409
+        # (nothing here conflicts with existing state).
+        if cur.rowcount != 1:
+            raise HTTPException(404, "no profile exists for this account yet")
         # Important-1 fix: bind the token to the exact address it was issued
         # for. Without this, a stale, still-unexpired token from an earlier
         # call here could later verify whatever address happens to be on the

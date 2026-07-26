@@ -27,6 +27,37 @@ async def test_apple_signin_with_no_membership_does_not_autocreate_org(app_clien
     assert after == before, "Apple sign-in must not auto-create an organization"
 
 
+async def test_contact_email_requires_an_existing_profile(app_client, raw_conn, seeded):
+    """Review fix (Important-2, round 3): a profileless caller must get a
+    real error, not a silent no-op reported as success.
+
+    Constructs the same profileless state as the test above -- a raw
+    `auth.users` insert with no matching `profiles` row (e.g. a brand-new
+    Apple sign-in that hasn't been onboarded). Before this fix, the UPDATE
+    touched zero rows, nothing was persisted, and the endpoint still
+    returned 200 {"verification_sent": false} -- a lie by omission, since no
+    verification token could ever match a profile that doesn't exist.
+    """
+    new_sub = "00000000-0000-7000-8000-0000000000ee"
+    await raw_conn.execute(
+        "INSERT INTO auth.users (id, email) VALUES (%s, 'relay4@privaterelay.appleid.com')",
+        (new_sub,),
+    )
+    await raw_conn.commit()
+
+    r = await app_client.post(
+        "/identity/contact-email",
+        json={"email": "owner@acme.example.com"},
+        headers={"Authorization": f"Bearer {mint(new_sub)}"},
+    )
+    assert r.status_code == 404
+
+    cur = await raw_conn.execute(
+        "SELECT count(*) FROM email_verifications WHERE user_id = %s", (new_sub,)
+    )
+    assert (await cur.fetchone())[0] == 0, "no verification row should be created for nothing"
+
+
 async def test_linking_by_matching_email_is_refused(app_client, raw_conn, seeded):
     """Explicitly assert the account-takeover primitive is absent."""
     attacker = "00000000-0000-7000-8000-0000000000bb"
