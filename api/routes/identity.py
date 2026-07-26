@@ -6,9 +6,9 @@ import secrets
 import time
 from datetime import datetime, timedelta, timezone
 import jwt
-from email_validator import EmailNotValidError, validate_email
+import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, EmailStr, field_validator
+from pydantic import BaseModel, EmailStr
 from api.auth import CallerIdentity, require_caller
 from api.db import tenant_connection
 
@@ -17,27 +17,15 @@ RELAY_DOMAIN = "privaterelay.appleid.com"
 
 
 class ContactEmailIn(BaseModel):
-    # NOT pydantic's plain EmailStr: its underlying email_validator hard-
-    # rejects the `.test` TLD unconditionally, independent of
-    # check_deliverability -- see api/models.py's comment on
-    # MeResponse.contact_email for the identical collision on the read side.
-    # `.test` is the RFC 2606 reserved-for-testing domain this project's
-    # fixtures use throughout (tests/factories.py, tests/conftest.py's
-    # `seeded`), so a plain EmailStr here would make this write path
-    # permanently untestable against the project's own seed data -- exactly
-    # what happened: the brief's own test posts "owner@acme.test" and got a
-    # 422 instead of the expected 200. `test_environment=True` keeps every
-    # other real RFC 5321/6531 syntax check (this is not a rubber stamp) and
-    # only stops rejecting that one reserved TLD.
-    email: str
-
-    @field_validator("email")
-    @classmethod
-    def _valid_email(cls, v: str) -> str:
-        try:
-            return validate_email(v, check_deliverability=False, test_environment=True).normalized
-        except EmailNotValidError as e:
-            raise ValueError(str(e))
+    # Review fix (Important-5): plain EmailStr, matching ReviewerOtpIn below --
+    # same file, same request-validation role, one answer. The earlier
+    # revision special-cased pydantic's email_validator (test_environment=True)
+    # to accept the `.test` TLD this project's fixtures use, but that taught
+    # production code about tests and left it permanently accepting an
+    # undeliverable digest destination. The fix belongs in the test data, not
+    # here: tests/test_identity.py uses a real, non-reserved domain
+    # (acme.example.com) for anything posted to this field.
+    email: EmailStr
 
 
 class TokenIn(BaseModel):
@@ -53,7 +41,10 @@ class ReviewerOtpIn(BaseModel):
 async def set_contact_email(
     body: ContactEmailIn, request: Request, caller: CallerIdentity = Depends(require_caller)
 ):
-    if body.email.lower().endswith(RELAY_DOMAIN):
+    # Minor fix: compare against "@" + RELAY_DOMAIN, not a bare suffix match --
+    # `endswith(RELAY_DOMAIN)` alone would also reject a real address like
+    # "a@notprivaterelay.appleid.com".
+    if body.email.lower().endswith("@" + RELAY_DOMAIN):
         raise HTTPException(
             422,
             "An Apple private relay address cannot receive the weekly drift digest. "
@@ -66,9 +57,15 @@ async def set_contact_email(
             "WHERE user_id = %s",
             (body.email, caller.user_id),
         )
+        # Important-1 fix: bind the token to the exact address it was issued
+        # for. Without this, a stale, still-unexpired token from an earlier
+        # call here could later verify whatever address happens to be on the
+        # profile *now* -- including one a different party set afterwards
+        # that this token's original recipient never consented to.
         await conn.execute(
-            "INSERT INTO email_verifications (user_id, token_hash, expires_at) VALUES (%s, %s, %s)",
-            (caller.user_id, hashlib.sha256(token.encode()).hexdigest(),
+            "INSERT INTO email_verifications (user_id, email, token_hash, expires_at) "
+            "VALUES (%s, %s, %s, %s)",
+            (caller.user_id, body.email, hashlib.sha256(token.encode()).hexdigest(),
              datetime.now(timezone.utc) + timedelta(hours=24)),
         )
     # Phase 3 wires actual mail delivery. Nothing sends this token anywhere
@@ -87,15 +84,24 @@ async def verify_contact_email(
     async with tenant_connection(request.app.state.pool, caller.claims) as conn:
         cur = await conn.execute(
             "DELETE FROM email_verifications WHERE user_id = %s AND token_hash = %s "
-            "AND expires_at > now() RETURNING id",
+            "AND expires_at > now() RETURNING email",
             (caller.user_id, token_hash),
+        )
+        row = await cur.fetchone()
+        if not row:
+            raise HTTPException(400, "invalid or expired verification token")
+        # The token is single-use and is consumed either way (deleted above).
+        # It only flips the verified flag if the address it was issued for is
+        # STILL the profile's current contact_email -- a token minted for an
+        # earlier address must not silently validate whatever address a
+        # later call replaced it with.
+        cur = await conn.execute(
+            "UPDATE profiles SET contact_email_verified_at = now() "
+            "WHERE user_id = %s AND contact_email = %s RETURNING user_id",
+            (caller.user_id, row[0]),
         )
         if not await cur.fetchone():
             raise HTTPException(400, "invalid or expired verification token")
-        await conn.execute(
-            "UPDATE profiles SET contact_email_verified_at = now() WHERE user_id = %s",
-            (caller.user_id,),
-        )
     return {"verified": True}
 
 
@@ -121,18 +127,31 @@ async def apple_link_confirm(
     body: TokenIn, request: Request, caller: CallerIdentity = Depends(require_caller)
 ):
     token_hash = hashlib.sha256(body.token.encode()).hexdigest()
-    async with tenant_connection(request.app.state.pool, caller.claims) as conn:
-        cur = await conn.execute(
-            "DELETE FROM apple_link_requests WHERE token_hash = %s AND expires_at > now() "
-            "RETURNING apple_sub",
-            (token_hash,),
-        )
-        row = await cur.fetchone()
-        if not row:
-            raise HTTPException(400, "invalid or expired link token")
-        await conn.execute(
-            "UPDATE profiles SET apple_sub = %s WHERE user_id = %s", (row[0], caller.user_id)
-        )
+    try:
+        async with tenant_connection(request.app.state.pool, caller.claims) as conn:
+            cur = await conn.execute(
+                "DELETE FROM apple_link_requests WHERE token_hash = %s AND expires_at > now() "
+                "RETURNING apple_sub",
+                (token_hash,),
+            )
+            row = await cur.fetchone()
+            if not row:
+                raise HTTPException(400, "invalid or expired link token")
+            # Important-2 fix: the token was valid, but that alone doesn't
+            # mean anything got linked -- check the UPDATE actually touched a
+            # row before reporting success.
+            cur = await conn.execute(
+                "UPDATE profiles SET apple_sub = %s WHERE user_id = %s",
+                (row[0], caller.user_id),
+            )
+            if cur.rowcount != 1:
+                raise HTTPException(400, "no profile to link this Apple ID to")
+    except psycopg.errors.UniqueViolation:
+        # Important-3 fix: profiles.apple_sub is UNIQUE. Once a different
+        # account already holds this Apple identity, the UPDATE above raises
+        # rather than silently overwriting -- surface that as a clean 4xx,
+        # not a 500.
+        raise HTTPException(409, "this Apple ID is already linked to another account")
     return {"linked": True}
 
 
