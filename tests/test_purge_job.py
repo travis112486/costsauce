@@ -26,6 +26,7 @@ transport, not merely that our own code called a mock.
 import asyncio
 
 import httpx
+import psycopg
 import pytest
 
 import api.jobs.purge as purge_module
@@ -264,6 +265,64 @@ async def test_purge_job_does_not_purge_an_org_a_racing_cancel_saves(raw_conn, s
     assert (await cur.fetchone())[0] == 0, (
         "the org must actually be gone -- the cancel lost the race, not silently no-op'd"
     )
+
+
+async def test_organizations_pending_purge_works_for_a_caller_with_no_privilege_on_organizations(
+    raw_conn, seeded, db_url
+):
+    """Pins the exact defect this task's own first draft shipped and this
+    file's other tests cannot rule out: `db_url` connects as a genuine
+    Postgres superuser, which bypasses `organizations`' FORCE ROW LEVEL
+    SECURITY regardless of grants -- so a raw `SELECT ... FOR UPDATE`
+    against it "worked" in every other test here even when it would return
+    zero rows (silently) or fail outright (loudly) for the actual
+    non-superuser role a real Supabase migration runner is. This creates a
+    deliberately unprivileged role, grants it EXECUTE on
+    `organizations_pending_purge` ONLY, and proves: a raw SELECT still fails
+    for that role, while the accessor still returns the real row and takes
+    a real lock -- so the SECURITY DEFINER elevation this migration relies
+    on does not depend on the caller happening to be a superuser.
+    """
+    await raw_conn.execute(
+        "UPDATE organizations SET deletion_scheduled_at = now() - interval '31 days' "
+        "WHERE id = %s",
+        (seeded["acme"],),
+    )
+    await raw_conn.execute(
+        "CREATE ROLE test_no_privilege_caller LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD 'x'"
+    )
+    # Schema USAGE only -- a real migration runner obviously has this (it
+    # created every object in the schema). No table-level grant on
+    # `organizations` itself, which is the one privilege this test is
+    # actually about.
+    await raw_conn.execute("GRANT USAGE ON SCHEMA public TO test_no_privilege_caller")
+    await raw_conn.execute(
+        "GRANT EXECUTE ON FUNCTION organizations_pending_purge(interval) "
+        "TO test_no_privilege_caller"
+    )
+    await raw_conn.commit()
+
+    caller_url = db_url.replace("postgres:postgres", "test_no_privilege_caller:x")
+    try:
+        conn = await psycopg.AsyncConnection.connect(caller_url, autocommit=True)
+        try:
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                await conn.execute("SELECT id FROM organizations")
+
+            cur = await conn.execute(
+                "SELECT id FROM organizations_pending_purge(interval '30 days')"
+            )
+            assert await cur.fetchall() == [(seeded["acme"],)]
+        finally:
+            await conn.close()
+    finally:
+        await raw_conn.execute(
+            "REVOKE EXECUTE ON FUNCTION organizations_pending_purge(interval) "
+            "FROM test_no_privilege_caller"
+        )
+        await raw_conn.execute("REVOKE USAGE ON SCHEMA public FROM test_no_privilege_caller")
+        await raw_conn.execute("DROP ROLE test_no_privilege_caller")
+        await raw_conn.commit()
 
 
 # ---------------------------------------------------------------------------

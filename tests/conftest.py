@@ -135,19 +135,25 @@ from httpx import AsyncClient, ASGITransport
 @pytest.fixture
 async def seeded(raw_conn):
     from tests.factories import make_user, make_org, add_member, make_location
-    # Renumbering note (Task 7 fix report, then Task 9): this cap was chosen
-    # as "everything through Task 13's sample-org migration" when that
-    # migration was still numbered 0006. Task 7 took 0005 for
+    # Renumbering note (Task 7 fix report, then Task 9, then Task 12): this
+    # cap was chosen as "everything through Task 13's sample-org migration"
+    # when that migration was still numbered 0006. Task 7 took 0005 for
     # email_verification_binding, bumping Task 11's deletion migration to
     # 0006 and Task 13's sample-org migration to 0007 (cap moved 6->7). Task 9
     # then took 0006 for accept_invite_tx (the plan's accept_invite mechanism
     # did not work as written -- see task-9-report.md -- and the fix needed a
     # migration, which the plan had not budgeted a number for), bumping
-    # Task 11's migration to 0007 and Task 13's to 0008 (cap moved 7->8). A
-    # stale cap would silently stop one migration short once those land.
-    # Harmless today: migrations 0007/0008 don't exist yet, so this applies
-    # everything that does (currently 0001-6).
-    await apply_migrations(raw_conn, upto=8)
+    # Task 11's migration to 0007 and Task 13's to 0008 (cap moved 7->8). Task
+    # 12 then took 0008 for `organizations_pending_purge` -- the plan's purge
+    # job read the doomed-org list with a raw SELECT against `organizations`,
+    # which is FORCE ROW LEVEL SECURITY; that query returns zero rows for a
+    # non-superuser migration runner (see task-12-report.md), so a SECURITY
+    # DEFINER accessor was needed and the plan had not budgeted a migration
+    # for this either. Task 13's sample-org migration is now 0009 (cap moved
+    # 8->9). A stale cap would silently stop one migration short once that
+    # lands. Harmless today: migration 0009 doesn't exist yet, so this
+    # applies everything that does (currently 0001-8).
+    await apply_migrations(raw_conn, upto=9)
     alice = await make_user(raw_conn, "alice@acme.test")
     bob = await make_user(raw_conn, "bob@bistro.test")
     acme = await make_org(raw_conn, "Acme Diner")

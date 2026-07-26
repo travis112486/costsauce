@@ -60,17 +60,35 @@ GRACE = f"{GRACE_DAYS} days"
 async def run_purge(db_url: str, storage_delete=None) -> int:
     """Hard-delete organizations whose grace window has elapsed.
 
-    The candidate set is selected with `... ORDER BY id FOR UPDATE` in the
-    SAME transaction that later calls `purge_scheduled_orgs`, and this is
-    load-bearing, not decorative:
+    The candidate set is read via migration 0008's
+    `organizations_pending_purge(interval)`, NOT a raw
+    `SELECT ... FROM organizations`. `organizations` is FORCE ROW LEVEL
+    SECURITY (0004), and the only SELECT policies on it belong to
+    `authenticated` (scoped to the caller's own orgs), `deletion_definer` and
+    `purge_definer` -- both revoked from the migration runner at the end of
+    0007. A plain migration-runner connection issuing that SELECT directly
+    (this job's first-draft approach) would see ZERO rows on real,
+    non-superuser Supabase -- invisible in THIS codebase's own test harness,
+    where `db_url` connects as a genuine Postgres superuser that bypasses RLS
+    regardless of FORCE. See 0008's own migration comment for the confirmed
+    reproduction against a purpose-built no-privilege role.
 
-    * `FOR UPDATE` takes a row lock on exactly the doomed rows that blocks
-      `cancel_org_deletion`'s UPDATE (api/routes/deletion.py) against them
-      until this transaction ends. Without it, a cancel could commit
-      between this SELECT and the storage deletes below, and this job would
-      then delete a saved org's files anyway -- the storage-side mirror of
-      the row-purge race migration 0007's `purge_scheduled_orgs` already
-      guards against with its own advisory lock and re-check.
+    That accessor's `FOR UPDATE ORDER BY id` is load-bearing, not decorative,
+    and is why it has to be a SECURITY DEFINER function rather than a plain
+    query this job issues itself:
+
+    * `FOR UPDATE` places a row lock on exactly the doomed rows. Locks
+      belong to the TRANSACTION that physically takes them, not to whichever
+      privilege admitted the read (confirmed empirically: a no-privilege
+      role calling a SECURITY DEFINER function that does `FOR UPDATE`
+      internally holds the same lock a direct, privileged `FOR UPDATE` would
+      have), so it blocks `cancel_org_deletion`'s UPDATE
+      (api/routes/deletion.py) against these rows until THIS job's
+      transaction ends. Without it, a cancel could commit between this read
+      and the storage deletes below, and this job would delete a saved org's
+      files anyway -- the storage-side mirror of the row-purge race
+      `purge_scheduled_orgs` already guards against with its own advisory
+      lock and re-check.
     * `ORDER BY id` matches every other multi-row locker in this codebase
       (`purge_scheduled_orgs`'s own loop, `_lock_caller_orgs`), so two
       overlapping invocations of this job (a slow run still finishing when
@@ -81,23 +99,23 @@ async def run_purge(db_url: str, storage_delete=None) -> int:
     this same transaction and therefore against the same `now()` snapshot
     (Postgres fixes `now()` for the lifetime of a transaction), so the set
     it actually deletes cannot differ from the set storage was just cleared
-    for -- the FOR UPDATE lock is what makes that guarantee hold across the
-    gap between this SELECT and that call, not just the shared snapshot.
+    for -- the FOR UPDATE lock taken above is what makes that guarantee hold
+    across the gap between this read and that call, not just the shared
+    snapshot.
 
-    NOTE on `interval %s`: the brief's own given code writes this as a bind
-    parameter (`... - interval %s`, params=(GRACE,)); that is not valid
-    Postgres syntax -- `INTERVAL '...'` is a generic type-constant literal
-    and does not accept a bind parameter in that position. Confirmed against
-    a live Postgres 17 instance before writing this: it raises
-    `SyntaxError: syntax error at or near "$1"`. Written here as `%s::interval`
-    instead, which casts a normally-bound text parameter.
+    NOTE on `interval %s`: the brief's own given code writes the grace
+    argument as a bind parameter (`... - interval %s`, params=(GRACE,));
+    that is not valid Postgres syntax -- `INTERVAL '...'` is a generic
+    type-constant literal and does not accept a bind parameter in that
+    position. Confirmed against a live Postgres 17 instance before writing
+    this: it raises `SyntaxError: syntax error at or near "$1"`. Written
+    here as `%s::interval` instead, which casts a normally-bound text
+    parameter.
     """
     conn = await psycopg.AsyncConnection.connect(db_url, autocommit=False)
     try:
         cur = await conn.execute(
-            "SELECT id::text FROM organizations WHERE deletion_scheduled_at IS NOT NULL "
-            "AND deletion_scheduled_at < now() - %s::interval ORDER BY id FOR UPDATE",
-            (GRACE,),
+            "SELECT id FROM organizations_pending_purge(%s::interval)", (GRACE,)
         )
         doomed = [r[0] for r in await cur.fetchall()]
         if not doomed:
