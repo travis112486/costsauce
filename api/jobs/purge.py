@@ -1,8 +1,9 @@
 # api/jobs/purge.py
 """Task 12: the scheduled purge job.
 
-Two independent halves, meant to run unattended on a schedule (cron, per the
-runbook note carried to Task 14: "api/jobs/purge.py runs daily via cron"):
+Three independent halves, meant to run unattended on a schedule (cron, per
+the runbook note carried to Task 14: "api/jobs/purge.py runs daily via
+cron"):
 
   run_purge(db_url, storage_delete=None) -> int
       Hard-deletes organizations whose 30-day grace window has elapsed, via
@@ -25,12 +26,19 @@ runbook note carried to Task 14: "api/jobs/purge.py runs daily via cron"):
       reason Task 11 added the `deleted_accounts` tombstone in the first
       place -- see that migration's own comment on the accessor below.
 
-Both halves are independent of each other and of each other's failures: an
-org can be purged with accounts still pending identity purge (unrelated
-clocks -- DELETE /me carries no grace period), and an identity can be purged
-for a user who never owned anything. Neither blocks or is blocked by the
-other; see `run_all` at the bottom, which is what the cron invocation
-actually calls.
+  purge_expired_sync_ops(db_url) -> int
+      Reaps `sync_ops` rows past the 7-day idempotency-ledger TTL (spec
+      §5.3), via migration 0014's `purge_expired_sync_ops(interval)`
+      SECURITY DEFINER function -- same name, deliberately, as this Python
+      wrapper; different arity is what disambiguates a call site.
+
+All three halves are independent of each other and of each other's
+failures: an org can be purged with accounts still pending identity purge
+(unrelated clocks -- DELETE /me carries no grace period), an identity can be
+purged for a user who never owned anything, and the sync_ops ledger ages out
+on its own 7-day clock tied to neither. None blocks or is blocked by either
+of the others; see `run_all` at the bottom, which is what the cron
+invocation actually calls.
 """
 import asyncio
 import logging
@@ -386,34 +394,64 @@ async def purge_pending_identities(
 
 
 # ---------------------------------------------------------------------------
+# Half 3: sync_ops TTL (§5.3 — the ledger holds 7 days of applied op results)
+# ---------------------------------------------------------------------------
+SYNC_OPS_TTL = "7 days"
+
+
+async def purge_expired_sync_ops(db_url: str) -> int:
+    """Delete ledger rows older than the TTL via migration 0014's SECURITY
+    DEFINER reaper. Same identity note as the other halves: sync_ops is
+    FORCE RLS with member-scoped policies, so a direct DELETE from this
+    connection would remove zero rows on real Supabase; the definer function
+    is the only sanctioned path."""
+    conn = await psycopg.AsyncConnection.connect(db_url, autocommit=False)
+    try:
+        cur = await conn.execute(
+            "SELECT purge_expired_sync_ops(%s::interval)", (SYNC_OPS_TTL,))
+        (n,) = await cur.fetchone()
+        await conn.commit()
+        return n
+    except BaseException:
+        await conn.rollback()
+        raise
+    finally:
+        await conn.close()
+
+
+# ---------------------------------------------------------------------------
 # Cron entrypoint
 # ---------------------------------------------------------------------------
-async def run_all(db_url: str, *, storage_delete=None) -> tuple[int, int]:
+async def run_all(db_url: str, *, storage_delete=None) -> tuple[int, int, int]:
     """What the daily cron invocation actually calls.
 
-    The two halves are attempted independently: an Admin API outage must not
-    stop insolvent orgs (and their storage) from being cleared on schedule,
-    and a storage backend outage must not stop identity purges that have
-    nothing to do with organizations at all. Both are attempted regardless
-    of whether the other raised, and any failure is re-raised only after
-    both have had their turn -- so cron's own failure signal (a non-zero
-    exit code) still fires, but neither half can silently starve the other
-    of runtime.
+    The three halves are attempted independently: an Admin API outage must
+    not stop insolvent orgs (and their storage) from being cleared on
+    schedule, a storage backend outage must not stop identity purges that
+    have nothing to do with organizations at all, and neither must stop the
+    sync_ops ledger from aging out on its own 7-day clock. All three are
+    attempted regardless of whether another raised, and any failure is
+    re-raised only after all three have had their turn -- so cron's own
+    failure signal (a non-zero exit code) still fires, but no half can
+    silently starve another of runtime.
 
     `getattr(exc, "purged", 0)` on each catch: `StorageNotConfiguredError`
     and `PartialIdentityPurgeError` both carry `.purged` for exactly this --
     so a half that finished with real work done but is still correctly
-    reported as failed does not also lose that count. Logged explicitly
-    (not just the traceback) and attached to the RuntimeError this raises,
-    so a caller with its own monitoring around this job -- not merely
-    watching the exit code -- can still recover how much actually happened
-    before the failure. A plain exception (a missing env var, a network
-    error before anything ran) has no `.purged`, and 0 is the right answer
-    for it.
+    reported as failed does not also lose that count. `purge_expired_sync_ops`
+    raises no such subclass (a failed connection or query has nothing partial
+    to report), so it falls back to the same `getattr` default of 0 as any
+    other half's plain exception. Logged explicitly (not just the traceback)
+    and attached to the RuntimeError this raises, so a caller with its own
+    monitoring around this job -- not merely watching the exit code -- can
+    still recover how much actually happened before the failure. A plain
+    exception (a missing env var, a network error before anything ran) has
+    no `.purged`, and 0 is the right answer for it.
     """
     failed: list[str] = []
     orgs_purged = 0
     identities_purged = 0
+    sync_ops_purged = 0
 
     try:
         orgs_purged = await run_purge(db_url, storage_delete=storage_delete)
@@ -429,25 +467,39 @@ async def run_all(db_url: str, *, storage_delete=None) -> tuple[int, int]:
         log.exception("identity purge failed (purged %d before failing)", identities_purged)
         failed.append("identities")
 
+    try:
+        sync_ops_purged = await purge_expired_sync_ops(db_url)
+    except Exception as exc:
+        sync_ops_purged = getattr(exc, "purged", 0)
+        log.exception("sync_ops purge failed (purged %d before failing)", sync_ops_purged)
+        failed.append("sync_ops")
+
     if failed:
         exc = RuntimeError(f"purge job failed for: {', '.join(failed)}")
         exc.orgs_purged = orgs_purged
         exc.identities_purged = identities_purged
+        exc.sync_ops_purged = sync_ops_purged
         raise exc
-    return orgs_purged, identities_purged
+    return orgs_purged, identities_purged, sync_ops_purged
 
 
 if __name__ == "__main__":
     # Review Important-4: deliberately NOT `DATABASE_URL` -- api/main.py
     # reads that for the pooled `app_user` connection the API server uses,
     # which holds none of the EXECUTE grants this job needs on
-    # `organizations_pending_purge`, `purge_scheduled_orgs`, or
-    # `accounts_pending_identity_purge` (all three are granted only to the
-    # migration-runner identity). Deployed in one environment where both
-    # variables happened to be set to the app server's own value, this job
-    # would fail every call with `InsufficientPrivilege`. A distinct name
-    # makes that collision structurally impossible instead of a runbook note
-    # someone has to remember.
+    # `organizations_pending_purge`, `purge_scheduled_orgs`,
+    # `accounts_pending_identity_purge`, or `purge_expired_sync_ops` (all
+    # four are granted only to the migration-runner identity). Deployed in
+    # one environment where both variables happened to be set to the app
+    # server's own value, this job would fail every call with
+    # `InsufficientPrivilege`. A distinct name makes that collision
+    # structurally impossible instead of a runbook note someone has to
+    # remember.
     logging.basicConfig(level=logging.INFO)
-    _orgs_purged, _identities_purged = asyncio.run(run_all(os.environ["PURGE_DATABASE_URL"]))
-    print(f"orgs_purged={_orgs_purged} identities_purged={_identities_purged}")
+    _orgs_purged, _identities_purged, _sync_ops_purged = asyncio.run(
+        run_all(os.environ["PURGE_DATABASE_URL"])
+    )
+    print(
+        f"orgs_purged={_orgs_purged} identities_purged={_identities_purged} "
+        f"sync_ops_purged={_sync_ops_purged}"
+    )

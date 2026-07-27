@@ -25,6 +25,7 @@ transport, not merely that our own code called a mock.
 """
 import asyncio
 import contextlib
+import uuid
 
 import httpx
 import psycopg
@@ -742,6 +743,9 @@ async def test_run_all_is_non_zero_when_every_pending_identity_fails(raw_conn, s
     async def fake_orgs(db_url, storage_delete=None):
         return 0
 
+    async def fake_sync_ops(db_url):
+        return 0
+
     async def real_identities_with_failing_transport(db_url, **kwargs):
         async with httpx.AsyncClient(transport=httpx.MockTransport(always_500)) as client:
             return await purge_pending_identities(
@@ -751,6 +755,7 @@ async def test_run_all_is_non_zero_when_every_pending_identity_fails(raw_conn, s
 
     import unittest.mock
     with unittest.mock.patch.object(purge_module, "run_purge", fake_orgs), \
+         unittest.mock.patch.object(purge_module, "purge_expired_sync_ops", fake_sync_ops), \
          unittest.mock.patch.object(
              purge_module, "purge_pending_identities", real_identities_with_failing_transport
          ):
@@ -842,6 +847,44 @@ async def test_delete_identity_raises_the_documented_error_on_an_unhandled_statu
 
 
 # ---------------------------------------------------------------------------
+# purge_expired_sync_ops -- the sync_ops half (Task 10). The ledger holds
+# 7 days of applied op results (§5.3); this reaps rows past the TTL via
+# migration 0014's `purge_expired_sync_ops(interval)` SECURITY DEFINER
+# reaper. sync_ops does not exist until migration 0014, so this half needs
+# `seeded_biz` (all migrations), not the org/identity halves' `seeded`
+# (pinned to upto=9 -- see that fixture's own comment).
+# ---------------------------------------------------------------------------
+async def test_purge_expired_sync_ops_deletes_backdated_rows_and_keeps_fresh_ones(
+    raw_conn, seeded_biz, db_url
+):
+    s = seeded_biz
+    old_op = uuid.uuid4()
+    fresh_op = uuid.uuid4()
+    await raw_conn.execute(
+        "INSERT INTO sync_ops (op_id, org_id, batch_id, result_json)"
+        " VALUES (%s, %s, uuid_generate_v7(), '{}')",
+        (old_op, s["acme"]),
+    )
+    await raw_conn.execute(
+        "INSERT INTO sync_ops (op_id, org_id, batch_id, result_json)"
+        " VALUES (%s, %s, uuid_generate_v7(), '{}')",
+        (fresh_op, s["acme"]),
+    )
+    await raw_conn.execute(
+        "UPDATE sync_ops SET applied_at = now() - interval '8 days' WHERE op_id = %s",
+        (old_op,),
+    )
+    await raw_conn.commit()
+
+    n = await purge_module.purge_expired_sync_ops(db_url)
+    assert n == 1
+
+    cur = await raw_conn.execute("SELECT op_id FROM sync_ops")
+    remaining = {r[0] for r in await cur.fetchall()}
+    assert remaining == {fresh_op}, "the fresh row must survive; only the backdated one is reaped"
+
+
+# ---------------------------------------------------------------------------
 # run_all -- the cron entrypoint. Not in the brief's interface list, but it
 # is what api/jobs/purge.py's __main__ block actually calls, so it ships and
 # is tested like anything else that ships.
@@ -858,8 +901,12 @@ async def test_run_all_runs_the_identity_half_even_when_the_org_half_fails(
         identity_called["value"] = True
         return 0
 
+    async def fake_sync_ops(db_url):
+        return 0
+
     monkeypatch.setattr(purge_module, "run_purge", boom)
     monkeypatch.setattr(purge_module, "purge_pending_identities", fake_identities)
+    monkeypatch.setattr(purge_module, "purge_expired_sync_ops", fake_sync_ops)
 
     with pytest.raises(RuntimeError, match="organizations"):
         await run_all(db_url)
@@ -881,8 +928,12 @@ async def test_run_all_runs_the_org_half_even_when_the_identity_half_fails(
     async def boom(db_url, **kwargs):
         raise RuntimeError("Supabase Admin API unreachable")
 
+    async def fake_sync_ops(db_url):
+        return 0
+
     monkeypatch.setattr(purge_module, "run_purge", fake_orgs)
     monkeypatch.setattr(purge_module, "purge_pending_identities", boom)
+    monkeypatch.setattr(purge_module, "purge_expired_sync_ops", fake_sync_ops)
 
     with pytest.raises(RuntimeError, match="identities"):
         await run_all(db_url)
@@ -892,15 +943,56 @@ async def test_run_all_runs_the_org_half_even_when_the_identity_half_fails(
     )
 
 
-async def test_run_all_returns_both_counts_when_both_halves_succeed(monkeypatch, db_url, seeded):
+async def test_run_all_runs_the_other_halves_even_when_the_sync_ops_half_fails(
+    monkeypatch, db_url, seeded
+):
+    """Task 10's own failure-independence pin, mirroring the two tests above:
+    an unreachable ledger reaper must not stop insolvent orgs or pending
+    identities from being cleared on schedule, and the run must still be
+    reported as failed with "sync_ops" identifying which half broke.
+    """
+    org_called = {"value": False}
+    identity_called = {"value": False}
+
+    async def fake_orgs(db_url, storage_delete=None):
+        org_called["value"] = True
+        return 1
+
+    async def fake_identities(db_url, **kwargs):
+        identity_called["value"] = True
+        return 2
+
+    async def boom(db_url):
+        raise RuntimeError("sync_ops database unreachable")
+
+    monkeypatch.setattr(purge_module, "run_purge", fake_orgs)
+    monkeypatch.setattr(purge_module, "purge_pending_identities", fake_identities)
+    monkeypatch.setattr(purge_module, "purge_expired_sync_ops", boom)
+
+    with pytest.raises(RuntimeError, match="sync_ops"):
+        await run_all(db_url)
+
+    assert org_called["value"] is True, (
+        "a sync_ops-purge failure must not prevent the org half from running"
+    )
+    assert identity_called["value"] is True, (
+        "a sync_ops-purge failure must not prevent the identity half from running"
+    )
+
+
+async def test_run_all_returns_three_counts_when_all_halves_succeed(monkeypatch, db_url, seeded):
     async def fake_orgs(db_url, storage_delete=None):
         return 2
 
     async def fake_identities(db_url, **kwargs):
         return 5
 
+    async def fake_sync_ops(db_url):
+        return 7
+
     monkeypatch.setattr(purge_module, "run_purge", fake_orgs)
     monkeypatch.setattr(purge_module, "purge_pending_identities", fake_identities)
+    monkeypatch.setattr(purge_module, "purge_expired_sync_ops", fake_sync_ops)
 
     result = await run_all(db_url)
-    assert result == (2, 5)
+    assert result == (2, 5, 7)
