@@ -4,8 +4,10 @@
 -- NUMBERING: the plan called this file `0005_deletion.sql`. It was written
 -- before Task 7 took 0005 (email_verification_binding) and Task 9 took 0006
 -- (accept_invite_definer, which the plan had not budgeted a migration for at
--- all). 0007 is the next free number; Task 13's sample-org migration becomes
--- 0008. `tests/conftest.py`'s `seeded` already caps at 8.
+-- all). 0007 is this file. Task 12 then took 0008
+-- (org_purge_accessor, also unbudgeted), so Task 13's sample-org migration
+-- is 0009 -- NOT 0008, as this header said until the final review, and
+-- `tests/conftest.py`'s `seeded` caps at `upto=9` to match.
 --
 -- Two operations are modelled here and they are deliberately NOT symmetric:
 --

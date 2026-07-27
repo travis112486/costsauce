@@ -1,5 +1,39 @@
 # api/routes/identity.py
 #
+# NOTHING IN PHASE 1a CREATES A `profiles` ROW. Read this before concluding
+# that contact-email verification is broken -- the symptom shows up here, but
+# the cause is upstream and is a scope gap, not a defect in this file.
+#
+# There is no signup endpoint, no organization-creation endpoint, and no
+# trigger on `auth.users` anywhere in this repository. The only
+# `INSERT INTO profiles` outside `tests/factories.py` is none; the only
+# `INSERT INTO organizations` is migration 0009's sample org. Migration 0004
+# states the intent -- "orgs are created out of band (signup, sample
+# seeding)" -- and the signup half of that sentence was never built.
+#
+# The consequence chain, because it terminates a long way from its cause:
+#
+#   1. A new `auth.users` row has no `profiles` row.
+#   2. `set_contact_email` below therefore 404s ("no profile exists for this
+#      account yet") -- see its own Important-2 comment, which describes this
+#      state as a brand-new Apple sign-in that hasn't onboarded. There is no
+#      onboarding.
+#   3. `profiles.contact_email_verified_at` therefore stays NULL forever.
+#   4. `accept_invite_tx` (migration 0006) reads the caller's contact_email
+#      only `WHERE contact_email_verified_at IS NOT NULL`, and folds the
+#      email match into the UPDATE that consumes the token -- so the caller
+#      matches nothing and every invite comes back `invalid`.
+#   5. Invite acceptance is therefore unreachable for any account this
+#      deployment can create today, even though issuing invites works.
+#
+# Spec §16 names both "verified contact email" and "full multi-user roles and
+# invites (D7)" as Phase 1a deliverables. Both are built and individually
+# tested; what is missing is account provisioning upstream of them. Until
+# something creates profiles (Phase 2a's iOS onboarding, a signup route, or a
+# Supabase auth hook), every account must be provisioned by hand --
+# docs/runbooks/phase-1a-deploy.md §10 and §11 carry the operator procedure,
+# including for the App Review reviewer account.
+#
 # Apple account linking (POST /identity/apple/link-request and
 # /apple/link-confirm) is DESCOPED to Phase 2a -- Travis's call, Task 7
 # review. The flow is unreachable until the iOS client exists (it needs a

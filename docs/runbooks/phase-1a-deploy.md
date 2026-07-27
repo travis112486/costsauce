@@ -287,7 +287,7 @@ Run these against `khohfrfqzbieaiikqlsa` immediately after `0009` applies.
 | `SUPABASE_SERVICE_ROLE_KEY` | Purge job (identity-purge half) | Same failure mode as `SUPABASE_URL` — both are checked together and the job refuses to run without either. Never let this key reach the API server's own process env unnecessarily; it is only used for one Admin API call, in one job. |
 | `REVIEWER_OTP_ENABLED` | `api/routes/identity.py` | See §7, its own section — this is the single most sensitive flag in this list. |
 | `REVIEWER_EMAIL` / `REVIEWER_CODE` | `api/routes/identity.py` | Reviewer OTP compares the request body against these with `hmac.compare_digest`. Unset: both compare against empty string, which the endpoint explicitly treats as "never a match" (`if not (expected_email and expected_code and ...)`), so reviewer sign-in always 403s rather than accepting a blank credential. |
-| `REVIEWER_USER_ID` | `api/routes/identity.py` | The `sub` claim minted into the reviewer's JWT. Must be a real `auth.users.id` on this project (create the reviewer account through normal signup first) with a membership in the sample org — see §9's recommendation on role. Missing: the endpoint raises `KeyError` (uncaught — this is a 500, not a graceful failure; fix the env var, don't work around it in code). |
+| `REVIEWER_USER_ID` | `api/routes/identity.py` | The `sub` claim minted into the reviewer's JWT. Must be a real `auth.users.id` on this project, **provisioned by hand — there is no signup flow in Phase 1a (§10, §11)** — with a `profiles` row AND a membership in the sample org. Missing: the endpoint raises `KeyError` (uncaught — this is a 500, not a graceful failure; fix the env var, don't work around it in code). |
 | `RETURN_INVITE_TOKEN_ENABLED` | `api/routes/members.py` (`create_invite`) | See §8 — must never be `1` in production. |
 | `APPLE_REFRESH_TOKEN` / `APPLE_CLIENT_ID` / `APPLE_CLIENT_SECRET` | `api/routes/deletion.py` (`_revoke_apple`) | Dormant in Phase 1a: Apple account linking is descoped to Phase 2a, so `profiles.apple_sub` is always `NULL` and this code path never runs today regardless of these variables. Missing/unset today is harmless. **Also structurally incomplete even once set**: the refresh token is per-user, but no column stores it yet (`_revoke_apple` reads a single global env var) — Phase 2a must add `profiles.apple_refresh_token` and read it from the row before Apple linking actually ships, not rely on this env var for a real user base. |
 
@@ -381,6 +381,50 @@ becomes a false alarm anyone pages on.
 
 ## 10. Known production gaps — do not be surprised by these
 
+- **Nothing in Phase 1a creates a `profiles` row or an organization.** This
+  is the largest gap in the list and it is not obvious from any error
+  message, so read it before you conclude the deploy is broken.
+
+  There is no signup endpoint, no org-creation endpoint, and no trigger on
+  `auth.users`. Confirmed against the code, not inferred: the API registers
+  exactly eleven routes (`GET /me`, `POST /identity/contact-email`,
+  `POST /identity/contact-email/verify`, the four member/invite routes, and
+  the four deletion/export routes) and **none of them inserts into
+  `profiles` or `organizations`**. The only `INSERT INTO organizations`
+  anywhere outside the test factories is migration `0009`'s sample org.
+  Migration `0004` states the intent — "orgs are created out of band
+  (signup, sample seeding)" — and the signup half of that sentence does not
+  exist in this repository.
+
+  What that means in practice, as a chain, because the symptom surfaces far
+  from the cause:
+
+  1. A brand-new `auth.users` row has no matching `profiles` row.
+  2. `POST /identity/contact-email` therefore returns **404 "no profile
+     exists for this account yet"** (`api/routes/identity.py`, the
+     `rowcount != 1` check) — so the account can never set a contact email.
+  3. `profiles.contact_email_verified_at` therefore stays NULL forever.
+  4. `accept_invite_tx` (migration `0006`) only reads a caller's
+     `contact_email` `WHERE contact_email_verified_at IS NOT NULL`, and
+     folds an email match into the same UPDATE that consumes the token. With
+     no verified profile the caller's email is NULL, matches nothing, and the
+     invite is reported as `invalid`.
+  5. So **invite acceptance is unreachable for any account this deployment
+     can actually create today** — even though `POST /orgs/{id}/invites`
+     works, issues a real token, and reports success.
+
+  Spec §16 names both "verified contact email" and "full multi-user roles and
+  invites (D7)" as Phase 1a deliverables. Both are built and both are
+  individually tested; what is missing is the account-provisioning step
+  upstream of them. Until something creates profiles (Phase 2a's iOS
+  onboarding, a signup route, or a Supabase auth hook), every account has to
+  be provisioned by hand — see §11, which is written for exactly that.
+
+  Do not "fix" this during the deploy by adding an INSERT to a migration.
+  `organizations` deliberately has no INSERT policy (`0004`), and `0009`
+  shows what it costs to insert one row as a non-bypassing migration runner:
+  a transient policy bracket that must be dropped in the same file.
+
 - **No storage bucket exists anywhere in this project yet.** `storage_delete`
   (§9) has nothing to call. This is a known, tracked gap, not a regression.
 - **The reviewer-OTP IP limiter has no `X-Forwarded-For` handling** and its
@@ -414,10 +458,34 @@ Migration `0009` seeds a fixed sample organization
 migration-authoring time, so wiring the reviewer's membership is an ops step,
 done here, once `REVIEWER_USER_ID` is known.
 
-1. Create the reviewer's real account through the app's normal sign-in flow
-   (or the Supabase dashboard) first, so `REVIEWER_USER_ID` is a genuine
-   `auth.users.id`.
-2. Insert its membership in the sample org:
+**There is no "normal sign-in flow" to create this account with.** See §10's
+first bullet: nothing in Phase 1a creates a `profiles` row, so the reviewer
+account has to be provisioned by hand, in three statements, not two. An
+earlier revision of this runbook told you to "create the reviewer's real
+account through the app's normal sign-in flow"; that flow does not exist and
+following it will strand you.
+
+1. **Create the `auth.users` row out of band** — Supabase dashboard
+   (Authentication → Users → Add user) or the Admin API
+   (`POST /auth/v1/admin/users` with the service-role key). This is the only
+   step that can create an identity; no code in this repository can.
+   Record the resulting id as `REVIEWER_USER_ID`.
+
+2. **Create its `profiles` row.** Nothing does this for you, and without it
+   `GET /me` renders a null contact email and `POST
+   /identity/contact-email` 404s for this account forever.
+
+   ```sql
+   INSERT INTO profiles (user_id, contact_email, contact_email_verified_at)
+   VALUES ('<REVIEWER_USER_ID>', '<the reviewer email>', now());
+   ```
+
+   `contact_email_verified_at` is set directly and deliberately: the
+   verification round trip needs a mailer, which is a Phase 3 concern (§8),
+   and `accept_invite_tx` refuses any caller whose profile is unverified. A
+   reviewer who cannot accept an invite cannot exercise D7.
+
+3. **Insert its membership in the sample org:**
 
    ```sql
    INSERT INTO memberships (user_id, org_id, role)
@@ -432,15 +500,16 @@ unlocks (this org was deliberately seeded on `pro` so review is not blocked
 by entitlement limits) without the owner-only deletion/export/invite
 surface.
 
-Whether this `INSERT` can run directly as the migration runner via the SQL
-editor, or needs the service-role REST path instead, depends on the §3.3
-finding (whether `postgres` bypasses RLS on this project) — `memberships` is
-`FORCE ROW LEVEL SECURITY` with policies scoped `TO authenticated` and no
-policy at all for a plain, non-bypassing migration-runner role. If the SQL
-editor's `INSERT` returns success but `SELECT` afterward shows zero rows,
-that is this exact gap — retry through the service-role key against
-Supabase's REST API instead (`POST /rest/v1/memberships`), which bypasses
-RLS by design.
+Whether steps 2 and 3's `INSERT`s can run directly as the migration runner
+via the SQL editor, or need the service-role REST path instead, depends on
+the §3.3 finding (whether `postgres` bypasses RLS on this project) — both
+`profiles` and `memberships` are `FORCE ROW LEVEL SECURITY` with policies
+scoped `TO authenticated` and no policy at all for a plain, non-bypassing
+migration-runner role. If the SQL editor's `INSERT` returns success but
+`SELECT` afterward shows zero rows, that is this exact gap — retry through
+the service-role key against Supabase's REST API instead (`POST
+/rest/v1/profiles`, `POST /rest/v1/memberships`), which bypasses RLS by
+design.
 
 ---
 
@@ -553,8 +622,16 @@ In order. Nothing above this line has been applied to `khohfrfqzbieaiikqlsa`.
 7. **Provision every environment variable in §6** for the API server and the
    purge job's cron entry, using two distinct database credentials for
    `DATABASE_URL` and `PURGE_DATABASE_URL`.
-8. **Create the reviewer account and wire its sample-org membership** (§11),
-   as `manager`, before submitting for App Review.
+8. **Provision the reviewer account by hand and wire its sample-org
+   membership** (§11), as `manager`, before submitting for App Review. This
+   is three steps, not one: create the `auth.users` row out of band
+   (dashboard or Admin API), then `INSERT` its `profiles` row with
+   `contact_email_verified_at` set, then `INSERT` the membership. **There is
+   no app sign-in flow to do any of this with** — nothing in Phase 1a
+   creates a profile or an organization, see §10's first bullet. An earlier
+   revision of this checklist said to use "the app's normal sign-in flow";
+   that was wrong, and skipping the `profiles` step leaves the reviewer
+   unable to set a contact email or accept an invite.
 9. **Set `REVIEWER_OTP_ENABLED=1` only for the App Review window** and put a
    reminder in place to unset it the moment review concludes (§7). Confirm
    `RETURN_INVITE_TOKEN_ENABLED` is not set to `1` anywhere in this

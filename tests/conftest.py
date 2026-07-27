@@ -165,9 +165,9 @@ async def seeded(raw_conn):
     # non-superuser migration runner (see task-12-report.md), so a SECURITY
     # DEFINER accessor was needed and the plan had not budgeted a migration
     # for this either. Task 13's sample-org migration is now 0009 (cap moved
-    # 8->9). A stale cap would silently stop one migration short once that
-    # lands. Harmless today: migration 0009 doesn't exist yet, so this
-    # applies everything that does (currently 0001-8).
+    # 8->9). A stale cap would silently stop one migration short. 0009 now
+    # exists, so `upto=9` is load-bearing rather than forward-looking: this
+    # applies 0001-0009, the full set the runbook deploys.
     await apply_migrations(raw_conn, upto=9)
     alice = await make_user(raw_conn, "alice@acme.test")
     bob = await make_user(raw_conn, "bob@bistro.test")
