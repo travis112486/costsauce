@@ -12,10 +12,13 @@
 -- org's storage objects BEFORE the row, so a crash mid-purge leaves the row
 -- behind and the job retries, instead of orphaning files an org no longer
 -- exists to own. To do that it must know WHICH orgs are about to be purged
--- before `purge_scheduled_orgs` runs, taken in the same transaction with a
--- row lock that blocks a racing `cancel_org_deletion` for the whole
+-- before `purge_scheduled_orgs` runs, taken in the same transaction and
+-- locked so that a racing `cancel_org_deletion` is blocked for the whole
 -- duration -- otherwise a cancel could commit between the storage delete and
--- the row purge, and this job would delete a saved org's files anyway.
+-- the row purge, and this job would delete a saved org's files anyway. See
+-- the lock-order note on the function itself: it takes the org ADVISORY lock
+-- before the row lock, because taking them the other way round is what
+-- actually deadlocked the two paths against each other.
 --
 -- `organizations` is `FORCE ROW LEVEL SECURITY` (0004) and the ONLY SELECT
 -- policies on it belong to `authenticated` (scoped to the caller's own
@@ -93,20 +96,78 @@ LANGUAGE plpgsql SECURITY DEFINER
 -- behalf.
 SET search_path = pg_catalog, public, pg_temp
 AS $$
+DECLARE
+  v_ids uuid[];
+  v_id  uuid;
 BEGIN
-  -- ORDER BY id, matching `purge_scheduled_orgs`'s own loop and
-  -- `_lock_caller_orgs` (api/routes/deletion.py), so two overlapping
-  -- invocations of the purge job can never deadlock over the doomed set --
-  -- both always attempt to lock the same rows in the same order, so the
-  -- second simply waits on the first rather than each holding what the
-  -- other wants.
+  -- LOCK ORDER: ADVISORY FIRST, THEN THE ROW. Not negotiable, and not what
+  -- this function did when it shipped.
   --
-  -- FOR UPDATE is the actual guard against the cancel race described above:
-  -- it is a real row lock, taken on the CALLING transaction, that survives
-  -- the return of this function for as long as that transaction stays open.
+  -- Final-review Important-1. The original version went straight to
+  -- `SELECT ... FOR UPDATE`, taking the ROW lock, and left the advisory lock
+  -- to `purge_scheduled_orgs` (0007) afterwards. Every other writer in this
+  -- codebase does the opposite: `cancel_org_deletion`
+  -- (api/routes/deletion.py) takes `members._lock_org`'s ADVISORY lock and
+  -- only then issues its `UPDATE organizations`, which is where the row lock
+  -- is taken. Two parties, same two locks, opposite order -- a textbook
+  -- deadlock, reproduced against Postgres 17 with these exact migrations in
+  -- both victim directions:
+  --
+  --   * cancel as victim -- `DeadlockDetected` out of the route as an
+  --     uncaught `psycopg.Error`, i.e. HTTP 500 on a legitimate cancel.
+  --   * purge as victim -- the worse one, and the likely one whenever
+  --     `storage_delete` takes longer than `deadlock_timeout` (1s), which a
+  --     real bucket-prefix delete will. The purge aborts AFTER deleting the
+  --     org's storage, the cancel then commits, and the org survives with
+  --     its storage already destroyed. That is exactly the failure this
+  --     file's own header claims to have closed, and it is latent only
+  --     because `storage_delete` is not wired up yet (api/jobs/purge.py
+  --     passes the default `None`).
+  --
+  -- So the advisory lock is taken here, first, using the IDENTICAL key
+  -- derivation as the four call sites that already agree on it
+  -- (`api/routes/members.py::_lock_org`, 0006's `accept_invite_tx`, 0007's
+  -- `purge_scheduled_orgs`, and `_lock_caller_orgs` via `_lock_org`). A
+  -- fifth call site that disagreed on this derivation cost Task 9 three fix
+  -- rounds; there is no second spelling of it anywhere in this repo.
+  --
+  -- Pass 1 collects the candidate set and locks it advisory-only, in
+  -- `ORDER BY id` -- the same order `purge_scheduled_orgs`'s loop and
+  -- `_lock_caller_orgs` use, so overlapping acquirers queue instead of
+  -- deadlocking against each other.
+  SELECT array_agg(o.id ORDER BY o.id) INTO v_ids
+    FROM public.organizations o
+   WHERE o.deletion_scheduled_at IS NOT NULL
+     AND o.deletion_scheduled_at < now() - grace;
+
+  IF v_ids IS NULL THEN
+    RETURN;
+  END IF;
+
+  FOREACH v_id IN ARRAY v_ids LOOP
+    PERFORM pg_advisory_xact_lock(hashtextextended(v_id::text, 0));
+  END LOOP;
+
+  -- Pass 2 re-reads under the advisory locks and takes the row locks. The
+  -- re-read is not redundant: a cancel that committed between pass 1's
+  -- unlocked read and this transaction acquiring that org's advisory lock
+  -- has saved the org, and this statement's own snapshot (READ COMMITTED
+  -- takes a fresh one per statement) now sees that -- so the org is dropped
+  -- from the result and `run_purge` never touches its storage. `now()` is
+  -- fixed for the transaction, so the predicate cannot move underneath the
+  -- two passes for any other reason.
+  --
+  -- `id = ANY(v_ids)` keeps the returned set a subset of what pass 1
+  -- advisory-locked: nothing is ever handed back that this transaction does
+  -- not hold BOTH locks on.
+  --
+  -- FOR UPDATE is still the guard the caller needs: a real row lock, taken
+  -- on the CALLING transaction, that survives the return of this function
+  -- for as long as that transaction stays open.
   RETURN QUERY
     SELECT o.id FROM public.organizations o
-     WHERE o.deletion_scheduled_at IS NOT NULL
+     WHERE o.id = ANY(v_ids)
+       AND o.deletion_scheduled_at IS NOT NULL
        AND o.deletion_scheduled_at < now() - grace
      ORDER BY o.id
      FOR UPDATE;

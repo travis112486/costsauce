@@ -24,6 +24,7 @@ assert the documented endpoint, method and auth header shape against a fake
 transport, not merely that our own code called a mock.
 """
 import asyncio
+import contextlib
 
 import httpx
 import psycopg
@@ -39,10 +40,7 @@ from api.jobs.purge import (
 from api.routes.deletion import GRACE_DAYS
 from api.db import pool_open, tenant_connection
 from tests.factories import make_user
-
-
-def app_url(url: str) -> str:
-    return url.replace("postgres:postgres", "app_user:app_pw")
+from tests.test_auth import mint
 
 
 # ---------------------------------------------------------------------------
@@ -248,60 +246,189 @@ async def test_purge_job_raises_and_still_purges_when_storage_delete_is_unconfig
     )
 
 
-async def test_purge_job_does_not_purge_an_org_a_racing_cancel_saves(raw_conn, seeded, db_url):
-    """The FOR UPDATE row lock this job takes on the doomed set must block a
-    concurrent cancel-style UPDATE (api/routes/deletion.py's
-    cancel_org_deletion) for the whole duration of the run, so a cancel that
-    starts while storage is being deleted cannot commit until after this
-    job has already committed its own decision. Proven by forcing the
-    interleaving, not by hoping for it: the cancel is only released once
-    run_purge is done, and it must then see the org gone (matching
-    `purge_scheduled_orgs`'s own re-check), i.e. it loses the race cleanly.
+# Seconds of grace still left on the org when the cancel request begins. The
+# window elapses while that request is still in flight, which is what puts the
+# real cancel endpoint and the real purge job on the same org at the same time
+# -- see the test below.
+_BOUNDARY_SLACK_SECONDS = 2
+
+
+@pytest.mark.parametrize(
+    "settle_seconds",
+    [0.3, 1.5],
+    ids=["under-deadlock_timeout", "past-deadlock_timeout"],
+)
+async def test_the_real_cancel_endpoint_racing_the_real_purge_job_never_deadlocks(
+    app_client, raw_conn, seeded, db_url, settle_seconds
+):
+    """`DELETE /orgs/{id}/deletion` (the real route, over HTTP) against
+    `run_purge` (the real job). Both shipping paths, no reconstruction.
+
+    Final-review Important-1 and Important-2, in one test.
+
+    The version of this test that shipped before drove a bare `UPDATE
+    organizations SET deletion_scheduled_at = NULL` on a tenant connection,
+    WITHOUT `members._lock_org`, which the real `cancel_org_deletion` always
+    calls first (api/routes/deletion.py). Its sibling in
+    tests/test_deletion.py called a local `_purge()` that ran only
+    `purge_scheduled_orgs`, skipping `organizations_pending_purge` and
+    therefore the `FOR UPDATE`. Each replica dropped exactly the one lock
+    that made a lock-order inversion between the two paths disappear:
+
+        purge   organizations_pending_purge   row lock (FOR UPDATE)
+             -> purge_scheduled_orgs          advisory lock
+        cancel  members._lock_org             advisory lock
+             -> UPDATE organizations          row lock
+
+    Opposite order, same two locks. Reproduced against Postgres 17 with the
+    real migrations in BOTH victim directions -- which is why this is
+    parametrised on how long the two are left contending:
+
+      * `under-deadlock_timeout` -- the purge starts waiting on the advisory
+        lock less than `deadlock_timeout` (1s) after the cancel started
+        waiting on the row lock, so the CANCEL's detector fires first and the
+        cancel is the victim: an uncaught `psycopg.Error` out of the route,
+        i.e. HTTP 500 on a legitimate cancel.
+      * `past-deadlock_timeout` -- the realistic case for a bucket-prefix
+        delete. The cancel's detector fires while the purge is still inside
+        `storage_delete`, finds no cycle, and Postgres does not re-arm it; so
+        when the purge finally waits, the PURGE is the victim -- after it has
+        already deleted the storage of an org the cancel then goes on to
+        save. Irreversible data loss the day a bucket exists.
+
+    Getting both real paths onto the same org at once needs one thing the
+    naive interleaving does not have. `cancel_org_deletion` refuses (410) once
+    the grace window has elapsed, and the purge only takes orgs whose window
+    HAS elapsed -- so the two overlap only while a cancel that began inside
+    the window is still in flight when the window closes. `now()` is fixed for
+    the lifetime of a transaction, so that is a real, reachable state, not a
+    contrivance: the org here has `_BOUNDARY_SLACK_SECONDS` of grace left when
+    the cancel's transaction starts, and the cancel then waits on the org lock
+    (held here by `members._lock_org` itself, exactly as a concurrent invite,
+    role change or `DELETE /me` would hold it) while the window elapses
+    underneath it.
+
+    With the lock order fixed, this is deliberately NOT a test for one
+    outcome: once both parties agree on advisory-then-row, whichever acquires
+    the org lock first wins, and both winners are correct. What must hold is
+    that the two answers are CONSISTENT -- an org that survives must still
+    have its storage, and an org that is gone must have had its storage
+    deleted -- and that neither party is ever aborted by the deadlock
+    detector.
     """
+    from api.routes import members as members_module
+
+    # Due for purge in `_BOUNDARY_SLACK_SECONDS`, not yet.
     await raw_conn.execute(
-        "UPDATE organizations SET deletion_scheduled_at = now() - interval '31 days' "
-        "WHERE id = %s",
-        (seeded["acme"],),
+        "UPDATE organizations "
+        "   SET deletion_scheduled_at = now() - %s::interval + %s::interval "
+        " WHERE id = %s",
+        (f"{GRACE_DAYS} days", f"{_BOUNDARY_SLACK_SECONDS} seconds", seeded["acme"]),
     )
     await raw_conn.commit()
 
     entered_storage_delete = asyncio.Event()
     release_storage_delete = asyncio.Event()
+    deleted_prefixes = []
 
     async def blocking_storage_delete(prefix: str):
+        deleted_prefixes.append(prefix)
         entered_storage_delete.set()
         await release_storage_delete.wait()
 
-    purge_task = asyncio.create_task(run_purge(db_url, storage_delete=blocking_storage_delete))
-    await asyncio.wait_for(entered_storage_delete.wait(), timeout=5)
+    lock_pool = await pool_open(db_url.replace("postgres:postgres", "app_user:app_pw"))
+    holder_locked = asyncio.Event()
+    holder_release = asyncio.Event()
 
-    cancel_conn = await pool_open(app_url(db_url))
+    async def hold_the_org_lock():
+        """Stand in for any other org operation already holding the lock.
+
+        Uses `members._lock_org` -- the same function, on a real tenant
+        connection -- rather than re-deriving `hashtextextended(...)` here,
+        so this cannot drift from the four call sites that must agree on it.
+        """
+        async with tenant_connection(lock_pool, {"sub": str(seeded["alice"])}) as conn:
+            await members_module._lock_org(conn, seeded["acme"])
+            holder_locked.set()
+            await holder_release.wait()
+
     try:
-        async def try_cancel():
-            async with tenant_connection(cancel_conn, {"sub": str(seeded["alice"])}) as conn:
-                await conn.execute(
-                    "UPDATE organizations SET deletion_scheduled_at = NULL "
-                    "WHERE id = %s AND deletion_scheduled_at IS NOT NULL",
-                    (seeded["acme"],),
-                )
+        holder_task = asyncio.create_task(hold_the_org_lock())
+        await asyncio.wait_for(holder_locked.wait(), timeout=5)
 
-        cancel_task = asyncio.create_task(try_cancel())
+        # The cancel's transaction (and therefore its `now()`, and therefore
+        # its grace-window verdict) is fixed HERE, while the org is still
+        # inside the window. It then blocks in `_lock_org`.
+        cancel_task = asyncio.create_task(
+            app_client.delete(
+                f"/orgs/{seeded['acme']}/deletion",
+                headers={"Authorization": f"Bearer {mint(str(seeded['alice']))}"},
+            )
+        )
         await asyncio.sleep(0.3)
-        assert not cancel_task.done(), "the cancel must block behind run_purge's row lock"
+        assert not cancel_task.done(), "the cancel must block on the held org lock"
 
+        # Let the window elapse, then start the purge -- which now sees the
+        # same org as due, on its own later `now()`.
+        await asyncio.sleep(_BOUNDARY_SLACK_SECONDS + 0.5)
+        purge_task = asyncio.create_task(
+            run_purge(db_url, storage_delete=blocking_storage_delete)
+        )
+        # Pre-fix the purge takes the row lock immediately and lands in
+        # storage_delete; post-fix it queues behind the advisory lock and
+        # never gets here until the holder lets go. Both are expected, so this
+        # wait is best-effort rather than an assertion.
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(entered_storage_delete.wait(), timeout=1.0)
+
+        holder_release.set()
+        await asyncio.wait_for(holder_task, timeout=5)
+
+        # Both parties are now contending. `settle_seconds` is how long they
+        # are left to do it, which is what selected the victim pre-fix.
+        await asyncio.sleep(settle_seconds)
         release_storage_delete.set()
-        purged = await purge_task
-        assert purged == 1
 
-        await asyncio.wait_for(cancel_task, timeout=5)
+        purged = await asyncio.wait_for(purge_task, timeout=20)
+        cancel_response = await asyncio.wait_for(cancel_task, timeout=20)
     finally:
-        await cancel_conn.close()
+        holder_release.set()
+        release_storage_delete.set()
+        await lock_pool.close()
 
-    cur = await raw_conn.execute("SELECT count(*) FROM organizations WHERE id = %s",
-                                  (seeded["acme"],))
-    assert (await cur.fetchone())[0] == 0, (
-        "the org must actually be gone -- the cancel lost the race, not silently no-op'd"
+    assert cancel_response.status_code != 500, (
+        "the cancel must never be aborted by the deadlock detector; got "
+        f"{cancel_response.status_code} {cancel_response.text!r}"
     )
+
+    cur = await raw_conn.execute(
+        "SELECT deletion_scheduled_at IS NULL FROM organizations WHERE id = %s",
+        (seeded["acme"],),
+    )
+    row = await cur.fetchone()
+
+    if cancel_response.status_code == 200:
+        # The cancel won the org lock. The org is saved -- and its storage
+        # must be untouched, which is the whole point of taking the lock
+        # before deleting anything.
+        assert purged == 0, "an org the cancel saved must not have been purged"
+        assert deleted_prefixes == [], (
+            "the purge deleted the storage of an org that was then saved -- this "
+            "is the irreversible half of the lock-order inversion"
+        )
+        assert row is not None and row[0] is True, (
+            "a 200 cancel must leave the org present and unscheduled"
+        )
+    else:
+        # The purge won. The org is really gone and its storage really went
+        # with it; the cancel loses cleanly with a 404, not a deadlock.
+        assert cancel_response.status_code == 404, (
+            f"unexpected cancel outcome: {cancel_response.status_code} "
+            f"{cancel_response.text!r}"
+        )
+        assert purged == 1
+        assert deleted_prefixes == [f"{seeded['acme']}/"]
+        assert row is None, "the org must actually be gone, not silently no-op'd"
 
 
 async def test_run_purge_works_for_a_restricted_migration_runner_role(raw_conn, seeded, db_url):

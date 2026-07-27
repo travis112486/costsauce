@@ -397,6 +397,31 @@ async def test_owner_can_cancel_within_grace_window(app_client, raw_conn, seeded
     assert ts is None
 
 
+async def test_owner_can_cancel_with_a_trailing_slash_in_the_url(
+    app_client, raw_conn, seeded
+):
+    """Final-review Minor: `deletion_guard` (api/main.py) exempted the two
+    writes that must keep working on a scheduled org by testing
+    `path.endswith("/deletion")`. It sees the RAW path, before Starlette's
+    trailing-slash redirect, so `DELETE /orgs/{id}/deletion/` missed the
+    exemption and the guard answered 410 -- meaning a client that appends a
+    slash could never cancel a scheduled deletion, which is the exact write
+    the exemption exists to preserve. `follow_redirects` because the
+    canonical route has no trailing slash; the point is that the guard lets
+    the request reach the router at all.
+    """
+    hdr = {"Authorization": f"Bearer {mint(str(seeded['alice']))}"}
+    await app_client.post(f"/orgs/{seeded['acme']}/deletion", headers=hdr)
+    r = await app_client.delete(
+        f"/orgs/{seeded['acme']}/deletion/", headers=hdr, follow_redirects=True
+    )
+    assert r.status_code == 200, f"{r.status_code} {r.text!r}"
+    cur = await raw_conn.execute(
+        "SELECT deletion_scheduled_at FROM organizations WHERE id = %s", (seeded["acme"],)
+    )
+    assert (await cur.fetchone())[0] is None
+
+
 async def test_cancelling_restores_writability(app_client, seeded, raw_conn):
     await raw_conn.execute("UPDATE organizations SET plan = 'growth' WHERE id = %s",
                            (seeded["acme"],))
@@ -824,7 +849,18 @@ async def test_purge_and_cancel_cannot_interleave_to_resurrect_an_org(
     save the org or lose the race cleanly -- never leave a purged org's
     children behind, and never un-schedule an org that has already been
     deleted.
+
+    Final-review Important-2: this used to call a local `_purge()` helper that
+    ran only `purge_scheduled_orgs`, skipping `organizations_pending_purge`
+    and therefore the row lock the shipping job actually takes. That is the
+    one respect in which the replica differed from production, and it is the
+    respect that hid a lock-order inversion between this path and
+    `cancel_org_deletion` (see
+    tests/test_purge_job.py::test_the_real_cancel_endpoint_racing_the_real_purge_job_never_deadlocks).
+    It now drives `api.jobs.purge.run_purge` itself, with a storage callback,
+    so the storage half of the guarantee is asserted too rather than assumed.
     """
+    from api.jobs.purge import run_purge
     from api.routes import members as members_module
 
     await raw_conn.execute(
@@ -832,11 +868,16 @@ async def test_purge_and_cancel_cannot_interleave_to_resurrect_an_org(
         "WHERE id = %s", (seeded["acme"],))
     await raw_conn.commit()
 
+    storage_prefixes = []
+
+    async def fake_storage_delete(prefix: str):
+        storage_prefixes.append(prefix)
+
     async with tenant_connection(pool, {"sub": str(seeded["alice"])}) as holder:
         # Hold the org lock exactly as cancel_org_deletion does, then prove
         # the purge blocks behind it rather than racing it.
         await members_module._lock_org(holder, seeded["acme"])
-        task = asyncio.create_task(_purge(db_url))
+        task = asyncio.create_task(run_purge(db_url, storage_delete=fake_storage_delete))
         await asyncio.sleep(0.3)
         assert not task.done(), "purge must serialize against the org lock"
         await holder.execute(
@@ -844,23 +885,13 @@ async def test_purge_and_cancel_cannot_interleave_to_resurrect_an_org(
             (seeded["acme"],))
     purged = await task
     assert purged == 0, "purge must re-read the schedule after taking the lock"
+    assert storage_prefixes == [], (
+        "an org the cancel saved must not have had its storage deleted -- the "
+        "purge must be blocked BEFORE it reaches storage_delete, not after"
+    )
     cur = await raw_conn.execute("SELECT count(*) FROM organizations WHERE id = %s",
                                  (seeded["acme"],))
     assert (await cur.fetchone())[0] == 1
-
-
-async def _purge(db_url):
-    """A separate owner connection -- the purge job runs as the migration
-    runner, never as app_user."""
-    import psycopg
-    conn = await psycopg.AsyncConnection.connect(db_url, autocommit=False)
-    try:
-        cur = await conn.execute("SELECT purge_scheduled_orgs(interval '30 days')")
-        (n,) = await cur.fetchone()
-        await conn.commit()
-        return n
-    finally:
-        await conn.close()
 
 
 # ---------------------------------------------------------------------------

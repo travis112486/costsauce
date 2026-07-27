@@ -76,7 +76,15 @@ async def deletion_guard(request: Request, call_next):
         # is org state change, which is what this guard exists to stop. The
         # member-facing route that must keep working is `DELETE /me`, which is
         # not org-scoped and never matches here.
-        or request.url.path.endswith("/deletion")
+        #
+        # `rstrip("/")` because this middleware sees the RAW path, before
+        # Starlette's trailing-slash redirect. Matching on a bare
+        # `endswith("/deletion")` meant `DELETE /orgs/{id}/deletion/` missed
+        # the exemption and got a 410 from this guard instead of ever reaching
+        # the redirect -- so a client that appends a slash could not cancel a
+        # scheduled deletion at all, which is precisely the one write this
+        # exemption exists to keep available.
+        or request.url.path.rstrip("/").endswith("/deletion")
     ):
         return await call_next(request)
 
