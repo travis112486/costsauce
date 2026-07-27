@@ -511,3 +511,55 @@ a new migration (`0016_...`) — tombstone-style forward fixes only, per the
 project's own established pattern (see `phase-1b-deploy.md`'s own framing of
 `0012`/`0013` as immutable once shipped). Do not hand-edit `0014` or `0015`
 in place after they've been applied anywhere.
+
+---
+
+## 10. As deployed, 2026-07-27 (addendum)
+
+Executed against `khohfrfqzbieaiikqlsa` on 2026-07-27 by Claude (Travis
+green-lit agent-run deploys). Outcomes and deviations, for whoever reads
+the live migration list next:
+
+- **Live migration names differ from the repo files.** The Supabase MCP
+  `apply_migration` path **terminates the connection on any role-membership
+  `GRANT`/`REVOKE` phrased `TO/FROM CURRENT_USER`** (confirmed by bisection;
+  plain DDL, `CREATE ROLE`, table/schema grants, and `$$` bodies are all
+  fine). The repo files were therefore applied split and adapted:
+  `0012a_business_schema`, `0012b_business_policies`,
+  `0012c_business_scheduled_freeze`, `0013_sample_business_seed`,
+  `0014a_sync_columns_backfill`, `0014b_sync_definer_stamp`,
+  `0014c_sync_stamp_ownership`, `0014d_sync_ops`,
+  `0015_ingredient_name_norm`, `0016_revoke_sync_fn_exposure` (a recorded
+  no-op — see next bullet), `0016b_revoke_sync_fn_exposure_as_grantor`.
+  Net object state matches the repo files; the GRANT/REVOKE brackets were
+  replaced by (a) creating triggers while the runner still owned the
+  functions (EXECUTE is checked only at CREATE TRIGGER time), then
+  (b) transferring ownership under a temporary `GRANT CREATE ON SCHEMA
+  public` (revoked immediately), with the runner's SET-capable definer
+  memberships granted out-of-band via `execute_sql` using explicit-member
+  phrasing (`GRANT <role> TO postgres WITH SET TRUE`) and removed after
+  (`REVOKE <role> FROM postgres GRANTED BY postgres`).
+- **§2.2-style "zero members" pre-checks are a local-harness assumption.**
+  On live, every definer role carries an implicit `admin_option`-only
+  membership for `postgres` granted by `supabase_admin` at CREATE ROLE time
+  (PG16 CREATEROLE behavior). That is the clean end state, not residue.
+- **The advisor pass caught a real hole → migration 0016.** The three 0014
+  functions were PostgREST-callable by `anon`/`authenticated` (0003's
+  default privileges; 0010/0011 predate them). `purge_expired_sync_ops`
+  was genuinely dangerous (caller-controlled retention). The first revoke
+  attempt as the runner was a **silent no-op** — `ALTER FUNCTION ... OWNER`
+  re-attributes default-privilege grants to the new owner as grantor, and
+  only the grantor can revoke — so live carries `0016` (no-op, kept for
+  the record) and `0016b` (the effective `SET ROLE` version, matching the
+  repo's `0016_revoke_sync_fn_exposure.sql`). Verified after:
+  `has_function_privilege` false for `anon`/`authenticated` on all three,
+  true for `postgres` on `purge_expired_sync_ops` (the purge job's grant).
+- **All §5 verification queries passed** (dense backfill with sample-org
+  counter exactly 31; trigger ordering; sync_ops FORCE RLS with exactly
+  SELECT+INSERT for `authenticated`; function owners; normalize index;
+  zero leftover tmp/seed policies). Locale check: `en_US.UTF-8` /
+  ICU `en-US` ✓. Duplicate-name pre-check: zero rows ✓.
+- **§8 smoke is deferred**: no API host serves this project yet (the Phase
+  1a go-live checklist — `app_user` password, env vars, reviewer account,
+  purge cron — is still open on the Notion Human Action Board). Run §8
+  once the FastAPI deploy exists.
