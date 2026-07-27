@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 
 from api.auth import _decode
 from api.db import pool_open, tenant_connection
-from api.routes import dashboard, deletion, identity, ingredients, me, members, purchases, recipes
+from api.routes import dashboard, deletion, identity, ingredients, me, members, purchases, recipes, sync
 from api.routes.identity import reviewer_otp
 
 # `/orgs/<id>` and everything beneath it. Anchored and single-segment on
@@ -151,6 +151,7 @@ def create_app() -> FastAPI:
     app.include_router(purchases.router)
     app.include_router(recipes.router)
     app.include_router(dashboard.router)
+    app.include_router(sync.router)
     app.post("/auth/reviewer-otp", include_in_schema=False)(reviewer_otp)
     return app
 
