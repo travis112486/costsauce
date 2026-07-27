@@ -3,7 +3,12 @@
 stale loser, replay. These exercise the already-built sync stack
 (Tasks 1-7) end to end through the HTTP surface -- a failure here means a
 real bug in that stack, not a weak assertion to fix here.
+
+Scenario suite II (Task 9) appends two more: §17's reverse-commit-order
+race on `server_seq` allocation, and §14's deletion guard applied to the
+sync path specifically (offline push discarded, cancel restores).
 """
+import asyncio
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -11,6 +16,9 @@ from decimal import Decimal
 from tests.test_ingredients_routes import auth
 from tests.test_recipes_routes import seed_priced
 from tests.test_sync_push import op, push
+from tests.test_sync_service import app_url
+from api.db import pool_open, tenant_connection
+from api.services import sync as svc
 
 
 async def test_two_edits_converge_on_item_count(app_client, seeded_biz, raw_conn):
@@ -167,3 +175,142 @@ async def test_replay_after_concurrent_edit(app_client, seeded_biz, raw_conn):
     cur = await raw_conn.execute(
         "SELECT name FROM recipes WHERE id = %s", (uuid.UUID(rid),))
     assert (await cur.fetchone())[0] == "Beta"    # replay touched nothing
+
+
+async def test_seq_allocation_serializes_with_commit_order(db_url, seeded_biz, raw_conn):
+    """spec §17: `sync_row_stamp` (migration 0014) allocates `server_seq` by
+    `UPDATE organizations SET sync_counter = sync_counter + 1 ... RETURNING`,
+    which takes the org's row lock and holds it for the rest of the writer's
+    transaction. A second writer touching the same org must therefore BLOCK
+    at the SQL level until the first commits or rolls back -- allocation is
+    serialized with commit order by construction, so a lower seq can never
+    commit after a higher one already has. If it could, a pull cursored just
+    above the first (lower) seq could permanently miss the second row: a
+    committed gap below the cursor, which the whole page-cursor contract
+    (§5.1) depends on never existing.
+    """
+    s = seeded_biz
+    pool = await pool_open(app_url(db_url))
+    seqs: dict[str, int] = {}
+    event_a_inserted = asyncio.Event()
+    event_a_can_finish = asyncio.Event()
+    event_b_can_finish = asyncio.Event()
+    task_a = task_b = None
+    try:
+        async def task_a_fn():
+            async with tenant_connection(pool, {"sub": str(s["alice"])}) as conn:
+                cur = await conn.execute(
+                    "INSERT INTO ingredients (location_id, name, base_unit)"
+                    " VALUES (%s, %s, %s) RETURNING server_seq",
+                    (s["acme_loc"], "Task A Ingredient", "lb"))
+                (seq,) = await cur.fetchone()
+                seqs["a"] = seq
+                event_a_inserted.set()
+                await event_a_can_finish.wait()
+            # commit fires on tenant_connection's normal __aexit__, i.e. now
+
+        async def task_b_fn():
+            await event_a_inserted.wait()
+            async with tenant_connection(pool, {"sub": str(s["alice"])}) as conn:
+                # This INSERT fires the same trigger against the SAME org
+                # row A's still-open transaction holds the lock on -- it
+                # must not return until A commits or rolls back.
+                cur = await conn.execute(
+                    "INSERT INTO ingredients (location_id, name, base_unit)"
+                    " VALUES (%s, %s, %s) RETURNING server_seq",
+                    (s["acme_loc"], "Task B Ingredient", "lb"))
+                (seq,) = await cur.fetchone()
+                seqs["b"] = seq
+                await event_b_can_finish.wait()
+
+        task_a = asyncio.create_task(task_a_fn())
+        task_b = asyncio.create_task(task_b_fn())
+
+        await asyncio.wait_for(event_a_inserted.wait(), timeout=5)
+
+        # A holds the org row lock uncommitted; B's INSERT must still be
+        # stuck acquiring it after a real wait, not just genuinely slow.
+        done, pending = await asyncio.wait([task_b], timeout=0.3)
+        assert task_b in pending, (
+            "task B's INSERT must block on the org counter row lock while "
+            "task A's transaction is still uncommitted")
+        assert "b" not in seqs
+
+        event_a_can_finish.set()
+        await asyncio.wait_for(task_a, timeout=5)   # A commits, releasing the lock
+
+        event_b_can_finish.set()
+        await asyncio.wait_for(task_b, timeout=5)   # B can now proceed and commit
+
+        assert seqs["a"] < seqs["b"]
+
+        async with tenant_connection(pool, {"sub": str(s["alice"])}) as conn:
+            result = await svc.pull(conn, s["acme"], seqs["a"])
+        changes = result["changes"]
+        # No committed gap below the cursor: since=seqA sees exactly B's row.
+        assert len(changes) == 1
+        assert changes[0]["table"] == "ingredients"
+        assert changes[0]["row"]["server_seq"] == seqs["b"]
+        assert changes[0]["row"]["name"] == "Task B Ingredient"
+    finally:
+        # Asyncio hygiene: a failed assert above must not leave either task
+        # parked forever on an Event nobody ever sets, hanging the run.
+        event_a_can_finish.set()
+        event_b_can_finish.set()
+        for t in (task_a, task_b):
+            if t is not None and not t.done():
+                t.cancel()
+        if task_a is not None:
+            await asyncio.gather(task_a, task_b, return_exceptions=True)
+        await pool.close()
+
+
+async def test_offline_push_after_deletion_is_discarded_and_cancel_restores(
+        app_client, seeded_biz, raw_conn):
+    """spec §14/§6.2 line 295-296 applied to the sync path specifically: a
+    device that pushes into a scheduled-for-deletion org must get 410 with
+    NOTHING applied and NOTHING ledgered -- an offline device cannot
+    resurrect a doomed org just by staying offline through the schedule.
+    But a cancelled deletion loses nothing: the exact same batch (same
+    op_ids), re-pushed after DELETE /orgs/{id}/deletion, must apply cleanly.
+    """
+    s = seeded_biz
+    hdr = auth(s["alice"])
+    zombie_op = op("ingredients", location_id=s["acme_loc"],
+                    fields={"name": "Zombie Flour", "base_unit": "lb"})
+    batch_id = uuid.uuid4()
+    row_id = uuid.UUID(zombie_op["row_id"])
+    op_id = uuid.UUID(zombie_op["op_id"])
+
+    r_sched = await app_client.post(f"/orgs/{s['acme']}/deletion", headers=hdr)
+    assert r_sched.status_code == 200, r_sched.text
+
+    r_push = await push(app_client, s["acme"], [zombie_op], actor=s["alice"],
+                        batch_id=batch_id)
+    assert r_push.status_code == 410, r_push.text
+    assert "scheduled for deletion" in r_push.text.lower()
+
+    cur = await raw_conn.execute(
+        "SELECT count(*) FROM ingredients WHERE id = %s", (row_id,))
+    assert (await cur.fetchone())[0] == 0, "discarded push must not create the row"
+
+    cur = await raw_conn.execute(
+        "SELECT count(*) FROM sync_ops WHERE op_id = %s", (op_id,))
+    assert (await cur.fetchone())[0] == 0, "discarded push must not ledger the op"
+
+    r_cancel = await app_client.delete(f"/orgs/{s['acme']}/deletion", headers=hdr)
+    assert r_cancel.status_code == 200, r_cancel.text
+
+    # Re-push the SAME batch: same op_id, same row_id, same fields.
+    r_repush = await push(app_client, s["acme"], [zombie_op], actor=s["alice"],
+                          batch_id=batch_id)
+    assert r_repush.status_code == 200, r_repush.text
+    result = r_repush.json()["results"][0]
+    assert result["status"] == "applied"
+    assert result["row_id"] == zombie_op["row_id"]
+
+    cur = await raw_conn.execute(
+        "SELECT name FROM ingredients WHERE id = %s", (row_id,))
+    row = await cur.fetchone()
+    assert row is not None and row[0] == "Zombie Flour", \
+        "a cancelled deletion must not cost the device its queued write"
