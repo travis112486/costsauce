@@ -40,3 +40,46 @@ async def make_location(conn, org_id, name: str):
     )
     (loc_id,) = await cur.fetchone()
     return loc_id
+
+
+async def make_ingredient(conn, location_id, name, base_unit="lb",
+                          vendor=None, category=None, source="manual"):
+    cur = await conn.execute(
+        "INSERT INTO ingredients (location_id, name, base_unit, vendor, category, source)"
+        " VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+        (location_id, name, base_unit, vendor, category, source))
+    (iid,) = await cur.fetchone()
+    return iid
+
+
+async def make_purchase(conn, location_id, ingredient_id, purchased_on,
+                        qty_base_units, total_price, *, recorded_at=None,
+                        unit="lb", qty=None, source="manual"):
+    # qty defaults to qty_base_units: most tests only care about the
+    # normalized quantity; the raw entry fields exist for display parity.
+    cur = await conn.execute(
+        "INSERT INTO purchases (location_id, ingredient_id, purchased_on,"
+        " recorded_at, qty, unit, qty_base_units, total_price, source)"
+        " VALUES (%s, %s, %s, COALESCE(%s, now()), %s, %s, %s, %s, %s) RETURNING id",
+        (location_id, ingredient_id, purchased_on, recorded_at,
+         qty or qty_base_units, unit, qty_base_units, total_price, source))
+    (pid,) = await cur.fetchone()
+    return pid
+
+
+async def make_recipe(conn, location_id, name, menu_price, target_fc_pct="30.00"):
+    cur = await conn.execute(
+        "INSERT INTO recipes (location_id, name, menu_price, target_fc_pct)"
+        " VALUES (%s, %s, %s, %s) RETURNING id",
+        (location_id, name, menu_price, target_fc_pct))
+    (rid,) = await cur.fetchone()
+    return rid
+
+
+async def add_recipe_item(conn, location_id, recipe_id, ingredient_id, qty_base_units):
+    cur = await conn.execute(
+        "INSERT INTO recipe_items (location_id, recipe_id, ingredient_id, qty_base_units)"
+        " VALUES (%s, %s, %s, %s) RETURNING id",
+        (location_id, recipe_id, ingredient_id, qty_base_units))
+    (iid,) = await cur.fetchone()
+    return iid

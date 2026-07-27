@@ -180,6 +180,26 @@ async def seeded(raw_conn):
     return dict(alice=alice, bob=bob, acme=acme, bistro=bistro)
 
 
+@pytest.fixture
+async def seeded_biz(raw_conn):
+    """`seeded`, but with ALL migrations applied (business tables included)
+    and both location ids exposed. Kept separate from `seeded` so the Phase
+    1a tests keep their historical upto=9 pin untouched."""
+    from tests.factories import make_user, make_org, add_member, make_location
+    await apply_migrations(raw_conn)
+    alice = await make_user(raw_conn, "alice@acme.test")
+    bob = await make_user(raw_conn, "bob@bistro.test")
+    acme = await make_org(raw_conn, "Acme Diner")
+    bistro = await make_org(raw_conn, "Bistro Nine")
+    await add_member(raw_conn, alice, acme, "owner")
+    await add_member(raw_conn, bob, bistro, "owner")
+    acme_loc = await make_location(raw_conn, acme, "Acme Main")
+    bistro_loc = await make_location(raw_conn, bistro, "Bistro Main")
+    await raw_conn.commit()
+    return dict(alice=alice, bob=bob, acme=acme, bistro=bistro,
+                acme_loc=acme_loc, bistro_loc=bistro_loc)
+
+
 @pytest.fixture(scope="session")
 def _roles_bootstrapped(db_url):
     """Guarantee `app_user`/`authenticated` exist before any `app_client` pool
