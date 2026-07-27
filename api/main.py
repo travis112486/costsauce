@@ -113,9 +113,22 @@ async def deletion_guard(request: Request, call_next):
 
 
 async def _scheduled_org_error_handler(request: Request, exc: psycopg.Error):
-    """Map migration 0007's trigger to 410, and nothing else."""
+    """Map migration 0007's trigger to 410, and RLS write denials to 403,
+    and nothing else.
+
+    A route with no explicit role check (e.g. `POST /locations/{id}/recipes`)
+    relies entirely on the `recipe_write` policy's WITH CHECK to keep a
+    bookkeeper from writing recipes. That denial surfaces from psycopg as
+    `InsufficientPrivilege` / SQLSTATE 42501 ("new row violates row-level
+    security policy"), which is not CS410 -- left unmapped, it would fall
+    through this handler's `raise exc` and become an API 500 for a caller
+    who is simply the wrong role, instead of a clean 403.
+    """
     if getattr(exc, "sqlstate", None) == ORG_SCHEDULED_SQLSTATE:
         return JSONResponse({"detail": ORG_SCHEDULED_MESSAGE}, status_code=410)
+    if isinstance(exc, psycopg.errors.InsufficientPrivilege):
+        return JSONResponse(
+            {"detail": "insufficient role for this action"}, status_code=403)
     raise exc
 
 

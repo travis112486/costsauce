@@ -20,7 +20,8 @@ async def _costed_one(conn, location_id, recipe_id):
 
 async def _insert_item(conn, location_id, recipe_id, item):
     cur = await conn.execute(
-        "SELECT 1 FROM ingredients WHERE id = %s AND location_id = %s",
+        "SELECT 1 FROM ingredients"
+        " WHERE id = %s AND location_id = %s AND deleted_at IS NULL",
         (item.ingredient_id, location_id))
     if await cur.fetchone() is None:
         raise HTTPException(404, f"ingredient {item.ingredient_id} not found")
