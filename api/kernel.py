@@ -10,6 +10,8 @@ Decimal quantized round-half-away-from-zero, matching Postgres round()."""
 from __future__ import annotations
 
 import re
+from decimal import Decimal
+from fractions import Fraction
 from typing import Sequence
 
 
@@ -44,3 +46,94 @@ def match_ingredient(
         if norm in cn or cn in norm:
             return (cid, cname, "fuzzy")
     return None
+
+
+# Exact contract constants (spec §9 / legacy WEIGHT_TO_LB). Fractions so
+# every conversion stays rational until the final quantize.
+WEIGHT_TO_LB: dict[str, Fraction] = {
+    "lb": Fraction(1),
+    "oz": Fraction(1, 16),
+    "kg": Fraction("2.2046226218"),
+    "g": Fraction("0.0022046226218"),
+}
+BASE_UNITS = ("lb", "oz", "kg", "g", "each")
+
+
+def round_half_away(x: Fraction, places: int) -> Decimal:
+    """Round-half-away-from-zero at `places` decimals — Postgres round()
+    semantics, the single rounding mode of the whole contract."""
+    scale = 10 ** places
+    scaled = x * scale
+    n, d = scaled.numerator, scaled.denominator
+    if n >= 0:
+        q = (2 * n + d) // (2 * d)
+    else:
+        q = -((2 * (-n) + d) // (2 * d))
+    return Decimal(q).scaleb(-places).quantize(Decimal(1).scaleb(-places))
+
+
+def normalize_purchase(
+    base_unit: str,
+    qty: Decimal,
+    unit: str,
+    total_price: Decimal,
+    qty_in_case: Decimal | None = None,
+) -> Decimal:
+    """qty entered in `unit` -> quantity in the ingredient's base unit,
+    quantized to 4dp (numeric(14,4)). Raises KernelError on bad input."""
+    if qty is None or qty <= 0 or total_price is None or total_price <= 0:
+        raise KernelError("qty and total_price must be positive")
+    if base_unit not in BASE_UNITS:
+        raise KernelError(f"unknown base_unit {base_unit!r}")
+    unit = (unit or "").strip().lower()
+    if unit == "case":
+        if not qty_in_case or qty_in_case <= 0:
+            raise KernelError("qty_in_case is required when unit is 'case'")
+        base_qty = Fraction(qty) * Fraction(qty_in_case)
+    elif base_unit == "each":
+        if unit != "each":
+            raise KernelError(
+                "this ingredient is tracked 'each' — use unit 'each' or 'case'")
+        base_qty = Fraction(qty)
+    else:
+        if unit not in WEIGHT_TO_LB:
+            raise KernelError(
+                f"unsupported unit {unit!r} for a weight-tracked ingredient")
+        base_qty = Fraction(qty) * WEIGHT_TO_LB[unit] / WEIGHT_TO_LB[base_unit]
+    return round_half_away(base_qty, 4)
+
+
+def unit_price(total_price: Decimal, qty_base_units: Decimal) -> Decimal:
+    """Mirror of the DB generated column: round(total/qty, 6)."""
+    if qty_base_units <= 0 or total_price <= 0:
+        raise KernelError("total_price and qty_base_units must be positive")
+    return round_half_away(Fraction(total_price) / Fraction(qty_base_units), 6)
+
+
+def suggested_price_cents(plate_cents: int, target_bp: int) -> int:
+    """spec §8: ceil(plate_cents * 100 / target_pct / 50) * 50, in pure
+    integers. target_bp is target percent x 100 (30.00% -> 3000)."""
+    if target_bp <= 0:
+        raise KernelError("target_bp must be positive")
+    if plate_cents < 0:
+        raise KernelError("plate_cents must be non-negative")
+    num = plate_cents * 10000
+    den = target_bp * 50
+    return -(-num // den) * 50
+
+
+def fc_status(plate_cents: int, menu_cents: int, target_bp: int) -> tuple[Decimal, str]:
+    """Food-cost percent rounded to 1dp; status compared on the ROUNDED
+    value (B4 fix)."""
+    if menu_cents <= 0:
+        raise KernelError("menu_cents must be positive")
+    fc_rounded = round_half_away(Fraction(plate_cents * 100, menu_cents), 1)
+    target = Fraction(target_bp, 100)
+    fc_frac = Fraction(fc_rounded)
+    if fc_frac <= target:
+        status = "ok"
+    elif fc_frac <= target + 2:
+        status = "watch"
+    else:
+        status = "danger"
+    return fc_rounded, status
