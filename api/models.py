@@ -1,4 +1,6 @@
 # api/models.py
+from typing import Literal
+
 from pydantic import BaseModel
 
 PLAN_LIMITS = {
@@ -51,3 +53,10 @@ class MeResponse(BaseModel):
     apple_linked: bool
     # No top-level entitlement: see the comment on MembershipOut.entitlement.
     memberships: list[MembershipOut]
+
+
+class IngredientIn(BaseModel):
+    name: str
+    base_unit: Literal["lb", "oz", "kg", "g", "each"]
+    vendor: str | None = None
+    category: str | None = None
