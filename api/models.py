@@ -87,3 +87,10 @@ class RecipeIn(BaseModel):
     menu_price: Decimal
     target_fc_pct: Decimal = Decimal("30.00")
     items: list[RecipeItemIn] = []
+
+
+class MergeIn(BaseModel):
+    # stdlib uuid.UUID, not pydantic's UUID4: brief erratum -- this project's
+    # ids are UUIDv7 (see RecipeItemIn above), and UUID4's validator rejects
+    # them outright.
+    from_id: uuid.UUID

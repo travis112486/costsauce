@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from api.auth import CallerIdentity, require_caller
 from api.db import tenant_connection
 from api.kernel import match_ingredient, normalize_name
-from api.models import IngredientIn
+from api.models import IngredientIn, MergeIn
 
 router = APIRouter()
 
@@ -142,3 +142,62 @@ async def history(location_id: uuid.UUID, ingredient_id: uuid.UUID,
     return {"purchases": [dict(id=r[0], purchased_on=r[1], qty_base_units=r[2],
                                total_price=r[3], unit_price=r[4], source=r[5])
                           for r in rows]}
+
+
+@router.post("/locations/{location_id}/ingredients/{keep_id}/merge")
+async def merge_ingredients(location_id: uuid.UUID, keep_id: uuid.UUID,
+                            body: MergeIn, request: Request,
+                            caller: CallerIdentity = Depends(require_caller)):
+    """spec §11: repoint purchases and recipe lines to the keeper, tombstone
+    the loser. Colliding recipe lines are SUMMED into the keeper's line."""
+    if body.from_id == keep_id:
+        raise HTTPException(400, "cannot merge an ingredient into itself")
+    async with tenant_connection(request.app.state.pool, caller.claims) as conn:
+        await _require_location(conn, location_id)
+        cur = await conn.execute(
+            "SELECT m.role FROM memberships m"
+            " JOIN locations l ON l.org_id = m.org_id"
+            " WHERE l.id = %s AND m.user_id = %s", (location_id, caller.user_id))
+        row = await cur.fetchone()
+        if row is None or row[0] not in ("owner", "manager"):
+            raise HTTPException(403, "merge requires owner or manager")
+        for iid in (keep_id, body.from_id):
+            cur = await conn.execute(
+                "SELECT 1 FROM ingredients WHERE id = %s AND location_id = %s"
+                " AND deleted_at IS NULL", (iid, location_id))
+            if await cur.fetchone() is None:
+                raise HTTPException(404, f"ingredient {iid} not found")
+        cur = await conn.execute(
+            "UPDATE purchases SET ingredient_id = %s WHERE ingredient_id = %s",
+            (keep_id, body.from_id))
+        repointed_purchases = cur.rowcount
+        # 1) sum colliding live lines into the keeper's line
+        cur = await conn.execute(
+            "UPDATE recipe_items k"
+            "   SET qty_base_units = k.qty_base_units + f.qty_base_units"
+            "  FROM recipe_items f"
+            " WHERE k.recipe_id = f.recipe_id"
+            "   AND k.ingredient_id = %s AND f.ingredient_id = %s"
+            "   AND k.deleted_at IS NULL AND f.deleted_at IS NULL",
+            (keep_id, body.from_id))
+        combined = cur.rowcount
+        # 2) tombstone the loser's collided lines
+        await conn.execute(
+            "UPDATE recipe_items f SET deleted_at = now()"
+            " WHERE f.ingredient_id = %s AND f.deleted_at IS NULL"
+            "   AND EXISTS (SELECT 1 FROM recipe_items k"
+            "                WHERE k.recipe_id = f.recipe_id"
+            "                  AND k.ingredient_id = %s"
+            "                  AND k.deleted_at IS NULL)",
+            (body.from_id, keep_id))
+        # 3) repoint the loser's remaining live lines
+        cur = await conn.execute(
+            "UPDATE recipe_items SET ingredient_id = %s"
+            " WHERE ingredient_id = %s AND deleted_at IS NULL",
+            (keep_id, body.from_id))
+        repointed_items = cur.rowcount
+        await conn.execute(
+            "UPDATE ingredients SET deleted_at = now() WHERE id = %s",
+            (body.from_id,))
+    return dict(repointed_purchases=repointed_purchases,
+                repointed_items=repointed_items, combined_items=combined)
