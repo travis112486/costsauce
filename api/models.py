@@ -1,5 +1,5 @@
 # api/models.py
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 import uuid
@@ -94,3 +94,18 @@ class MergeIn(BaseModel):
     # ids are UUIDv7 (see RecipeItemIn above), and UUID4's validator rejects
     # them outright.
     from_id: uuid.UUID
+
+
+class SyncOpIn(BaseModel):
+    op_id: uuid.UUID
+    table: Literal["ingredients", "recipes", "recipe_items", "purchases"]
+    row_id: uuid.UUID
+    location_id: uuid.UUID
+    client_mutated_at: datetime
+    fields: dict[str, str | None] = {}
+
+
+class SyncPushIn(BaseModel):
+    org_id: uuid.UUID
+    batch_id: uuid.UUID
+    ops: list[SyncOpIn]
