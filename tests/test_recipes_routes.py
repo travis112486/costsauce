@@ -26,6 +26,26 @@ async def test_create_and_get_costed(app_client, seeded_biz, raw_conn):
     assert body["status"] == "ok"
 
 
+async def test_create_with_item_id_is_422(app_client, seeded_biz, raw_conn):
+    """Interface contract: 'items on create must NOT carry ids'. A client
+    that echoes an id from some other recipe (or fabricates one) on create
+    must be rejected, not silently accepted as if it were an update."""
+    s = seeded_biz
+    beef = await seed_priced(raw_conn, s["acme_loc"], "Ground Beef", "45.00")
+    await raw_conn.commit()
+    fake_id = "019fa422-1bf6-7760-83c9-e002b3ea35f6"
+    r = await app_client.post(
+        f"/locations/{s['acme_loc']}/recipes",
+        json={"name": "Burger", "menu_price": "11.00",
+              "items": [{"id": fake_id, "ingredient_id": str(beef),
+                         "qty_base_units": "0.5000"}]},
+        headers=auth(s["alice"]))
+    assert r.status_code == 422, r.text
+    cur = await raw_conn.execute(
+        "SELECT count(*) FROM recipes WHERE location_id = %s", (s["acme_loc"],))
+    assert (await cur.fetchone())[0] == 0             # no orphaned recipe row
+
+
 async def test_put_is_upsert_diff_not_delete_reinsert(app_client, seeded_biz, raw_conn):
     s = seeded_biz
     beef = await seed_priced(raw_conn, s["acme_loc"], "Ground Beef", "45.00")
@@ -66,14 +86,31 @@ async def test_put_conflict_on_duplicate_live_ingredient(app_client, seeded_biz,
         headers=auth(s["alice"]))
     rid = r.json()["recipe_id"]
     kept = r.json()["items"][0]["id"]
+    # kept's qty is changed to 0.6000 and the recipe is renamed in the SAME
+    # request that also tries to sneak in a duplicate-ingredient insert.
+    # Self-review: the whole PUT must roll back on the 409, not just skip
+    # the failing insert -- otherwise the update-in-place half of the diff
+    # would silently commit while the client sees an error.
     r2 = await app_client.put(
         f"/locations/{s['acme_loc']}/recipes/{rid}",
-        json={"name": "Burger", "menu_price": "11.00", "target_fc_pct": "30.00",
+        json={"name": "Cheeseburger", "menu_price": "11.00",
+              "target_fc_pct": "30.00",
               "items": [{"id": kept, "ingredient_id": str(beef),
-                         "qty_base_units": "0.5000"},
+                         "qty_base_units": "0.6000"},
                         {"ingredient_id": str(beef), "qty_base_units": "0.2500"}]},
         headers=auth(s["alice"]))
     assert r2.status_code == 409
+    cur = await raw_conn.execute(
+        "SELECT name FROM recipes WHERE id = %s", (rid,))
+    assert (await cur.fetchone())[0] == "Burger"      # rename rolled back
+    cur = await raw_conn.execute(
+        "SELECT qty_base_units FROM recipe_items"
+        " WHERE id = %s", (kept,))
+    assert str((await cur.fetchone())[0]) == "0.5000"  # qty update rolled back
+    cur = await raw_conn.execute(
+        "SELECT count(*) FROM recipe_items WHERE recipe_id = %s"
+        " AND deleted_at IS NULL", (rid,))
+    assert (await cur.fetchone())[0] == 1              # no duplicate live row
 
 
 async def test_delete_tombstones_recipe_and_items(app_client, seeded_biz, raw_conn):
