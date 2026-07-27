@@ -22,6 +22,8 @@ The brief specified seven assertions; they are all still here, widened:
     escalate via membership insert  -> kept standalone, see its docstring
     unauthenticated sees nothing    -> test_unauthenticated_claims_see_nothing
 """
+import uuid
+
 import pytest
 from tests.conftest import apply_migrations, TENANT_TABLES
 from tests.factories import (
@@ -95,6 +97,12 @@ async def two_orgs(raw_conn):
             (str(user), f"link-{side}"),
         )
         (ids[f"{side}_alr"],) = await cur.fetchone()
+        cur = await raw_conn.execute(
+            "INSERT INTO sync_ops (op_id, org_id, batch_id, result_json)"
+            " VALUES (uuid_generate_v7(), %s, uuid_generate_v7(), '{}') RETURNING op_id",
+            (org,),
+        )
+        (ids[f"{side}_sync_op"],) = await cur.fetchone()
     await raw_conn.commit()
     return ids
 
@@ -179,6 +187,13 @@ def spec(two_orgs):
                     " ingredient_id, qty_base_units) VALUES (%s, %s, %s, 1)",
                     (t["bistro_loc"], t["bistro_recipe"], t["bistro_ing"])),
         ),
+        "sync_ops": dict(
+            key="op_id", mine=t["acme_sync_op"], theirs=t["bistro_sync_op"],
+            col="batch_id", val=str(uuid.uuid4()),
+            insert=("INSERT INTO sync_ops (op_id, org_id, batch_id, result_json)"
+                    " VALUES (uuid_generate_v7(), %s, uuid_generate_v7(), '{}')",
+                    (t["bistro"],)),
+        ),
     }
 
 
@@ -210,16 +225,35 @@ async def test_org_a_cannot_write_into_org_b(db_url, two_orgs, spec, table):
     assert "row-level security" in str(exc.value).lower(), str(exc.value)
 
 
+# sync_ops is a write-once ledger (0014 §5): `authenticated` gets SELECT and
+# INSERT only, never UPDATE -- a replayed op must find its stored result
+# untouched, not editable by any tenant. That is a grant-level denial
+# ("permission denied"), not an RLS one, and -- same reasoning as
+# NO_DELETE_GRANT_TABLES below -- it applies uniformly regardless of whose
+# row is targeted, so it never reaches the "0 rows matched" RLS outcome the
+# other tenant tables produce.
+NO_UPDATE_GRANT_TABLES = {"sync_ops"}
+
+
 @pytest.mark.parametrize("table", TENANT_TABLES)
 async def test_org_a_cannot_update_org_b_row_by_id(db_url, two_orgs, spec, table):
     s = spec[table]
     pool = await pool_open(app_url(db_url))
-    async with tenant_connection(pool, {"sub": str(two_orgs["alice"])}) as conn:
-        cur = await conn.execute(
-            f"UPDATE {table} SET {s['col']} = %s WHERE {s['key']} = %s",
-            (s["val"], s["theirs"]),
-        )
-        assert cur.rowcount == 0, f"TENANCY LEAK: updated another org's {table} row"
+    if table in NO_UPDATE_GRANT_TABLES:
+        with pytest.raises(Exception) as exc:
+            async with tenant_connection(pool, {"sub": str(two_orgs["alice"])}) as conn:
+                await conn.execute(
+                    f"UPDATE {table} SET {s['col']} = %s WHERE {s['key']} = %s",
+                    (s["val"], s["theirs"]),
+                )
+        assert "permission denied" in str(exc.value).lower()
+    else:
+        async with tenant_connection(pool, {"sub": str(two_orgs["alice"])}) as conn:
+            cur = await conn.execute(
+                f"UPDATE {table} SET {s['col']} = %s WHERE {s['key']} = %s",
+                (s["val"], s["theirs"]),
+            )
+            assert cur.rowcount == 0, f"TENANCY LEAK: updated another org's {table} row"
     await pool.close()
 
 
@@ -232,7 +266,7 @@ async def test_org_a_cannot_update_org_b_row_by_id(db_url, two_orgs, spec, table
 # a cross-org DELETE against one of these fails the same way a same-org one
 # does, never reaching the "0 rows matched" RLS outcome the other tenant
 # tables produce.
-NO_DELETE_GRANT_TABLES = {"ingredients", "purchases", "recipes", "recipe_items"}
+NO_DELETE_GRANT_TABLES = {"ingredients", "purchases", "recipes", "recipe_items", "sync_ops"}
 
 
 @pytest.mark.parametrize("table", TENANT_TABLES)

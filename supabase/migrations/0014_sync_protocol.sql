@@ -202,3 +202,70 @@ CREATE TRIGGER recipe_items_sync_stamp
   FOR EACH ROW EXECUTE FUNCTION sync_row_stamp();
 
 REVOKE sync_definer FROM CURRENT_USER;
+
+-- ---------------------------------------------------------------------------
+-- 5. sync_ops: the idempotency ledger (§5.3). One row per applied op, written
+-- in the SAME transaction as the mutation it records; replay returns the
+-- stored result and touches nothing. 7-day TTL via purge_expired_sync_ops(),
+-- called by the daily purge job (api/jobs/purge.py).
+-- ---------------------------------------------------------------------------
+CREATE TABLE sync_ops (
+  op_id       uuid PRIMARY KEY,
+  org_id      uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  batch_id    uuid NOT NULL,
+  applied_at  timestamptz NOT NULL DEFAULT now(),
+  result_json jsonb NOT NULL
+);
+CREATE INDEX sync_ops_ttl_idx ON sync_ops (applied_at);
+CREATE INDEX sync_ops_org_idx ON sync_ops (org_id);
+
+-- sync_ops carries org_id directly (not via a location join), the same shape
+-- as memberships/locations/invites -- so it takes 0007's direct-org_id guard,
+-- not 0012's location-join variant. test_deletion.py's
+-- test_every_org_scoped_table_carries_the_deletion_guard_trigger derives its
+-- expected set from pg_attribute rather than a hand-maintained list, so any
+-- org_id-bearing table missing this trigger fails that test on its own --
+-- this is not optional decoration.
+CREATE TRIGGER sync_ops_reject_write_to_scheduled_org
+  BEFORE INSERT OR UPDATE ON sync_ops
+  FOR EACH ROW EXECUTE FUNCTION reject_write_to_scheduled_org();
+
+ALTER TABLE sync_ops ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sync_ops FORCE ROW LEVEL SECURITY;
+
+-- 0003's ALTER DEFAULT PRIVILEGES grants authenticated full DML on any new
+-- table; narrow it. Replay needs SELECT, recording needs INSERT; nothing on
+-- the request path rewrites or deletes a ledger row.
+REVOKE ALL ON sync_ops FROM authenticated;
+GRANT SELECT, INSERT ON sync_ops TO authenticated;
+
+CREATE POLICY sync_ops_select ON sync_ops FOR SELECT TO authenticated USING (
+  org_id IN (SELECT org_id FROM current_user_memberships())
+);
+CREATE POLICY sync_ops_insert ON sync_ops FOR INSERT TO authenticated WITH CHECK (
+  org_id IN (SELECT org_id FROM current_user_memberships())
+);
+
+GRANT sync_definer TO CURRENT_USER;
+GRANT SELECT, DELETE ON sync_ops TO sync_definer;
+CREATE POLICY sync_ops_definer_all ON sync_ops
+  FOR ALL TO sync_definer USING (true) WITH CHECK (true);
+
+CREATE OR REPLACE FUNCTION purge_expired_sync_ops(retention interval DEFAULT '7 days')
+RETURNS integer
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE _n integer;
+BEGIN
+  DELETE FROM public.sync_ops WHERE applied_at < now() - retention;
+  GET DIAGNOSTICS _n = ROW_COUNT;
+  RETURN _n;
+END;
+$$;
+ALTER FUNCTION purge_expired_sync_ops(interval) OWNER TO sync_definer;
+REVOKE ALL ON FUNCTION purge_expired_sync_ops(interval) FROM PUBLIC;
+-- CURRENT_USER here = the migration runner = the purge job's identity
+-- (PURGE_DATABASE_URL; see api/jobs/purge.py's __main__ note).
+GRANT EXECUTE ON FUNCTION purge_expired_sync_ops(interval) TO CURRENT_USER;
+REVOKE sync_definer FROM CURRENT_USER;
