@@ -4,7 +4,7 @@ from decimal import Decimal
 from typing import Literal
 import uuid
 
-from pydantic import AwareDatetime, BaseModel
+from pydantic import AwareDatetime, BaseModel, Field, model_validator
 
 PLAN_LIMITS = {
     "starter": {"max_locations": 1, "max_invoices_per_month": 30, "max_recipes": 25, "max_members": 1},
@@ -87,6 +87,23 @@ class RecipeIn(BaseModel):
     menu_price: Decimal
     target_fc_pct: Decimal = Decimal("30.00")
     items: list[RecipeItemIn] = []
+
+
+class LocationPatch(BaseModel):
+    name: str | None = None
+    target_fc_pct: Decimal | None = Field(default=None, gt=0)
+    drift_threshold_pct: Decimal | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def _at_least_one_and_name_nonempty(self):
+        if self.name is not None:
+            self.name = self.name.strip()
+            if not self.name:
+                raise ValueError("name must not be blank")
+        if self.name is None and self.target_fc_pct is None \
+                and self.drift_threshold_pct is None:
+            raise ValueError("at least one field must be provided")
+        return self
 
 
 class MergeIn(BaseModel):
