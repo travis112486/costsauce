@@ -1,5 +1,11 @@
 # Phase 1b Deploy Runbook: business tables and sample data
 
+> **Superseded for a from-scratch deploy:** if `0012`/`0013` have not been
+> applied to the target project yet, use `docs/runbooks/phase-1c-deploy.md`
+> instead — it deploys `0012`→`0015` together in one pass. Come back to this
+> document only if `0012`/`0013` are already applied and you need their
+> detail (pre-apply checks, mid-file failure hazards) on their own.
+
 Audience: whoever runs the Supabase apply for `0012_business_tables.sql` and
 `0013_sample_business_seed.sql`. Assumes the reader has already applied
 `0001`-`0010` (see `docs/runbooks/phase-1a-deploy.md`) and has no memory of
