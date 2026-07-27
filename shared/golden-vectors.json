@@ -1,0 +1,5349 @@
+{
+ "version": 1,
+ "generated_by": "tools/gen_golden_vectors.py (fractions.Fraction oracle)",
+ "normalize_purchase": [
+  {
+   "name": "kg to lb",
+   "base_unit": "lb",
+   "qty": "10",
+   "unit": "kg",
+   "total_price": "55.10",
+   "qty_in_case": null,
+   "expect": "22.0462"
+  },
+  {
+   "name": "g to lb",
+   "base_unit": "lb",
+   "qty": "500",
+   "unit": "g",
+   "total_price": "4.00",
+   "qty_in_case": null,
+   "expect": "1.1023"
+  },
+  {
+   "name": "oz to lb",
+   "base_unit": "lb",
+   "qty": "8",
+   "unit": "oz",
+   "total_price": "2.00",
+   "qty_in_case": null,
+   "expect": "0.5000"
+  },
+  {
+   "name": "lb identity",
+   "base_unit": "lb",
+   "qty": "12.5",
+   "unit": "lb",
+   "total_price": "30.00",
+   "qty_in_case": null,
+   "expect": "12.5000"
+  },
+  {
+   "name": "kg base from g",
+   "base_unit": "kg",
+   "qty": "750",
+   "unit": "g",
+   "total_price": "6.00",
+   "qty_in_case": null,
+   "expect": "0.7500"
+  },
+  {
+   "name": "oz base from kg",
+   "base_unit": "oz",
+   "qty": "1",
+   "unit": "kg",
+   "total_price": "9.00",
+   "qty_in_case": null,
+   "expect": "35.2740"
+  },
+  {
+   "name": "case each",
+   "base_unit": "each",
+   "qty": "2",
+   "unit": "case",
+   "total_price": "40.00",
+   "qty_in_case": "24",
+   "expect": "48.0000"
+  },
+  {
+   "name": "case weight",
+   "base_unit": "lb",
+   "qty": "3",
+   "unit": "case",
+   "total_price": "90.00",
+   "qty_in_case": "10.5",
+   "expect": "31.5000"
+  },
+  {
+   "name": "each plain",
+   "base_unit": "each",
+   "qty": "144",
+   "unit": "each",
+   "total_price": "11.52",
+   "qty_in_case": null,
+   "expect": "144.0000"
+  },
+  {
+   "name": "each rejects lb",
+   "base_unit": "each",
+   "qty": "2",
+   "unit": "lb",
+   "total_price": "4.00",
+   "qty_in_case": null,
+   "expect_error": true
+  },
+  {
+   "name": "case missing qty_in_case",
+   "base_unit": "lb",
+   "qty": "2",
+   "unit": "case",
+   "total_price": "4.00",
+   "qty_in_case": null,
+   "expect_error": true
+  },
+  {
+   "name": "zero qty",
+   "base_unit": "lb",
+   "qty": "0",
+   "unit": "lb",
+   "total_price": "4.00",
+   "qty_in_case": null,
+   "expect_error": true
+  },
+  {
+   "name": "zero price",
+   "base_unit": "lb",
+   "qty": "1",
+   "unit": "lb",
+   "total_price": "0",
+   "qty_in_case": null,
+   "expect_error": true
+  },
+  {
+   "name": "unknown unit",
+   "base_unit": "lb",
+   "qty": "1",
+   "unit": "stone",
+   "total_price": "4.00",
+   "qty_in_case": null,
+   "expect_error": true
+  }
+ ],
+ "unit_price": [
+  {
+   "total_price": "55.10",
+   "qty_base_units": "22.0462",
+   "expect": "2.499297"
+  },
+  {
+   "total_price": "1.00",
+   "qty_base_units": "3.0000",
+   "expect": "0.333333"
+  },
+  {
+   "total_price": "90.00",
+   "qty_base_units": "31.5000",
+   "expect": "2.857143"
+  },
+  {
+   "total_price": "11.52",
+   "qty_base_units": "144.0000",
+   "expect": "0.080000"
+  },
+  {
+   "total_price": "2.00",
+   "qty_base_units": "0.5000",
+   "expect": "4.000000"
+  },
+  {
+   "total_price": "0.01",
+   "qty_base_units": "0.0001",
+   "expect": "100.000000"
+  }
+ ],
+ "suggested_price_cents": [
+  {
+   "plate_cents": 100,
+   "target_bp": 2500,
+   "expect": 400
+  },
+  {
+   "plate_cents": 110,
+   "target_bp": 2500,
+   "expect": 450
+  },
+  {
+   "plate_cents": 120,
+   "target_bp": 2500,
+   "expect": 500
+  },
+  {
+   "plate_cents": 130,
+   "target_bp": 2500,
+   "expect": 550
+  },
+  {
+   "plate_cents": 140,
+   "target_bp": 2500,
+   "expect": 600
+  },
+  {
+   "plate_cents": 150,
+   "target_bp": 2500,
+   "expect": 600
+  },
+  {
+   "plate_cents": 160,
+   "target_bp": 2500,
+   "expect": 650
+  },
+  {
+   "plate_cents": 170,
+   "target_bp": 2500,
+   "expect": 700
+  },
+  {
+   "plate_cents": 180,
+   "target_bp": 2500,
+   "expect": 750
+  },
+  {
+   "plate_cents": 190,
+   "target_bp": 2500,
+   "expect": 800
+  },
+  {
+   "plate_cents": 200,
+   "target_bp": 2500,
+   "expect": 800
+  },
+  {
+   "plate_cents": 210,
+   "target_bp": 2500,
+   "expect": 850
+  },
+  {
+   "plate_cents": 220,
+   "target_bp": 2500,
+   "expect": 900
+  },
+  {
+   "plate_cents": 230,
+   "target_bp": 2500,
+   "expect": 950
+  },
+  {
+   "plate_cents": 240,
+   "target_bp": 2500,
+   "expect": 1000
+  },
+  {
+   "plate_cents": 250,
+   "target_bp": 2500,
+   "expect": 1000
+  },
+  {
+   "plate_cents": 260,
+   "target_bp": 2500,
+   "expect": 1050
+  },
+  {
+   "plate_cents": 270,
+   "target_bp": 2500,
+   "expect": 1100
+  },
+  {
+   "plate_cents": 280,
+   "target_bp": 2500,
+   "expect": 1150
+  },
+  {
+   "plate_cents": 290,
+   "target_bp": 2500,
+   "expect": 1200
+  },
+  {
+   "plate_cents": 300,
+   "target_bp": 2500,
+   "expect": 1200
+  },
+  {
+   "plate_cents": 310,
+   "target_bp": 2500,
+   "expect": 1250
+  },
+  {
+   "plate_cents": 320,
+   "target_bp": 2500,
+   "expect": 1300
+  },
+  {
+   "plate_cents": 330,
+   "target_bp": 2500,
+   "expect": 1350
+  },
+  {
+   "plate_cents": 340,
+   "target_bp": 2500,
+   "expect": 1400
+  },
+  {
+   "plate_cents": 350,
+   "target_bp": 2500,
+   "expect": 1400
+  },
+  {
+   "plate_cents": 360,
+   "target_bp": 2500,
+   "expect": 1450
+  },
+  {
+   "plate_cents": 370,
+   "target_bp": 2500,
+   "expect": 1500
+  },
+  {
+   "plate_cents": 380,
+   "target_bp": 2500,
+   "expect": 1550
+  },
+  {
+   "plate_cents": 390,
+   "target_bp": 2500,
+   "expect": 1600
+  },
+  {
+   "plate_cents": 400,
+   "target_bp": 2500,
+   "expect": 1600
+  },
+  {
+   "plate_cents": 410,
+   "target_bp": 2500,
+   "expect": 1650
+  },
+  {
+   "plate_cents": 420,
+   "target_bp": 2500,
+   "expect": 1700
+  },
+  {
+   "plate_cents": 430,
+   "target_bp": 2500,
+   "expect": 1750
+  },
+  {
+   "plate_cents": 440,
+   "target_bp": 2500,
+   "expect": 1800
+  },
+  {
+   "plate_cents": 450,
+   "target_bp": 2500,
+   "expect": 1800
+  },
+  {
+   "plate_cents": 460,
+   "target_bp": 2500,
+   "expect": 1850
+  },
+  {
+   "plate_cents": 470,
+   "target_bp": 2500,
+   "expect": 1900
+  },
+  {
+   "plate_cents": 480,
+   "target_bp": 2500,
+   "expect": 1950
+  },
+  {
+   "plate_cents": 490,
+   "target_bp": 2500,
+   "expect": 2000
+  },
+  {
+   "plate_cents": 500,
+   "target_bp": 2500,
+   "expect": 2000
+  },
+  {
+   "plate_cents": 510,
+   "target_bp": 2500,
+   "expect": 2050
+  },
+  {
+   "plate_cents": 520,
+   "target_bp": 2500,
+   "expect": 2100
+  },
+  {
+   "plate_cents": 530,
+   "target_bp": 2500,
+   "expect": 2150
+  },
+  {
+   "plate_cents": 540,
+   "target_bp": 2500,
+   "expect": 2200
+  },
+  {
+   "plate_cents": 550,
+   "target_bp": 2500,
+   "expect": 2200
+  },
+  {
+   "plate_cents": 560,
+   "target_bp": 2500,
+   "expect": 2250
+  },
+  {
+   "plate_cents": 570,
+   "target_bp": 2500,
+   "expect": 2300
+  },
+  {
+   "plate_cents": 580,
+   "target_bp": 2500,
+   "expect": 2350
+  },
+  {
+   "plate_cents": 590,
+   "target_bp": 2500,
+   "expect": 2400
+  },
+  {
+   "plate_cents": 600,
+   "target_bp": 2500,
+   "expect": 2400
+  },
+  {
+   "plate_cents": 610,
+   "target_bp": 2500,
+   "expect": 2450
+  },
+  {
+   "plate_cents": 620,
+   "target_bp": 2500,
+   "expect": 2500
+  },
+  {
+   "plate_cents": 630,
+   "target_bp": 2500,
+   "expect": 2550
+  },
+  {
+   "plate_cents": 640,
+   "target_bp": 2500,
+   "expect": 2600
+  },
+  {
+   "plate_cents": 650,
+   "target_bp": 2500,
+   "expect": 2600
+  },
+  {
+   "plate_cents": 660,
+   "target_bp": 2500,
+   "expect": 2650
+  },
+  {
+   "plate_cents": 670,
+   "target_bp": 2500,
+   "expect": 2700
+  },
+  {
+   "plate_cents": 680,
+   "target_bp": 2500,
+   "expect": 2750
+  },
+  {
+   "plate_cents": 690,
+   "target_bp": 2500,
+   "expect": 2800
+  },
+  {
+   "plate_cents": 700,
+   "target_bp": 2500,
+   "expect": 2800
+  },
+  {
+   "plate_cents": 710,
+   "target_bp": 2500,
+   "expect": 2850
+  },
+  {
+   "plate_cents": 720,
+   "target_bp": 2500,
+   "expect": 2900
+  },
+  {
+   "plate_cents": 730,
+   "target_bp": 2500,
+   "expect": 2950
+  },
+  {
+   "plate_cents": 740,
+   "target_bp": 2500,
+   "expect": 3000
+  },
+  {
+   "plate_cents": 750,
+   "target_bp": 2500,
+   "expect": 3000
+  },
+  {
+   "plate_cents": 760,
+   "target_bp": 2500,
+   "expect": 3050
+  },
+  {
+   "plate_cents": 770,
+   "target_bp": 2500,
+   "expect": 3100
+  },
+  {
+   "plate_cents": 780,
+   "target_bp": 2500,
+   "expect": 3150
+  },
+  {
+   "plate_cents": 790,
+   "target_bp": 2500,
+   "expect": 3200
+  },
+  {
+   "plate_cents": 800,
+   "target_bp": 2500,
+   "expect": 3200
+  },
+  {
+   "plate_cents": 810,
+   "target_bp": 2500,
+   "expect": 3250
+  },
+  {
+   "plate_cents": 820,
+   "target_bp": 2500,
+   "expect": 3300
+  },
+  {
+   "plate_cents": 830,
+   "target_bp": 2500,
+   "expect": 3350
+  },
+  {
+   "plate_cents": 840,
+   "target_bp": 2500,
+   "expect": 3400
+  },
+  {
+   "plate_cents": 850,
+   "target_bp": 2500,
+   "expect": 3400
+  },
+  {
+   "plate_cents": 860,
+   "target_bp": 2500,
+   "expect": 3450
+  },
+  {
+   "plate_cents": 870,
+   "target_bp": 2500,
+   "expect": 3500
+  },
+  {
+   "plate_cents": 880,
+   "target_bp": 2500,
+   "expect": 3550
+  },
+  {
+   "plate_cents": 890,
+   "target_bp": 2500,
+   "expect": 3600
+  },
+  {
+   "plate_cents": 900,
+   "target_bp": 2500,
+   "expect": 3600
+  },
+  {
+   "plate_cents": 910,
+   "target_bp": 2500,
+   "expect": 3650
+  },
+  {
+   "plate_cents": 920,
+   "target_bp": 2500,
+   "expect": 3700
+  },
+  {
+   "plate_cents": 930,
+   "target_bp": 2500,
+   "expect": 3750
+  },
+  {
+   "plate_cents": 940,
+   "target_bp": 2500,
+   "expect": 3800
+  },
+  {
+   "plate_cents": 950,
+   "target_bp": 2500,
+   "expect": 3800
+  },
+  {
+   "plate_cents": 960,
+   "target_bp": 2500,
+   "expect": 3850
+  },
+  {
+   "plate_cents": 970,
+   "target_bp": 2500,
+   "expect": 3900
+  },
+  {
+   "plate_cents": 980,
+   "target_bp": 2500,
+   "expect": 3950
+  },
+  {
+   "plate_cents": 990,
+   "target_bp": 2500,
+   "expect": 4000
+  },
+  {
+   "plate_cents": 1000,
+   "target_bp": 2500,
+   "expect": 4000
+  },
+  {
+   "plate_cents": 1010,
+   "target_bp": 2500,
+   "expect": 4050
+  },
+  {
+   "plate_cents": 1020,
+   "target_bp": 2500,
+   "expect": 4100
+  },
+  {
+   "plate_cents": 1030,
+   "target_bp": 2500,
+   "expect": 4150
+  },
+  {
+   "plate_cents": 1040,
+   "target_bp": 2500,
+   "expect": 4200
+  },
+  {
+   "plate_cents": 1050,
+   "target_bp": 2500,
+   "expect": 4200
+  },
+  {
+   "plate_cents": 1060,
+   "target_bp": 2500,
+   "expect": 4250
+  },
+  {
+   "plate_cents": 1070,
+   "target_bp": 2500,
+   "expect": 4300
+  },
+  {
+   "plate_cents": 1080,
+   "target_bp": 2500,
+   "expect": 4350
+  },
+  {
+   "plate_cents": 1090,
+   "target_bp": 2500,
+   "expect": 4400
+  },
+  {
+   "plate_cents": 1100,
+   "target_bp": 2500,
+   "expect": 4400
+  },
+  {
+   "plate_cents": 1110,
+   "target_bp": 2500,
+   "expect": 4450
+  },
+  {
+   "plate_cents": 1120,
+   "target_bp": 2500,
+   "expect": 4500
+  },
+  {
+   "plate_cents": 1130,
+   "target_bp": 2500,
+   "expect": 4550
+  },
+  {
+   "plate_cents": 1140,
+   "target_bp": 2500,
+   "expect": 4600
+  },
+  {
+   "plate_cents": 1150,
+   "target_bp": 2500,
+   "expect": 4600
+  },
+  {
+   "plate_cents": 1160,
+   "target_bp": 2500,
+   "expect": 4650
+  },
+  {
+   "plate_cents": 1170,
+   "target_bp": 2500,
+   "expect": 4700
+  },
+  {
+   "plate_cents": 1180,
+   "target_bp": 2500,
+   "expect": 4750
+  },
+  {
+   "plate_cents": 1190,
+   "target_bp": 2500,
+   "expect": 4800
+  },
+  {
+   "plate_cents": 1200,
+   "target_bp": 2500,
+   "expect": 4800
+  },
+  {
+   "plate_cents": 1210,
+   "target_bp": 2500,
+   "expect": 4850
+  },
+  {
+   "plate_cents": 1220,
+   "target_bp": 2500,
+   "expect": 4900
+  },
+  {
+   "plate_cents": 1230,
+   "target_bp": 2500,
+   "expect": 4950
+  },
+  {
+   "plate_cents": 1240,
+   "target_bp": 2500,
+   "expect": 5000
+  },
+  {
+   "plate_cents": 1250,
+   "target_bp": 2500,
+   "expect": 5000
+  },
+  {
+   "plate_cents": 1260,
+   "target_bp": 2500,
+   "expect": 5050
+  },
+  {
+   "plate_cents": 1270,
+   "target_bp": 2500,
+   "expect": 5100
+  },
+  {
+   "plate_cents": 1280,
+   "target_bp": 2500,
+   "expect": 5150
+  },
+  {
+   "plate_cents": 1290,
+   "target_bp": 2500,
+   "expect": 5200
+  },
+  {
+   "plate_cents": 1300,
+   "target_bp": 2500,
+   "expect": 5200
+  },
+  {
+   "plate_cents": 1310,
+   "target_bp": 2500,
+   "expect": 5250
+  },
+  {
+   "plate_cents": 1320,
+   "target_bp": 2500,
+   "expect": 5300
+  },
+  {
+   "plate_cents": 1330,
+   "target_bp": 2500,
+   "expect": 5350
+  },
+  {
+   "plate_cents": 1340,
+   "target_bp": 2500,
+   "expect": 5400
+  },
+  {
+   "plate_cents": 1350,
+   "target_bp": 2500,
+   "expect": 5400
+  },
+  {
+   "plate_cents": 1360,
+   "target_bp": 2500,
+   "expect": 5450
+  },
+  {
+   "plate_cents": 1370,
+   "target_bp": 2500,
+   "expect": 5500
+  },
+  {
+   "plate_cents": 1380,
+   "target_bp": 2500,
+   "expect": 5550
+  },
+  {
+   "plate_cents": 1390,
+   "target_bp": 2500,
+   "expect": 5600
+  },
+  {
+   "plate_cents": 1400,
+   "target_bp": 2500,
+   "expect": 5600
+  },
+  {
+   "plate_cents": 1410,
+   "target_bp": 2500,
+   "expect": 5650
+  },
+  {
+   "plate_cents": 1420,
+   "target_bp": 2500,
+   "expect": 5700
+  },
+  {
+   "plate_cents": 1430,
+   "target_bp": 2500,
+   "expect": 5750
+  },
+  {
+   "plate_cents": 1440,
+   "target_bp": 2500,
+   "expect": 5800
+  },
+  {
+   "plate_cents": 1450,
+   "target_bp": 2500,
+   "expect": 5800
+  },
+  {
+   "plate_cents": 1460,
+   "target_bp": 2500,
+   "expect": 5850
+  },
+  {
+   "plate_cents": 1470,
+   "target_bp": 2500,
+   "expect": 5900
+  },
+  {
+   "plate_cents": 1480,
+   "target_bp": 2500,
+   "expect": 5950
+  },
+  {
+   "plate_cents": 1490,
+   "target_bp": 2500,
+   "expect": 6000
+  },
+  {
+   "plate_cents": 1500,
+   "target_bp": 2500,
+   "expect": 6000
+  },
+  {
+   "plate_cents": 1510,
+   "target_bp": 2500,
+   "expect": 6050
+  },
+  {
+   "plate_cents": 1520,
+   "target_bp": 2500,
+   "expect": 6100
+  },
+  {
+   "plate_cents": 1530,
+   "target_bp": 2500,
+   "expect": 6150
+  },
+  {
+   "plate_cents": 1540,
+   "target_bp": 2500,
+   "expect": 6200
+  },
+  {
+   "plate_cents": 1550,
+   "target_bp": 2500,
+   "expect": 6200
+  },
+  {
+   "plate_cents": 1560,
+   "target_bp": 2500,
+   "expect": 6250
+  },
+  {
+   "plate_cents": 1570,
+   "target_bp": 2500,
+   "expect": 6300
+  },
+  {
+   "plate_cents": 1580,
+   "target_bp": 2500,
+   "expect": 6350
+  },
+  {
+   "plate_cents": 1590,
+   "target_bp": 2500,
+   "expect": 6400
+  },
+  {
+   "plate_cents": 1600,
+   "target_bp": 2500,
+   "expect": 6400
+  },
+  {
+   "plate_cents": 1610,
+   "target_bp": 2500,
+   "expect": 6450
+  },
+  {
+   "plate_cents": 1620,
+   "target_bp": 2500,
+   "expect": 6500
+  },
+  {
+   "plate_cents": 1630,
+   "target_bp": 2500,
+   "expect": 6550
+  },
+  {
+   "plate_cents": 1640,
+   "target_bp": 2500,
+   "expect": 6600
+  },
+  {
+   "plate_cents": 1650,
+   "target_bp": 2500,
+   "expect": 6600
+  },
+  {
+   "plate_cents": 1660,
+   "target_bp": 2500,
+   "expect": 6650
+  },
+  {
+   "plate_cents": 1670,
+   "target_bp": 2500,
+   "expect": 6700
+  },
+  {
+   "plate_cents": 1680,
+   "target_bp": 2500,
+   "expect": 6750
+  },
+  {
+   "plate_cents": 1690,
+   "target_bp": 2500,
+   "expect": 6800
+  },
+  {
+   "plate_cents": 1700,
+   "target_bp": 2500,
+   "expect": 6800
+  },
+  {
+   "plate_cents": 1710,
+   "target_bp": 2500,
+   "expect": 6850
+  },
+  {
+   "plate_cents": 1720,
+   "target_bp": 2500,
+   "expect": 6900
+  },
+  {
+   "plate_cents": 1730,
+   "target_bp": 2500,
+   "expect": 6950
+  },
+  {
+   "plate_cents": 1740,
+   "target_bp": 2500,
+   "expect": 7000
+  },
+  {
+   "plate_cents": 1750,
+   "target_bp": 2500,
+   "expect": 7000
+  },
+  {
+   "plate_cents": 1760,
+   "target_bp": 2500,
+   "expect": 7050
+  },
+  {
+   "plate_cents": 1770,
+   "target_bp": 2500,
+   "expect": 7100
+  },
+  {
+   "plate_cents": 1780,
+   "target_bp": 2500,
+   "expect": 7150
+  },
+  {
+   "plate_cents": 1790,
+   "target_bp": 2500,
+   "expect": 7200
+  },
+  {
+   "plate_cents": 1800,
+   "target_bp": 2500,
+   "expect": 7200
+  },
+  {
+   "plate_cents": 1810,
+   "target_bp": 2500,
+   "expect": 7250
+  },
+  {
+   "plate_cents": 1820,
+   "target_bp": 2500,
+   "expect": 7300
+  },
+  {
+   "plate_cents": 1830,
+   "target_bp": 2500,
+   "expect": 7350
+  },
+  {
+   "plate_cents": 1840,
+   "target_bp": 2500,
+   "expect": 7400
+  },
+  {
+   "plate_cents": 1850,
+   "target_bp": 2500,
+   "expect": 7400
+  },
+  {
+   "plate_cents": 1860,
+   "target_bp": 2500,
+   "expect": 7450
+  },
+  {
+   "plate_cents": 1870,
+   "target_bp": 2500,
+   "expect": 7500
+  },
+  {
+   "plate_cents": 1880,
+   "target_bp": 2500,
+   "expect": 7550
+  },
+  {
+   "plate_cents": 1890,
+   "target_bp": 2500,
+   "expect": 7600
+  },
+  {
+   "plate_cents": 1900,
+   "target_bp": 2500,
+   "expect": 7600
+  },
+  {
+   "plate_cents": 1910,
+   "target_bp": 2500,
+   "expect": 7650
+  },
+  {
+   "plate_cents": 1920,
+   "target_bp": 2500,
+   "expect": 7700
+  },
+  {
+   "plate_cents": 1930,
+   "target_bp": 2500,
+   "expect": 7750
+  },
+  {
+   "plate_cents": 1940,
+   "target_bp": 2500,
+   "expect": 7800
+  },
+  {
+   "plate_cents": 1950,
+   "target_bp": 2500,
+   "expect": 7800
+  },
+  {
+   "plate_cents": 1960,
+   "target_bp": 2500,
+   "expect": 7850
+  },
+  {
+   "plate_cents": 1970,
+   "target_bp": 2500,
+   "expect": 7900
+  },
+  {
+   "plate_cents": 1980,
+   "target_bp": 2500,
+   "expect": 7950
+  },
+  {
+   "plate_cents": 1990,
+   "target_bp": 2500,
+   "expect": 8000
+  },
+  {
+   "plate_cents": 2000,
+   "target_bp": 2500,
+   "expect": 8000
+  },
+  {
+   "plate_cents": 100,
+   "target_bp": 2800,
+   "expect": 400
+  },
+  {
+   "plate_cents": 110,
+   "target_bp": 2800,
+   "expect": 400
+  },
+  {
+   "plate_cents": 120,
+   "target_bp": 2800,
+   "expect": 450
+  },
+  {
+   "plate_cents": 130,
+   "target_bp": 2800,
+   "expect": 500
+  },
+  {
+   "plate_cents": 140,
+   "target_bp": 2800,
+   "expect": 500
+  },
+  {
+   "plate_cents": 150,
+   "target_bp": 2800,
+   "expect": 550
+  },
+  {
+   "plate_cents": 160,
+   "target_bp": 2800,
+   "expect": 600
+  },
+  {
+   "plate_cents": 170,
+   "target_bp": 2800,
+   "expect": 650
+  },
+  {
+   "plate_cents": 180,
+   "target_bp": 2800,
+   "expect": 650
+  },
+  {
+   "plate_cents": 190,
+   "target_bp": 2800,
+   "expect": 700
+  },
+  {
+   "plate_cents": 200,
+   "target_bp": 2800,
+   "expect": 750
+  },
+  {
+   "plate_cents": 210,
+   "target_bp": 2800,
+   "expect": 750
+  },
+  {
+   "plate_cents": 220,
+   "target_bp": 2800,
+   "expect": 800
+  },
+  {
+   "plate_cents": 230,
+   "target_bp": 2800,
+   "expect": 850
+  },
+  {
+   "plate_cents": 240,
+   "target_bp": 2800,
+   "expect": 900
+  },
+  {
+   "plate_cents": 250,
+   "target_bp": 2800,
+   "expect": 900
+  },
+  {
+   "plate_cents": 260,
+   "target_bp": 2800,
+   "expect": 950
+  },
+  {
+   "plate_cents": 270,
+   "target_bp": 2800,
+   "expect": 1000
+  },
+  {
+   "plate_cents": 280,
+   "target_bp": 2800,
+   "expect": 1000
+  },
+  {
+   "plate_cents": 290,
+   "target_bp": 2800,
+   "expect": 1050
+  },
+  {
+   "plate_cents": 300,
+   "target_bp": 2800,
+   "expect": 1100
+  },
+  {
+   "plate_cents": 310,
+   "target_bp": 2800,
+   "expect": 1150
+  },
+  {
+   "plate_cents": 320,
+   "target_bp": 2800,
+   "expect": 1150
+  },
+  {
+   "plate_cents": 330,
+   "target_bp": 2800,
+   "expect": 1200
+  },
+  {
+   "plate_cents": 340,
+   "target_bp": 2800,
+   "expect": 1250
+  },
+  {
+   "plate_cents": 350,
+   "target_bp": 2800,
+   "expect": 1250
+  },
+  {
+   "plate_cents": 360,
+   "target_bp": 2800,
+   "expect": 1300
+  },
+  {
+   "plate_cents": 370,
+   "target_bp": 2800,
+   "expect": 1350
+  },
+  {
+   "plate_cents": 380,
+   "target_bp": 2800,
+   "expect": 1400
+  },
+  {
+   "plate_cents": 390,
+   "target_bp": 2800,
+   "expect": 1400
+  },
+  {
+   "plate_cents": 400,
+   "target_bp": 2800,
+   "expect": 1450
+  },
+  {
+   "plate_cents": 410,
+   "target_bp": 2800,
+   "expect": 1500
+  },
+  {
+   "plate_cents": 420,
+   "target_bp": 2800,
+   "expect": 1500
+  },
+  {
+   "plate_cents": 430,
+   "target_bp": 2800,
+   "expect": 1550
+  },
+  {
+   "plate_cents": 440,
+   "target_bp": 2800,
+   "expect": 1600
+  },
+  {
+   "plate_cents": 450,
+   "target_bp": 2800,
+   "expect": 1650
+  },
+  {
+   "plate_cents": 460,
+   "target_bp": 2800,
+   "expect": 1650
+  },
+  {
+   "plate_cents": 470,
+   "target_bp": 2800,
+   "expect": 1700
+  },
+  {
+   "plate_cents": 480,
+   "target_bp": 2800,
+   "expect": 1750
+  },
+  {
+   "plate_cents": 490,
+   "target_bp": 2800,
+   "expect": 1750
+  },
+  {
+   "plate_cents": 500,
+   "target_bp": 2800,
+   "expect": 1800
+  },
+  {
+   "plate_cents": 510,
+   "target_bp": 2800,
+   "expect": 1850
+  },
+  {
+   "plate_cents": 520,
+   "target_bp": 2800,
+   "expect": 1900
+  },
+  {
+   "plate_cents": 530,
+   "target_bp": 2800,
+   "expect": 1900
+  },
+  {
+   "plate_cents": 540,
+   "target_bp": 2800,
+   "expect": 1950
+  },
+  {
+   "plate_cents": 550,
+   "target_bp": 2800,
+   "expect": 2000
+  },
+  {
+   "plate_cents": 560,
+   "target_bp": 2800,
+   "expect": 2000
+  },
+  {
+   "plate_cents": 570,
+   "target_bp": 2800,
+   "expect": 2050
+  },
+  {
+   "plate_cents": 580,
+   "target_bp": 2800,
+   "expect": 2100
+  },
+  {
+   "plate_cents": 590,
+   "target_bp": 2800,
+   "expect": 2150
+  },
+  {
+   "plate_cents": 600,
+   "target_bp": 2800,
+   "expect": 2150
+  },
+  {
+   "plate_cents": 610,
+   "target_bp": 2800,
+   "expect": 2200
+  },
+  {
+   "plate_cents": 620,
+   "target_bp": 2800,
+   "expect": 2250
+  },
+  {
+   "plate_cents": 630,
+   "target_bp": 2800,
+   "expect": 2250
+  },
+  {
+   "plate_cents": 640,
+   "target_bp": 2800,
+   "expect": 2300
+  },
+  {
+   "plate_cents": 650,
+   "target_bp": 2800,
+   "expect": 2350
+  },
+  {
+   "plate_cents": 660,
+   "target_bp": 2800,
+   "expect": 2400
+  },
+  {
+   "plate_cents": 670,
+   "target_bp": 2800,
+   "expect": 2400
+  },
+  {
+   "plate_cents": 680,
+   "target_bp": 2800,
+   "expect": 2450
+  },
+  {
+   "plate_cents": 690,
+   "target_bp": 2800,
+   "expect": 2500
+  },
+  {
+   "plate_cents": 700,
+   "target_bp": 2800,
+   "expect": 2500
+  },
+  {
+   "plate_cents": 710,
+   "target_bp": 2800,
+   "expect": 2550
+  },
+  {
+   "plate_cents": 720,
+   "target_bp": 2800,
+   "expect": 2600
+  },
+  {
+   "plate_cents": 730,
+   "target_bp": 2800,
+   "expect": 2650
+  },
+  {
+   "plate_cents": 740,
+   "target_bp": 2800,
+   "expect": 2650
+  },
+  {
+   "plate_cents": 750,
+   "target_bp": 2800,
+   "expect": 2700
+  },
+  {
+   "plate_cents": 760,
+   "target_bp": 2800,
+   "expect": 2750
+  },
+  {
+   "plate_cents": 770,
+   "target_bp": 2800,
+   "expect": 2750
+  },
+  {
+   "plate_cents": 780,
+   "target_bp": 2800,
+   "expect": 2800
+  },
+  {
+   "plate_cents": 790,
+   "target_bp": 2800,
+   "expect": 2850
+  },
+  {
+   "plate_cents": 800,
+   "target_bp": 2800,
+   "expect": 2900
+  },
+  {
+   "plate_cents": 810,
+   "target_bp": 2800,
+   "expect": 2900
+  },
+  {
+   "plate_cents": 820,
+   "target_bp": 2800,
+   "expect": 2950
+  },
+  {
+   "plate_cents": 830,
+   "target_bp": 2800,
+   "expect": 3000
+  },
+  {
+   "plate_cents": 840,
+   "target_bp": 2800,
+   "expect": 3000
+  },
+  {
+   "plate_cents": 850,
+   "target_bp": 2800,
+   "expect": 3050
+  },
+  {
+   "plate_cents": 860,
+   "target_bp": 2800,
+   "expect": 3100
+  },
+  {
+   "plate_cents": 870,
+   "target_bp": 2800,
+   "expect": 3150
+  },
+  {
+   "plate_cents": 880,
+   "target_bp": 2800,
+   "expect": 3150
+  },
+  {
+   "plate_cents": 890,
+   "target_bp": 2800,
+   "expect": 3200
+  },
+  {
+   "plate_cents": 900,
+   "target_bp": 2800,
+   "expect": 3250
+  },
+  {
+   "plate_cents": 910,
+   "target_bp": 2800,
+   "expect": 3250
+  },
+  {
+   "plate_cents": 920,
+   "target_bp": 2800,
+   "expect": 3300
+  },
+  {
+   "plate_cents": 930,
+   "target_bp": 2800,
+   "expect": 3350
+  },
+  {
+   "plate_cents": 940,
+   "target_bp": 2800,
+   "expect": 3400
+  },
+  {
+   "plate_cents": 950,
+   "target_bp": 2800,
+   "expect": 3400
+  },
+  {
+   "plate_cents": 960,
+   "target_bp": 2800,
+   "expect": 3450
+  },
+  {
+   "plate_cents": 970,
+   "target_bp": 2800,
+   "expect": 3500
+  },
+  {
+   "plate_cents": 980,
+   "target_bp": 2800,
+   "expect": 3500
+  },
+  {
+   "plate_cents": 990,
+   "target_bp": 2800,
+   "expect": 3550
+  },
+  {
+   "plate_cents": 1000,
+   "target_bp": 2800,
+   "expect": 3600
+  },
+  {
+   "plate_cents": 1010,
+   "target_bp": 2800,
+   "expect": 3650
+  },
+  {
+   "plate_cents": 1020,
+   "target_bp": 2800,
+   "expect": 3650
+  },
+  {
+   "plate_cents": 1030,
+   "target_bp": 2800,
+   "expect": 3700
+  },
+  {
+   "plate_cents": 1040,
+   "target_bp": 2800,
+   "expect": 3750
+  },
+  {
+   "plate_cents": 1050,
+   "target_bp": 2800,
+   "expect": 3750
+  },
+  {
+   "plate_cents": 1060,
+   "target_bp": 2800,
+   "expect": 3800
+  },
+  {
+   "plate_cents": 1070,
+   "target_bp": 2800,
+   "expect": 3850
+  },
+  {
+   "plate_cents": 1080,
+   "target_bp": 2800,
+   "expect": 3900
+  },
+  {
+   "plate_cents": 1090,
+   "target_bp": 2800,
+   "expect": 3900
+  },
+  {
+   "plate_cents": 1100,
+   "target_bp": 2800,
+   "expect": 3950
+  },
+  {
+   "plate_cents": 1110,
+   "target_bp": 2800,
+   "expect": 4000
+  },
+  {
+   "plate_cents": 1120,
+   "target_bp": 2800,
+   "expect": 4000
+  },
+  {
+   "plate_cents": 1130,
+   "target_bp": 2800,
+   "expect": 4050
+  },
+  {
+   "plate_cents": 1140,
+   "target_bp": 2800,
+   "expect": 4100
+  },
+  {
+   "plate_cents": 1150,
+   "target_bp": 2800,
+   "expect": 4150
+  },
+  {
+   "plate_cents": 1160,
+   "target_bp": 2800,
+   "expect": 4150
+  },
+  {
+   "plate_cents": 1170,
+   "target_bp": 2800,
+   "expect": 4200
+  },
+  {
+   "plate_cents": 1180,
+   "target_bp": 2800,
+   "expect": 4250
+  },
+  {
+   "plate_cents": 1190,
+   "target_bp": 2800,
+   "expect": 4250
+  },
+  {
+   "plate_cents": 1200,
+   "target_bp": 2800,
+   "expect": 4300
+  },
+  {
+   "plate_cents": 1210,
+   "target_bp": 2800,
+   "expect": 4350
+  },
+  {
+   "plate_cents": 1220,
+   "target_bp": 2800,
+   "expect": 4400
+  },
+  {
+   "plate_cents": 1230,
+   "target_bp": 2800,
+   "expect": 4400
+  },
+  {
+   "plate_cents": 1240,
+   "target_bp": 2800,
+   "expect": 4450
+  },
+  {
+   "plate_cents": 1250,
+   "target_bp": 2800,
+   "expect": 4500
+  },
+  {
+   "plate_cents": 1260,
+   "target_bp": 2800,
+   "expect": 4500
+  },
+  {
+   "plate_cents": 1270,
+   "target_bp": 2800,
+   "expect": 4550
+  },
+  {
+   "plate_cents": 1280,
+   "target_bp": 2800,
+   "expect": 4600
+  },
+  {
+   "plate_cents": 1290,
+   "target_bp": 2800,
+   "expect": 4650
+  },
+  {
+   "plate_cents": 1300,
+   "target_bp": 2800,
+   "expect": 4650
+  },
+  {
+   "plate_cents": 1310,
+   "target_bp": 2800,
+   "expect": 4700
+  },
+  {
+   "plate_cents": 1320,
+   "target_bp": 2800,
+   "expect": 4750
+  },
+  {
+   "plate_cents": 1330,
+   "target_bp": 2800,
+   "expect": 4750
+  },
+  {
+   "plate_cents": 1340,
+   "target_bp": 2800,
+   "expect": 4800
+  },
+  {
+   "plate_cents": 1350,
+   "target_bp": 2800,
+   "expect": 4850
+  },
+  {
+   "plate_cents": 1360,
+   "target_bp": 2800,
+   "expect": 4900
+  },
+  {
+   "plate_cents": 1370,
+   "target_bp": 2800,
+   "expect": 4900
+  },
+  {
+   "plate_cents": 1380,
+   "target_bp": 2800,
+   "expect": 4950
+  },
+  {
+   "plate_cents": 1390,
+   "target_bp": 2800,
+   "expect": 5000
+  },
+  {
+   "plate_cents": 1400,
+   "target_bp": 2800,
+   "expect": 5000
+  },
+  {
+   "plate_cents": 1410,
+   "target_bp": 2800,
+   "expect": 5050
+  },
+  {
+   "plate_cents": 1420,
+   "target_bp": 2800,
+   "expect": 5100
+  },
+  {
+   "plate_cents": 1430,
+   "target_bp": 2800,
+   "expect": 5150
+  },
+  {
+   "plate_cents": 1440,
+   "target_bp": 2800,
+   "expect": 5150
+  },
+  {
+   "plate_cents": 1450,
+   "target_bp": 2800,
+   "expect": 5200
+  },
+  {
+   "plate_cents": 1460,
+   "target_bp": 2800,
+   "expect": 5250
+  },
+  {
+   "plate_cents": 1470,
+   "target_bp": 2800,
+   "expect": 5250
+  },
+  {
+   "plate_cents": 1480,
+   "target_bp": 2800,
+   "expect": 5300
+  },
+  {
+   "plate_cents": 1490,
+   "target_bp": 2800,
+   "expect": 5350
+  },
+  {
+   "plate_cents": 1500,
+   "target_bp": 2800,
+   "expect": 5400
+  },
+  {
+   "plate_cents": 1510,
+   "target_bp": 2800,
+   "expect": 5400
+  },
+  {
+   "plate_cents": 1520,
+   "target_bp": 2800,
+   "expect": 5450
+  },
+  {
+   "plate_cents": 1530,
+   "target_bp": 2800,
+   "expect": 5500
+  },
+  {
+   "plate_cents": 1540,
+   "target_bp": 2800,
+   "expect": 5500
+  },
+  {
+   "plate_cents": 1550,
+   "target_bp": 2800,
+   "expect": 5550
+  },
+  {
+   "plate_cents": 1560,
+   "target_bp": 2800,
+   "expect": 5600
+  },
+  {
+   "plate_cents": 1570,
+   "target_bp": 2800,
+   "expect": 5650
+  },
+  {
+   "plate_cents": 1580,
+   "target_bp": 2800,
+   "expect": 5650
+  },
+  {
+   "plate_cents": 1590,
+   "target_bp": 2800,
+   "expect": 5700
+  },
+  {
+   "plate_cents": 1600,
+   "target_bp": 2800,
+   "expect": 5750
+  },
+  {
+   "plate_cents": 1610,
+   "target_bp": 2800,
+   "expect": 5750
+  },
+  {
+   "plate_cents": 1620,
+   "target_bp": 2800,
+   "expect": 5800
+  },
+  {
+   "plate_cents": 1630,
+   "target_bp": 2800,
+   "expect": 5850
+  },
+  {
+   "plate_cents": 1640,
+   "target_bp": 2800,
+   "expect": 5900
+  },
+  {
+   "plate_cents": 1650,
+   "target_bp": 2800,
+   "expect": 5900
+  },
+  {
+   "plate_cents": 1660,
+   "target_bp": 2800,
+   "expect": 5950
+  },
+  {
+   "plate_cents": 1670,
+   "target_bp": 2800,
+   "expect": 6000
+  },
+  {
+   "plate_cents": 1680,
+   "target_bp": 2800,
+   "expect": 6000
+  },
+  {
+   "plate_cents": 1690,
+   "target_bp": 2800,
+   "expect": 6050
+  },
+  {
+   "plate_cents": 1700,
+   "target_bp": 2800,
+   "expect": 6100
+  },
+  {
+   "plate_cents": 1710,
+   "target_bp": 2800,
+   "expect": 6150
+  },
+  {
+   "plate_cents": 1720,
+   "target_bp": 2800,
+   "expect": 6150
+  },
+  {
+   "plate_cents": 1730,
+   "target_bp": 2800,
+   "expect": 6200
+  },
+  {
+   "plate_cents": 1740,
+   "target_bp": 2800,
+   "expect": 6250
+  },
+  {
+   "plate_cents": 1750,
+   "target_bp": 2800,
+   "expect": 6250
+  },
+  {
+   "plate_cents": 1760,
+   "target_bp": 2800,
+   "expect": 6300
+  },
+  {
+   "plate_cents": 1770,
+   "target_bp": 2800,
+   "expect": 6350
+  },
+  {
+   "plate_cents": 1780,
+   "target_bp": 2800,
+   "expect": 6400
+  },
+  {
+   "plate_cents": 1790,
+   "target_bp": 2800,
+   "expect": 6400
+  },
+  {
+   "plate_cents": 1800,
+   "target_bp": 2800,
+   "expect": 6450
+  },
+  {
+   "plate_cents": 1810,
+   "target_bp": 2800,
+   "expect": 6500
+  },
+  {
+   "plate_cents": 1820,
+   "target_bp": 2800,
+   "expect": 6500
+  },
+  {
+   "plate_cents": 1830,
+   "target_bp": 2800,
+   "expect": 6550
+  },
+  {
+   "plate_cents": 1840,
+   "target_bp": 2800,
+   "expect": 6600
+  },
+  {
+   "plate_cents": 1850,
+   "target_bp": 2800,
+   "expect": 6650
+  },
+  {
+   "plate_cents": 1860,
+   "target_bp": 2800,
+   "expect": 6650
+  },
+  {
+   "plate_cents": 1870,
+   "target_bp": 2800,
+   "expect": 6700
+  },
+  {
+   "plate_cents": 1880,
+   "target_bp": 2800,
+   "expect": 6750
+  },
+  {
+   "plate_cents": 1890,
+   "target_bp": 2800,
+   "expect": 6750
+  },
+  {
+   "plate_cents": 1900,
+   "target_bp": 2800,
+   "expect": 6800
+  },
+  {
+   "plate_cents": 1910,
+   "target_bp": 2800,
+   "expect": 6850
+  },
+  {
+   "plate_cents": 1920,
+   "target_bp": 2800,
+   "expect": 6900
+  },
+  {
+   "plate_cents": 1930,
+   "target_bp": 2800,
+   "expect": 6900
+  },
+  {
+   "plate_cents": 1940,
+   "target_bp": 2800,
+   "expect": 6950
+  },
+  {
+   "plate_cents": 1950,
+   "target_bp": 2800,
+   "expect": 7000
+  },
+  {
+   "plate_cents": 1960,
+   "target_bp": 2800,
+   "expect": 7000
+  },
+  {
+   "plate_cents": 1970,
+   "target_bp": 2800,
+   "expect": 7050
+  },
+  {
+   "plate_cents": 1980,
+   "target_bp": 2800,
+   "expect": 7100
+  },
+  {
+   "plate_cents": 1990,
+   "target_bp": 2800,
+   "expect": 7150
+  },
+  {
+   "plate_cents": 2000,
+   "target_bp": 2800,
+   "expect": 7150
+  },
+  {
+   "plate_cents": 100,
+   "target_bp": 3000,
+   "expect": 350
+  },
+  {
+   "plate_cents": 110,
+   "target_bp": 3000,
+   "expect": 400
+  },
+  {
+   "plate_cents": 120,
+   "target_bp": 3000,
+   "expect": 400
+  },
+  {
+   "plate_cents": 130,
+   "target_bp": 3000,
+   "expect": 450
+  },
+  {
+   "plate_cents": 140,
+   "target_bp": 3000,
+   "expect": 500
+  },
+  {
+   "plate_cents": 150,
+   "target_bp": 3000,
+   "expect": 500
+  },
+  {
+   "plate_cents": 160,
+   "target_bp": 3000,
+   "expect": 550
+  },
+  {
+   "plate_cents": 170,
+   "target_bp": 3000,
+   "expect": 600
+  },
+  {
+   "plate_cents": 180,
+   "target_bp": 3000,
+   "expect": 600
+  },
+  {
+   "plate_cents": 190,
+   "target_bp": 3000,
+   "expect": 650
+  },
+  {
+   "plate_cents": 200,
+   "target_bp": 3000,
+   "expect": 700
+  },
+  {
+   "plate_cents": 210,
+   "target_bp": 3000,
+   "expect": 700
+  },
+  {
+   "plate_cents": 220,
+   "target_bp": 3000,
+   "expect": 750
+  },
+  {
+   "plate_cents": 230,
+   "target_bp": 3000,
+   "expect": 800
+  },
+  {
+   "plate_cents": 240,
+   "target_bp": 3000,
+   "expect": 800
+  },
+  {
+   "plate_cents": 250,
+   "target_bp": 3000,
+   "expect": 850
+  },
+  {
+   "plate_cents": 260,
+   "target_bp": 3000,
+   "expect": 900
+  },
+  {
+   "plate_cents": 270,
+   "target_bp": 3000,
+   "expect": 900
+  },
+  {
+   "plate_cents": 280,
+   "target_bp": 3000,
+   "expect": 950
+  },
+  {
+   "plate_cents": 290,
+   "target_bp": 3000,
+   "expect": 1000
+  },
+  {
+   "plate_cents": 300,
+   "target_bp": 3000,
+   "expect": 1000
+  },
+  {
+   "plate_cents": 310,
+   "target_bp": 3000,
+   "expect": 1050
+  },
+  {
+   "plate_cents": 320,
+   "target_bp": 3000,
+   "expect": 1100
+  },
+  {
+   "plate_cents": 330,
+   "target_bp": 3000,
+   "expect": 1100
+  },
+  {
+   "plate_cents": 340,
+   "target_bp": 3000,
+   "expect": 1150
+  },
+  {
+   "plate_cents": 350,
+   "target_bp": 3000,
+   "expect": 1200
+  },
+  {
+   "plate_cents": 360,
+   "target_bp": 3000,
+   "expect": 1200
+  },
+  {
+   "plate_cents": 370,
+   "target_bp": 3000,
+   "expect": 1250
+  },
+  {
+   "plate_cents": 380,
+   "target_bp": 3000,
+   "expect": 1300
+  },
+  {
+   "plate_cents": 390,
+   "target_bp": 3000,
+   "expect": 1300
+  },
+  {
+   "plate_cents": 400,
+   "target_bp": 3000,
+   "expect": 1350
+  },
+  {
+   "plate_cents": 410,
+   "target_bp": 3000,
+   "expect": 1400
+  },
+  {
+   "plate_cents": 420,
+   "target_bp": 3000,
+   "expect": 1400
+  },
+  {
+   "plate_cents": 430,
+   "target_bp": 3000,
+   "expect": 1450
+  },
+  {
+   "plate_cents": 440,
+   "target_bp": 3000,
+   "expect": 1500
+  },
+  {
+   "plate_cents": 450,
+   "target_bp": 3000,
+   "expect": 1500
+  },
+  {
+   "plate_cents": 460,
+   "target_bp": 3000,
+   "expect": 1550
+  },
+  {
+   "plate_cents": 470,
+   "target_bp": 3000,
+   "expect": 1600
+  },
+  {
+   "plate_cents": 480,
+   "target_bp": 3000,
+   "expect": 1600
+  },
+  {
+   "plate_cents": 490,
+   "target_bp": 3000,
+   "expect": 1650
+  },
+  {
+   "plate_cents": 500,
+   "target_bp": 3000,
+   "expect": 1700
+  },
+  {
+   "plate_cents": 510,
+   "target_bp": 3000,
+   "expect": 1700
+  },
+  {
+   "plate_cents": 520,
+   "target_bp": 3000,
+   "expect": 1750
+  },
+  {
+   "plate_cents": 530,
+   "target_bp": 3000,
+   "expect": 1800
+  },
+  {
+   "plate_cents": 540,
+   "target_bp": 3000,
+   "expect": 1800
+  },
+  {
+   "plate_cents": 550,
+   "target_bp": 3000,
+   "expect": 1850
+  },
+  {
+   "plate_cents": 560,
+   "target_bp": 3000,
+   "expect": 1900
+  },
+  {
+   "plate_cents": 570,
+   "target_bp": 3000,
+   "expect": 1900
+  },
+  {
+   "plate_cents": 580,
+   "target_bp": 3000,
+   "expect": 1950
+  },
+  {
+   "plate_cents": 590,
+   "target_bp": 3000,
+   "expect": 2000
+  },
+  {
+   "plate_cents": 600,
+   "target_bp": 3000,
+   "expect": 2000
+  },
+  {
+   "plate_cents": 610,
+   "target_bp": 3000,
+   "expect": 2050
+  },
+  {
+   "plate_cents": 620,
+   "target_bp": 3000,
+   "expect": 2100
+  },
+  {
+   "plate_cents": 630,
+   "target_bp": 3000,
+   "expect": 2100
+  },
+  {
+   "plate_cents": 640,
+   "target_bp": 3000,
+   "expect": 2150
+  },
+  {
+   "plate_cents": 650,
+   "target_bp": 3000,
+   "expect": 2200
+  },
+  {
+   "plate_cents": 660,
+   "target_bp": 3000,
+   "expect": 2200
+  },
+  {
+   "plate_cents": 670,
+   "target_bp": 3000,
+   "expect": 2250
+  },
+  {
+   "plate_cents": 680,
+   "target_bp": 3000,
+   "expect": 2300
+  },
+  {
+   "plate_cents": 690,
+   "target_bp": 3000,
+   "expect": 2300
+  },
+  {
+   "plate_cents": 700,
+   "target_bp": 3000,
+   "expect": 2350
+  },
+  {
+   "plate_cents": 710,
+   "target_bp": 3000,
+   "expect": 2400
+  },
+  {
+   "plate_cents": 720,
+   "target_bp": 3000,
+   "expect": 2400
+  },
+  {
+   "plate_cents": 730,
+   "target_bp": 3000,
+   "expect": 2450
+  },
+  {
+   "plate_cents": 740,
+   "target_bp": 3000,
+   "expect": 2500
+  },
+  {
+   "plate_cents": 750,
+   "target_bp": 3000,
+   "expect": 2500
+  },
+  {
+   "plate_cents": 760,
+   "target_bp": 3000,
+   "expect": 2550
+  },
+  {
+   "plate_cents": 770,
+   "target_bp": 3000,
+   "expect": 2600
+  },
+  {
+   "plate_cents": 780,
+   "target_bp": 3000,
+   "expect": 2600
+  },
+  {
+   "plate_cents": 790,
+   "target_bp": 3000,
+   "expect": 2650
+  },
+  {
+   "plate_cents": 800,
+   "target_bp": 3000,
+   "expect": 2700
+  },
+  {
+   "plate_cents": 810,
+   "target_bp": 3000,
+   "expect": 2700
+  },
+  {
+   "plate_cents": 820,
+   "target_bp": 3000,
+   "expect": 2750
+  },
+  {
+   "plate_cents": 830,
+   "target_bp": 3000,
+   "expect": 2800
+  },
+  {
+   "plate_cents": 840,
+   "target_bp": 3000,
+   "expect": 2800
+  },
+  {
+   "plate_cents": 850,
+   "target_bp": 3000,
+   "expect": 2850
+  },
+  {
+   "plate_cents": 860,
+   "target_bp": 3000,
+   "expect": 2900
+  },
+  {
+   "plate_cents": 870,
+   "target_bp": 3000,
+   "expect": 2900
+  },
+  {
+   "plate_cents": 880,
+   "target_bp": 3000,
+   "expect": 2950
+  },
+  {
+   "plate_cents": 890,
+   "target_bp": 3000,
+   "expect": 3000
+  },
+  {
+   "plate_cents": 900,
+   "target_bp": 3000,
+   "expect": 3000
+  },
+  {
+   "plate_cents": 910,
+   "target_bp": 3000,
+   "expect": 3050
+  },
+  {
+   "plate_cents": 920,
+   "target_bp": 3000,
+   "expect": 3100
+  },
+  {
+   "plate_cents": 930,
+   "target_bp": 3000,
+   "expect": 3100
+  },
+  {
+   "plate_cents": 940,
+   "target_bp": 3000,
+   "expect": 3150
+  },
+  {
+   "plate_cents": 950,
+   "target_bp": 3000,
+   "expect": 3200
+  },
+  {
+   "plate_cents": 960,
+   "target_bp": 3000,
+   "expect": 3200
+  },
+  {
+   "plate_cents": 970,
+   "target_bp": 3000,
+   "expect": 3250
+  },
+  {
+   "plate_cents": 980,
+   "target_bp": 3000,
+   "expect": 3300
+  },
+  {
+   "plate_cents": 990,
+   "target_bp": 3000,
+   "expect": 3300
+  },
+  {
+   "plate_cents": 1000,
+   "target_bp": 3000,
+   "expect": 3350
+  },
+  {
+   "plate_cents": 1010,
+   "target_bp": 3000,
+   "expect": 3400
+  },
+  {
+   "plate_cents": 1020,
+   "target_bp": 3000,
+   "expect": 3400
+  },
+  {
+   "plate_cents": 1030,
+   "target_bp": 3000,
+   "expect": 3450
+  },
+  {
+   "plate_cents": 1040,
+   "target_bp": 3000,
+   "expect": 3500
+  },
+  {
+   "plate_cents": 1050,
+   "target_bp": 3000,
+   "expect": 3500
+  },
+  {
+   "plate_cents": 1060,
+   "target_bp": 3000,
+   "expect": 3550
+  },
+  {
+   "plate_cents": 1070,
+   "target_bp": 3000,
+   "expect": 3600
+  },
+  {
+   "plate_cents": 1080,
+   "target_bp": 3000,
+   "expect": 3600
+  },
+  {
+   "plate_cents": 1090,
+   "target_bp": 3000,
+   "expect": 3650
+  },
+  {
+   "plate_cents": 1100,
+   "target_bp": 3000,
+   "expect": 3700
+  },
+  {
+   "plate_cents": 1110,
+   "target_bp": 3000,
+   "expect": 3700
+  },
+  {
+   "plate_cents": 1120,
+   "target_bp": 3000,
+   "expect": 3750
+  },
+  {
+   "plate_cents": 1130,
+   "target_bp": 3000,
+   "expect": 3800
+  },
+  {
+   "plate_cents": 1140,
+   "target_bp": 3000,
+   "expect": 3800
+  },
+  {
+   "plate_cents": 1150,
+   "target_bp": 3000,
+   "expect": 3850
+  },
+  {
+   "plate_cents": 1160,
+   "target_bp": 3000,
+   "expect": 3900
+  },
+  {
+   "plate_cents": 1170,
+   "target_bp": 3000,
+   "expect": 3900
+  },
+  {
+   "plate_cents": 1180,
+   "target_bp": 3000,
+   "expect": 3950
+  },
+  {
+   "plate_cents": 1190,
+   "target_bp": 3000,
+   "expect": 4000
+  },
+  {
+   "plate_cents": 1200,
+   "target_bp": 3000,
+   "expect": 4000
+  },
+  {
+   "plate_cents": 1210,
+   "target_bp": 3000,
+   "expect": 4050
+  },
+  {
+   "plate_cents": 1220,
+   "target_bp": 3000,
+   "expect": 4100
+  },
+  {
+   "plate_cents": 1230,
+   "target_bp": 3000,
+   "expect": 4100
+  },
+  {
+   "plate_cents": 1240,
+   "target_bp": 3000,
+   "expect": 4150
+  },
+  {
+   "plate_cents": 1250,
+   "target_bp": 3000,
+   "expect": 4200
+  },
+  {
+   "plate_cents": 1260,
+   "target_bp": 3000,
+   "expect": 4200
+  },
+  {
+   "plate_cents": 1270,
+   "target_bp": 3000,
+   "expect": 4250
+  },
+  {
+   "plate_cents": 1280,
+   "target_bp": 3000,
+   "expect": 4300
+  },
+  {
+   "plate_cents": 1290,
+   "target_bp": 3000,
+   "expect": 4300
+  },
+  {
+   "plate_cents": 1300,
+   "target_bp": 3000,
+   "expect": 4350
+  },
+  {
+   "plate_cents": 1310,
+   "target_bp": 3000,
+   "expect": 4400
+  },
+  {
+   "plate_cents": 1320,
+   "target_bp": 3000,
+   "expect": 4400
+  },
+  {
+   "plate_cents": 1330,
+   "target_bp": 3000,
+   "expect": 4450
+  },
+  {
+   "plate_cents": 1340,
+   "target_bp": 3000,
+   "expect": 4500
+  },
+  {
+   "plate_cents": 1350,
+   "target_bp": 3000,
+   "expect": 4500
+  },
+  {
+   "plate_cents": 1360,
+   "target_bp": 3000,
+   "expect": 4550
+  },
+  {
+   "plate_cents": 1370,
+   "target_bp": 3000,
+   "expect": 4600
+  },
+  {
+   "plate_cents": 1380,
+   "target_bp": 3000,
+   "expect": 4600
+  },
+  {
+   "plate_cents": 1390,
+   "target_bp": 3000,
+   "expect": 4650
+  },
+  {
+   "plate_cents": 1400,
+   "target_bp": 3000,
+   "expect": 4700
+  },
+  {
+   "plate_cents": 1410,
+   "target_bp": 3000,
+   "expect": 4700
+  },
+  {
+   "plate_cents": 1420,
+   "target_bp": 3000,
+   "expect": 4750
+  },
+  {
+   "plate_cents": 1430,
+   "target_bp": 3000,
+   "expect": 4800
+  },
+  {
+   "plate_cents": 1440,
+   "target_bp": 3000,
+   "expect": 4800
+  },
+  {
+   "plate_cents": 1450,
+   "target_bp": 3000,
+   "expect": 4850
+  },
+  {
+   "plate_cents": 1460,
+   "target_bp": 3000,
+   "expect": 4900
+  },
+  {
+   "plate_cents": 1470,
+   "target_bp": 3000,
+   "expect": 4900
+  },
+  {
+   "plate_cents": 1480,
+   "target_bp": 3000,
+   "expect": 4950
+  },
+  {
+   "plate_cents": 1490,
+   "target_bp": 3000,
+   "expect": 5000
+  },
+  {
+   "plate_cents": 1500,
+   "target_bp": 3000,
+   "expect": 5000
+  },
+  {
+   "plate_cents": 1510,
+   "target_bp": 3000,
+   "expect": 5050
+  },
+  {
+   "plate_cents": 1520,
+   "target_bp": 3000,
+   "expect": 5100
+  },
+  {
+   "plate_cents": 1530,
+   "target_bp": 3000,
+   "expect": 5100
+  },
+  {
+   "plate_cents": 1540,
+   "target_bp": 3000,
+   "expect": 5150
+  },
+  {
+   "plate_cents": 1550,
+   "target_bp": 3000,
+   "expect": 5200
+  },
+  {
+   "plate_cents": 1560,
+   "target_bp": 3000,
+   "expect": 5200
+  },
+  {
+   "plate_cents": 1570,
+   "target_bp": 3000,
+   "expect": 5250
+  },
+  {
+   "plate_cents": 1580,
+   "target_bp": 3000,
+   "expect": 5300
+  },
+  {
+   "plate_cents": 1590,
+   "target_bp": 3000,
+   "expect": 5300
+  },
+  {
+   "plate_cents": 1600,
+   "target_bp": 3000,
+   "expect": 5350
+  },
+  {
+   "plate_cents": 1610,
+   "target_bp": 3000,
+   "expect": 5400
+  },
+  {
+   "plate_cents": 1620,
+   "target_bp": 3000,
+   "expect": 5400
+  },
+  {
+   "plate_cents": 1630,
+   "target_bp": 3000,
+   "expect": 5450
+  },
+  {
+   "plate_cents": 1640,
+   "target_bp": 3000,
+   "expect": 5500
+  },
+  {
+   "plate_cents": 1650,
+   "target_bp": 3000,
+   "expect": 5500
+  },
+  {
+   "plate_cents": 1660,
+   "target_bp": 3000,
+   "expect": 5550
+  },
+  {
+   "plate_cents": 1670,
+   "target_bp": 3000,
+   "expect": 5600
+  },
+  {
+   "plate_cents": 1680,
+   "target_bp": 3000,
+   "expect": 5600
+  },
+  {
+   "plate_cents": 1690,
+   "target_bp": 3000,
+   "expect": 5650
+  },
+  {
+   "plate_cents": 1700,
+   "target_bp": 3000,
+   "expect": 5700
+  },
+  {
+   "plate_cents": 1710,
+   "target_bp": 3000,
+   "expect": 5700
+  },
+  {
+   "plate_cents": 1720,
+   "target_bp": 3000,
+   "expect": 5750
+  },
+  {
+   "plate_cents": 1730,
+   "target_bp": 3000,
+   "expect": 5800
+  },
+  {
+   "plate_cents": 1740,
+   "target_bp": 3000,
+   "expect": 5800
+  },
+  {
+   "plate_cents": 1750,
+   "target_bp": 3000,
+   "expect": 5850
+  },
+  {
+   "plate_cents": 1760,
+   "target_bp": 3000,
+   "expect": 5900
+  },
+  {
+   "plate_cents": 1770,
+   "target_bp": 3000,
+   "expect": 5900
+  },
+  {
+   "plate_cents": 1780,
+   "target_bp": 3000,
+   "expect": 5950
+  },
+  {
+   "plate_cents": 1790,
+   "target_bp": 3000,
+   "expect": 6000
+  },
+  {
+   "plate_cents": 1800,
+   "target_bp": 3000,
+   "expect": 6000
+  },
+  {
+   "plate_cents": 1810,
+   "target_bp": 3000,
+   "expect": 6050
+  },
+  {
+   "plate_cents": 1820,
+   "target_bp": 3000,
+   "expect": 6100
+  },
+  {
+   "plate_cents": 1830,
+   "target_bp": 3000,
+   "expect": 6100
+  },
+  {
+   "plate_cents": 1840,
+   "target_bp": 3000,
+   "expect": 6150
+  },
+  {
+   "plate_cents": 1850,
+   "target_bp": 3000,
+   "expect": 6200
+  },
+  {
+   "plate_cents": 1860,
+   "target_bp": 3000,
+   "expect": 6200
+  },
+  {
+   "plate_cents": 1870,
+   "target_bp": 3000,
+   "expect": 6250
+  },
+  {
+   "plate_cents": 1880,
+   "target_bp": 3000,
+   "expect": 6300
+  },
+  {
+   "plate_cents": 1890,
+   "target_bp": 3000,
+   "expect": 6300
+  },
+  {
+   "plate_cents": 1900,
+   "target_bp": 3000,
+   "expect": 6350
+  },
+  {
+   "plate_cents": 1910,
+   "target_bp": 3000,
+   "expect": 6400
+  },
+  {
+   "plate_cents": 1920,
+   "target_bp": 3000,
+   "expect": 6400
+  },
+  {
+   "plate_cents": 1930,
+   "target_bp": 3000,
+   "expect": 6450
+  },
+  {
+   "plate_cents": 1940,
+   "target_bp": 3000,
+   "expect": 6500
+  },
+  {
+   "plate_cents": 1950,
+   "target_bp": 3000,
+   "expect": 6500
+  },
+  {
+   "plate_cents": 1960,
+   "target_bp": 3000,
+   "expect": 6550
+  },
+  {
+   "plate_cents": 1970,
+   "target_bp": 3000,
+   "expect": 6600
+  },
+  {
+   "plate_cents": 1980,
+   "target_bp": 3000,
+   "expect": 6600
+  },
+  {
+   "plate_cents": 1990,
+   "target_bp": 3000,
+   "expect": 6650
+  },
+  {
+   "plate_cents": 2000,
+   "target_bp": 3000,
+   "expect": 6700
+  },
+  {
+   "plate_cents": 100,
+   "target_bp": 3200,
+   "expect": 350
+  },
+  {
+   "plate_cents": 110,
+   "target_bp": 3200,
+   "expect": 350
+  },
+  {
+   "plate_cents": 120,
+   "target_bp": 3200,
+   "expect": 400
+  },
+  {
+   "plate_cents": 130,
+   "target_bp": 3200,
+   "expect": 450
+  },
+  {
+   "plate_cents": 140,
+   "target_bp": 3200,
+   "expect": 450
+  },
+  {
+   "plate_cents": 150,
+   "target_bp": 3200,
+   "expect": 500
+  },
+  {
+   "plate_cents": 160,
+   "target_bp": 3200,
+   "expect": 500
+  },
+  {
+   "plate_cents": 170,
+   "target_bp": 3200,
+   "expect": 550
+  },
+  {
+   "plate_cents": 180,
+   "target_bp": 3200,
+   "expect": 600
+  },
+  {
+   "plate_cents": 190,
+   "target_bp": 3200,
+   "expect": 600
+  },
+  {
+   "plate_cents": 200,
+   "target_bp": 3200,
+   "expect": 650
+  },
+  {
+   "plate_cents": 210,
+   "target_bp": 3200,
+   "expect": 700
+  },
+  {
+   "plate_cents": 220,
+   "target_bp": 3200,
+   "expect": 700
+  },
+  {
+   "plate_cents": 230,
+   "target_bp": 3200,
+   "expect": 750
+  },
+  {
+   "plate_cents": 240,
+   "target_bp": 3200,
+   "expect": 750
+  },
+  {
+   "plate_cents": 250,
+   "target_bp": 3200,
+   "expect": 800
+  },
+  {
+   "plate_cents": 260,
+   "target_bp": 3200,
+   "expect": 850
+  },
+  {
+   "plate_cents": 270,
+   "target_bp": 3200,
+   "expect": 850
+  },
+  {
+   "plate_cents": 280,
+   "target_bp": 3200,
+   "expect": 900
+  },
+  {
+   "plate_cents": 290,
+   "target_bp": 3200,
+   "expect": 950
+  },
+  {
+   "plate_cents": 300,
+   "target_bp": 3200,
+   "expect": 950
+  },
+  {
+   "plate_cents": 310,
+   "target_bp": 3200,
+   "expect": 1000
+  },
+  {
+   "plate_cents": 320,
+   "target_bp": 3200,
+   "expect": 1000
+  },
+  {
+   "plate_cents": 330,
+   "target_bp": 3200,
+   "expect": 1050
+  },
+  {
+   "plate_cents": 340,
+   "target_bp": 3200,
+   "expect": 1100
+  },
+  {
+   "plate_cents": 350,
+   "target_bp": 3200,
+   "expect": 1100
+  },
+  {
+   "plate_cents": 360,
+   "target_bp": 3200,
+   "expect": 1150
+  },
+  {
+   "plate_cents": 370,
+   "target_bp": 3200,
+   "expect": 1200
+  },
+  {
+   "plate_cents": 380,
+   "target_bp": 3200,
+   "expect": 1200
+  },
+  {
+   "plate_cents": 390,
+   "target_bp": 3200,
+   "expect": 1250
+  },
+  {
+   "plate_cents": 400,
+   "target_bp": 3200,
+   "expect": 1250
+  },
+  {
+   "plate_cents": 410,
+   "target_bp": 3200,
+   "expect": 1300
+  },
+  {
+   "plate_cents": 420,
+   "target_bp": 3200,
+   "expect": 1350
+  },
+  {
+   "plate_cents": 430,
+   "target_bp": 3200,
+   "expect": 1350
+  },
+  {
+   "plate_cents": 440,
+   "target_bp": 3200,
+   "expect": 1400
+  },
+  {
+   "plate_cents": 450,
+   "target_bp": 3200,
+   "expect": 1450
+  },
+  {
+   "plate_cents": 460,
+   "target_bp": 3200,
+   "expect": 1450
+  },
+  {
+   "plate_cents": 470,
+   "target_bp": 3200,
+   "expect": 1500
+  },
+  {
+   "plate_cents": 480,
+   "target_bp": 3200,
+   "expect": 1500
+  },
+  {
+   "plate_cents": 490,
+   "target_bp": 3200,
+   "expect": 1550
+  },
+  {
+   "plate_cents": 500,
+   "target_bp": 3200,
+   "expect": 1600
+  },
+  {
+   "plate_cents": 510,
+   "target_bp": 3200,
+   "expect": 1600
+  },
+  {
+   "plate_cents": 520,
+   "target_bp": 3200,
+   "expect": 1650
+  },
+  {
+   "plate_cents": 530,
+   "target_bp": 3200,
+   "expect": 1700
+  },
+  {
+   "plate_cents": 540,
+   "target_bp": 3200,
+   "expect": 1700
+  },
+  {
+   "plate_cents": 550,
+   "target_bp": 3200,
+   "expect": 1750
+  },
+  {
+   "plate_cents": 560,
+   "target_bp": 3200,
+   "expect": 1750
+  },
+  {
+   "plate_cents": 570,
+   "target_bp": 3200,
+   "expect": 1800
+  },
+  {
+   "plate_cents": 580,
+   "target_bp": 3200,
+   "expect": 1850
+  },
+  {
+   "plate_cents": 590,
+   "target_bp": 3200,
+   "expect": 1850
+  },
+  {
+   "plate_cents": 600,
+   "target_bp": 3200,
+   "expect": 1900
+  },
+  {
+   "plate_cents": 610,
+   "target_bp": 3200,
+   "expect": 1950
+  },
+  {
+   "plate_cents": 620,
+   "target_bp": 3200,
+   "expect": 1950
+  },
+  {
+   "plate_cents": 630,
+   "target_bp": 3200,
+   "expect": 2000
+  },
+  {
+   "plate_cents": 640,
+   "target_bp": 3200,
+   "expect": 2000
+  },
+  {
+   "plate_cents": 650,
+   "target_bp": 3200,
+   "expect": 2050
+  },
+  {
+   "plate_cents": 660,
+   "target_bp": 3200,
+   "expect": 2100
+  },
+  {
+   "plate_cents": 670,
+   "target_bp": 3200,
+   "expect": 2100
+  },
+  {
+   "plate_cents": 680,
+   "target_bp": 3200,
+   "expect": 2150
+  },
+  {
+   "plate_cents": 690,
+   "target_bp": 3200,
+   "expect": 2200
+  },
+  {
+   "plate_cents": 700,
+   "target_bp": 3200,
+   "expect": 2200
+  },
+  {
+   "plate_cents": 710,
+   "target_bp": 3200,
+   "expect": 2250
+  },
+  {
+   "plate_cents": 720,
+   "target_bp": 3200,
+   "expect": 2250
+  },
+  {
+   "plate_cents": 730,
+   "target_bp": 3200,
+   "expect": 2300
+  },
+  {
+   "plate_cents": 740,
+   "target_bp": 3200,
+   "expect": 2350
+  },
+  {
+   "plate_cents": 750,
+   "target_bp": 3200,
+   "expect": 2350
+  },
+  {
+   "plate_cents": 760,
+   "target_bp": 3200,
+   "expect": 2400
+  },
+  {
+   "plate_cents": 770,
+   "target_bp": 3200,
+   "expect": 2450
+  },
+  {
+   "plate_cents": 780,
+   "target_bp": 3200,
+   "expect": 2450
+  },
+  {
+   "plate_cents": 790,
+   "target_bp": 3200,
+   "expect": 2500
+  },
+  {
+   "plate_cents": 800,
+   "target_bp": 3200,
+   "expect": 2500
+  },
+  {
+   "plate_cents": 810,
+   "target_bp": 3200,
+   "expect": 2550
+  },
+  {
+   "plate_cents": 820,
+   "target_bp": 3200,
+   "expect": 2600
+  },
+  {
+   "plate_cents": 830,
+   "target_bp": 3200,
+   "expect": 2600
+  },
+  {
+   "plate_cents": 840,
+   "target_bp": 3200,
+   "expect": 2650
+  },
+  {
+   "plate_cents": 850,
+   "target_bp": 3200,
+   "expect": 2700
+  },
+  {
+   "plate_cents": 860,
+   "target_bp": 3200,
+   "expect": 2700
+  },
+  {
+   "plate_cents": 870,
+   "target_bp": 3200,
+   "expect": 2750
+  },
+  {
+   "plate_cents": 880,
+   "target_bp": 3200,
+   "expect": 2750
+  },
+  {
+   "plate_cents": 890,
+   "target_bp": 3200,
+   "expect": 2800
+  },
+  {
+   "plate_cents": 900,
+   "target_bp": 3200,
+   "expect": 2850
+  },
+  {
+   "plate_cents": 910,
+   "target_bp": 3200,
+   "expect": 2850
+  },
+  {
+   "plate_cents": 920,
+   "target_bp": 3200,
+   "expect": 2900
+  },
+  {
+   "plate_cents": 930,
+   "target_bp": 3200,
+   "expect": 2950
+  },
+  {
+   "plate_cents": 940,
+   "target_bp": 3200,
+   "expect": 2950
+  },
+  {
+   "plate_cents": 950,
+   "target_bp": 3200,
+   "expect": 3000
+  },
+  {
+   "plate_cents": 960,
+   "target_bp": 3200,
+   "expect": 3000
+  },
+  {
+   "plate_cents": 970,
+   "target_bp": 3200,
+   "expect": 3050
+  },
+  {
+   "plate_cents": 980,
+   "target_bp": 3200,
+   "expect": 3100
+  },
+  {
+   "plate_cents": 990,
+   "target_bp": 3200,
+   "expect": 3100
+  },
+  {
+   "plate_cents": 1000,
+   "target_bp": 3200,
+   "expect": 3150
+  },
+  {
+   "plate_cents": 1010,
+   "target_bp": 3200,
+   "expect": 3200
+  },
+  {
+   "plate_cents": 1020,
+   "target_bp": 3200,
+   "expect": 3200
+  },
+  {
+   "plate_cents": 1030,
+   "target_bp": 3200,
+   "expect": 3250
+  },
+  {
+   "plate_cents": 1040,
+   "target_bp": 3200,
+   "expect": 3250
+  },
+  {
+   "plate_cents": 1050,
+   "target_bp": 3200,
+   "expect": 3300
+  },
+  {
+   "plate_cents": 1060,
+   "target_bp": 3200,
+   "expect": 3350
+  },
+  {
+   "plate_cents": 1070,
+   "target_bp": 3200,
+   "expect": 3350
+  },
+  {
+   "plate_cents": 1080,
+   "target_bp": 3200,
+   "expect": 3400
+  },
+  {
+   "plate_cents": 1090,
+   "target_bp": 3200,
+   "expect": 3450
+  },
+  {
+   "plate_cents": 1100,
+   "target_bp": 3200,
+   "expect": 3450
+  },
+  {
+   "plate_cents": 1110,
+   "target_bp": 3200,
+   "expect": 3500
+  },
+  {
+   "plate_cents": 1120,
+   "target_bp": 3200,
+   "expect": 3500
+  },
+  {
+   "plate_cents": 1130,
+   "target_bp": 3200,
+   "expect": 3550
+  },
+  {
+   "plate_cents": 1140,
+   "target_bp": 3200,
+   "expect": 3600
+  },
+  {
+   "plate_cents": 1150,
+   "target_bp": 3200,
+   "expect": 3600
+  },
+  {
+   "plate_cents": 1160,
+   "target_bp": 3200,
+   "expect": 3650
+  },
+  {
+   "plate_cents": 1170,
+   "target_bp": 3200,
+   "expect": 3700
+  },
+  {
+   "plate_cents": 1180,
+   "target_bp": 3200,
+   "expect": 3700
+  },
+  {
+   "plate_cents": 1190,
+   "target_bp": 3200,
+   "expect": 3750
+  },
+  {
+   "plate_cents": 1200,
+   "target_bp": 3200,
+   "expect": 3750
+  },
+  {
+   "plate_cents": 1210,
+   "target_bp": 3200,
+   "expect": 3800
+  },
+  {
+   "plate_cents": 1220,
+   "target_bp": 3200,
+   "expect": 3850
+  },
+  {
+   "plate_cents": 1230,
+   "target_bp": 3200,
+   "expect": 3850
+  },
+  {
+   "plate_cents": 1240,
+   "target_bp": 3200,
+   "expect": 3900
+  },
+  {
+   "plate_cents": 1250,
+   "target_bp": 3200,
+   "expect": 3950
+  },
+  {
+   "plate_cents": 1260,
+   "target_bp": 3200,
+   "expect": 3950
+  },
+  {
+   "plate_cents": 1270,
+   "target_bp": 3200,
+   "expect": 4000
+  },
+  {
+   "plate_cents": 1280,
+   "target_bp": 3200,
+   "expect": 4000
+  },
+  {
+   "plate_cents": 1290,
+   "target_bp": 3200,
+   "expect": 4050
+  },
+  {
+   "plate_cents": 1300,
+   "target_bp": 3200,
+   "expect": 4100
+  },
+  {
+   "plate_cents": 1310,
+   "target_bp": 3200,
+   "expect": 4100
+  },
+  {
+   "plate_cents": 1320,
+   "target_bp": 3200,
+   "expect": 4150
+  },
+  {
+   "plate_cents": 1330,
+   "target_bp": 3200,
+   "expect": 4200
+  },
+  {
+   "plate_cents": 1340,
+   "target_bp": 3200,
+   "expect": 4200
+  },
+  {
+   "plate_cents": 1350,
+   "target_bp": 3200,
+   "expect": 4250
+  },
+  {
+   "plate_cents": 1360,
+   "target_bp": 3200,
+   "expect": 4250
+  },
+  {
+   "plate_cents": 1370,
+   "target_bp": 3200,
+   "expect": 4300
+  },
+  {
+   "plate_cents": 1380,
+   "target_bp": 3200,
+   "expect": 4350
+  },
+  {
+   "plate_cents": 1390,
+   "target_bp": 3200,
+   "expect": 4350
+  },
+  {
+   "plate_cents": 1400,
+   "target_bp": 3200,
+   "expect": 4400
+  },
+  {
+   "plate_cents": 1410,
+   "target_bp": 3200,
+   "expect": 4450
+  },
+  {
+   "plate_cents": 1420,
+   "target_bp": 3200,
+   "expect": 4450
+  },
+  {
+   "plate_cents": 1430,
+   "target_bp": 3200,
+   "expect": 4500
+  },
+  {
+   "plate_cents": 1440,
+   "target_bp": 3200,
+   "expect": 4500
+  },
+  {
+   "plate_cents": 1450,
+   "target_bp": 3200,
+   "expect": 4550
+  },
+  {
+   "plate_cents": 1460,
+   "target_bp": 3200,
+   "expect": 4600
+  },
+  {
+   "plate_cents": 1470,
+   "target_bp": 3200,
+   "expect": 4600
+  },
+  {
+   "plate_cents": 1480,
+   "target_bp": 3200,
+   "expect": 4650
+  },
+  {
+   "plate_cents": 1490,
+   "target_bp": 3200,
+   "expect": 4700
+  },
+  {
+   "plate_cents": 1500,
+   "target_bp": 3200,
+   "expect": 4700
+  },
+  {
+   "plate_cents": 1510,
+   "target_bp": 3200,
+   "expect": 4750
+  },
+  {
+   "plate_cents": 1520,
+   "target_bp": 3200,
+   "expect": 4750
+  },
+  {
+   "plate_cents": 1530,
+   "target_bp": 3200,
+   "expect": 4800
+  },
+  {
+   "plate_cents": 1540,
+   "target_bp": 3200,
+   "expect": 4850
+  },
+  {
+   "plate_cents": 1550,
+   "target_bp": 3200,
+   "expect": 4850
+  },
+  {
+   "plate_cents": 1560,
+   "target_bp": 3200,
+   "expect": 4900
+  },
+  {
+   "plate_cents": 1570,
+   "target_bp": 3200,
+   "expect": 4950
+  },
+  {
+   "plate_cents": 1580,
+   "target_bp": 3200,
+   "expect": 4950
+  },
+  {
+   "plate_cents": 1590,
+   "target_bp": 3200,
+   "expect": 5000
+  },
+  {
+   "plate_cents": 1600,
+   "target_bp": 3200,
+   "expect": 5000
+  },
+  {
+   "plate_cents": 1610,
+   "target_bp": 3200,
+   "expect": 5050
+  },
+  {
+   "plate_cents": 1620,
+   "target_bp": 3200,
+   "expect": 5100
+  },
+  {
+   "plate_cents": 1630,
+   "target_bp": 3200,
+   "expect": 5100
+  },
+  {
+   "plate_cents": 1640,
+   "target_bp": 3200,
+   "expect": 5150
+  },
+  {
+   "plate_cents": 1650,
+   "target_bp": 3200,
+   "expect": 5200
+  },
+  {
+   "plate_cents": 1660,
+   "target_bp": 3200,
+   "expect": 5200
+  },
+  {
+   "plate_cents": 1670,
+   "target_bp": 3200,
+   "expect": 5250
+  },
+  {
+   "plate_cents": 1680,
+   "target_bp": 3200,
+   "expect": 5250
+  },
+  {
+   "plate_cents": 1690,
+   "target_bp": 3200,
+   "expect": 5300
+  },
+  {
+   "plate_cents": 1700,
+   "target_bp": 3200,
+   "expect": 5350
+  },
+  {
+   "plate_cents": 1710,
+   "target_bp": 3200,
+   "expect": 5350
+  },
+  {
+   "plate_cents": 1720,
+   "target_bp": 3200,
+   "expect": 5400
+  },
+  {
+   "plate_cents": 1730,
+   "target_bp": 3200,
+   "expect": 5450
+  },
+  {
+   "plate_cents": 1740,
+   "target_bp": 3200,
+   "expect": 5450
+  },
+  {
+   "plate_cents": 1750,
+   "target_bp": 3200,
+   "expect": 5500
+  },
+  {
+   "plate_cents": 1760,
+   "target_bp": 3200,
+   "expect": 5500
+  },
+  {
+   "plate_cents": 1770,
+   "target_bp": 3200,
+   "expect": 5550
+  },
+  {
+   "plate_cents": 1780,
+   "target_bp": 3200,
+   "expect": 5600
+  },
+  {
+   "plate_cents": 1790,
+   "target_bp": 3200,
+   "expect": 5600
+  },
+  {
+   "plate_cents": 1800,
+   "target_bp": 3200,
+   "expect": 5650
+  },
+  {
+   "plate_cents": 1810,
+   "target_bp": 3200,
+   "expect": 5700
+  },
+  {
+   "plate_cents": 1820,
+   "target_bp": 3200,
+   "expect": 5700
+  },
+  {
+   "plate_cents": 1830,
+   "target_bp": 3200,
+   "expect": 5750
+  },
+  {
+   "plate_cents": 1840,
+   "target_bp": 3200,
+   "expect": 5750
+  },
+  {
+   "plate_cents": 1850,
+   "target_bp": 3200,
+   "expect": 5800
+  },
+  {
+   "plate_cents": 1860,
+   "target_bp": 3200,
+   "expect": 5850
+  },
+  {
+   "plate_cents": 1870,
+   "target_bp": 3200,
+   "expect": 5850
+  },
+  {
+   "plate_cents": 1880,
+   "target_bp": 3200,
+   "expect": 5900
+  },
+  {
+   "plate_cents": 1890,
+   "target_bp": 3200,
+   "expect": 5950
+  },
+  {
+   "plate_cents": 1900,
+   "target_bp": 3200,
+   "expect": 5950
+  },
+  {
+   "plate_cents": 1910,
+   "target_bp": 3200,
+   "expect": 6000
+  },
+  {
+   "plate_cents": 1920,
+   "target_bp": 3200,
+   "expect": 6000
+  },
+  {
+   "plate_cents": 1930,
+   "target_bp": 3200,
+   "expect": 6050
+  },
+  {
+   "plate_cents": 1940,
+   "target_bp": 3200,
+   "expect": 6100
+  },
+  {
+   "plate_cents": 1950,
+   "target_bp": 3200,
+   "expect": 6100
+  },
+  {
+   "plate_cents": 1960,
+   "target_bp": 3200,
+   "expect": 6150
+  },
+  {
+   "plate_cents": 1970,
+   "target_bp": 3200,
+   "expect": 6200
+  },
+  {
+   "plate_cents": 1980,
+   "target_bp": 3200,
+   "expect": 6200
+  },
+  {
+   "plate_cents": 1990,
+   "target_bp": 3200,
+   "expect": 6250
+  },
+  {
+   "plate_cents": 2000,
+   "target_bp": 3200,
+   "expect": 6250
+  },
+  {
+   "plate_cents": 100,
+   "target_bp": 3500,
+   "expect": 300
+  },
+  {
+   "plate_cents": 110,
+   "target_bp": 3500,
+   "expect": 350
+  },
+  {
+   "plate_cents": 120,
+   "target_bp": 3500,
+   "expect": 350
+  },
+  {
+   "plate_cents": 130,
+   "target_bp": 3500,
+   "expect": 400
+  },
+  {
+   "plate_cents": 140,
+   "target_bp": 3500,
+   "expect": 400
+  },
+  {
+   "plate_cents": 150,
+   "target_bp": 3500,
+   "expect": 450
+  },
+  {
+   "plate_cents": 160,
+   "target_bp": 3500,
+   "expect": 500
+  },
+  {
+   "plate_cents": 170,
+   "target_bp": 3500,
+   "expect": 500
+  },
+  {
+   "plate_cents": 180,
+   "target_bp": 3500,
+   "expect": 550
+  },
+  {
+   "plate_cents": 190,
+   "target_bp": 3500,
+   "expect": 550
+  },
+  {
+   "plate_cents": 200,
+   "target_bp": 3500,
+   "expect": 600
+  },
+  {
+   "plate_cents": 210,
+   "target_bp": 3500,
+   "expect": 600
+  },
+  {
+   "plate_cents": 220,
+   "target_bp": 3500,
+   "expect": 650
+  },
+  {
+   "plate_cents": 230,
+   "target_bp": 3500,
+   "expect": 700
+  },
+  {
+   "plate_cents": 240,
+   "target_bp": 3500,
+   "expect": 700
+  },
+  {
+   "plate_cents": 250,
+   "target_bp": 3500,
+   "expect": 750
+  },
+  {
+   "plate_cents": 260,
+   "target_bp": 3500,
+   "expect": 750
+  },
+  {
+   "plate_cents": 270,
+   "target_bp": 3500,
+   "expect": 800
+  },
+  {
+   "plate_cents": 280,
+   "target_bp": 3500,
+   "expect": 800
+  },
+  {
+   "plate_cents": 290,
+   "target_bp": 3500,
+   "expect": 850
+  },
+  {
+   "plate_cents": 300,
+   "target_bp": 3500,
+   "expect": 900
+  },
+  {
+   "plate_cents": 310,
+   "target_bp": 3500,
+   "expect": 900
+  },
+  {
+   "plate_cents": 320,
+   "target_bp": 3500,
+   "expect": 950
+  },
+  {
+   "plate_cents": 330,
+   "target_bp": 3500,
+   "expect": 950
+  },
+  {
+   "plate_cents": 340,
+   "target_bp": 3500,
+   "expect": 1000
+  },
+  {
+   "plate_cents": 350,
+   "target_bp": 3500,
+   "expect": 1000
+  },
+  {
+   "plate_cents": 360,
+   "target_bp": 3500,
+   "expect": 1050
+  },
+  {
+   "plate_cents": 370,
+   "target_bp": 3500,
+   "expect": 1100
+  },
+  {
+   "plate_cents": 380,
+   "target_bp": 3500,
+   "expect": 1100
+  },
+  {
+   "plate_cents": 390,
+   "target_bp": 3500,
+   "expect": 1150
+  },
+  {
+   "plate_cents": 400,
+   "target_bp": 3500,
+   "expect": 1150
+  },
+  {
+   "plate_cents": 410,
+   "target_bp": 3500,
+   "expect": 1200
+  },
+  {
+   "plate_cents": 420,
+   "target_bp": 3500,
+   "expect": 1200
+  },
+  {
+   "plate_cents": 430,
+   "target_bp": 3500,
+   "expect": 1250
+  },
+  {
+   "plate_cents": 440,
+   "target_bp": 3500,
+   "expect": 1300
+  },
+  {
+   "plate_cents": 450,
+   "target_bp": 3500,
+   "expect": 1300
+  },
+  {
+   "plate_cents": 460,
+   "target_bp": 3500,
+   "expect": 1350
+  },
+  {
+   "plate_cents": 470,
+   "target_bp": 3500,
+   "expect": 1350
+  },
+  {
+   "plate_cents": 480,
+   "target_bp": 3500,
+   "expect": 1400
+  },
+  {
+   "plate_cents": 490,
+   "target_bp": 3500,
+   "expect": 1400
+  },
+  {
+   "plate_cents": 500,
+   "target_bp": 3500,
+   "expect": 1450
+  },
+  {
+   "plate_cents": 510,
+   "target_bp": 3500,
+   "expect": 1500
+  },
+  {
+   "plate_cents": 520,
+   "target_bp": 3500,
+   "expect": 1500
+  },
+  {
+   "plate_cents": 530,
+   "target_bp": 3500,
+   "expect": 1550
+  },
+  {
+   "plate_cents": 540,
+   "target_bp": 3500,
+   "expect": 1550
+  },
+  {
+   "plate_cents": 550,
+   "target_bp": 3500,
+   "expect": 1600
+  },
+  {
+   "plate_cents": 560,
+   "target_bp": 3500,
+   "expect": 1600
+  },
+  {
+   "plate_cents": 570,
+   "target_bp": 3500,
+   "expect": 1650
+  },
+  {
+   "plate_cents": 580,
+   "target_bp": 3500,
+   "expect": 1700
+  },
+  {
+   "plate_cents": 590,
+   "target_bp": 3500,
+   "expect": 1700
+  },
+  {
+   "plate_cents": 600,
+   "target_bp": 3500,
+   "expect": 1750
+  },
+  {
+   "plate_cents": 610,
+   "target_bp": 3500,
+   "expect": 1750
+  },
+  {
+   "plate_cents": 620,
+   "target_bp": 3500,
+   "expect": 1800
+  },
+  {
+   "plate_cents": 630,
+   "target_bp": 3500,
+   "expect": 1800
+  },
+  {
+   "plate_cents": 640,
+   "target_bp": 3500,
+   "expect": 1850
+  },
+  {
+   "plate_cents": 650,
+   "target_bp": 3500,
+   "expect": 1900
+  },
+  {
+   "plate_cents": 660,
+   "target_bp": 3500,
+   "expect": 1900
+  },
+  {
+   "plate_cents": 670,
+   "target_bp": 3500,
+   "expect": 1950
+  },
+  {
+   "plate_cents": 680,
+   "target_bp": 3500,
+   "expect": 1950
+  },
+  {
+   "plate_cents": 690,
+   "target_bp": 3500,
+   "expect": 2000
+  },
+  {
+   "plate_cents": 700,
+   "target_bp": 3500,
+   "expect": 2000
+  },
+  {
+   "plate_cents": 710,
+   "target_bp": 3500,
+   "expect": 2050
+  },
+  {
+   "plate_cents": 720,
+   "target_bp": 3500,
+   "expect": 2100
+  },
+  {
+   "plate_cents": 730,
+   "target_bp": 3500,
+   "expect": 2100
+  },
+  {
+   "plate_cents": 740,
+   "target_bp": 3500,
+   "expect": 2150
+  },
+  {
+   "plate_cents": 750,
+   "target_bp": 3500,
+   "expect": 2150
+  },
+  {
+   "plate_cents": 760,
+   "target_bp": 3500,
+   "expect": 2200
+  },
+  {
+   "plate_cents": 770,
+   "target_bp": 3500,
+   "expect": 2200
+  },
+  {
+   "plate_cents": 780,
+   "target_bp": 3500,
+   "expect": 2250
+  },
+  {
+   "plate_cents": 790,
+   "target_bp": 3500,
+   "expect": 2300
+  },
+  {
+   "plate_cents": 800,
+   "target_bp": 3500,
+   "expect": 2300
+  },
+  {
+   "plate_cents": 810,
+   "target_bp": 3500,
+   "expect": 2350
+  },
+  {
+   "plate_cents": 820,
+   "target_bp": 3500,
+   "expect": 2350
+  },
+  {
+   "plate_cents": 830,
+   "target_bp": 3500,
+   "expect": 2400
+  },
+  {
+   "plate_cents": 840,
+   "target_bp": 3500,
+   "expect": 2400
+  },
+  {
+   "plate_cents": 850,
+   "target_bp": 3500,
+   "expect": 2450
+  },
+  {
+   "plate_cents": 860,
+   "target_bp": 3500,
+   "expect": 2500
+  },
+  {
+   "plate_cents": 870,
+   "target_bp": 3500,
+   "expect": 2500
+  },
+  {
+   "plate_cents": 880,
+   "target_bp": 3500,
+   "expect": 2550
+  },
+  {
+   "plate_cents": 890,
+   "target_bp": 3500,
+   "expect": 2550
+  },
+  {
+   "plate_cents": 900,
+   "target_bp": 3500,
+   "expect": 2600
+  },
+  {
+   "plate_cents": 910,
+   "target_bp": 3500,
+   "expect": 2600
+  },
+  {
+   "plate_cents": 920,
+   "target_bp": 3500,
+   "expect": 2650
+  },
+  {
+   "plate_cents": 930,
+   "target_bp": 3500,
+   "expect": 2700
+  },
+  {
+   "plate_cents": 940,
+   "target_bp": 3500,
+   "expect": 2700
+  },
+  {
+   "plate_cents": 950,
+   "target_bp": 3500,
+   "expect": 2750
+  },
+  {
+   "plate_cents": 960,
+   "target_bp": 3500,
+   "expect": 2750
+  },
+  {
+   "plate_cents": 970,
+   "target_bp": 3500,
+   "expect": 2800
+  },
+  {
+   "plate_cents": 980,
+   "target_bp": 3500,
+   "expect": 2800
+  },
+  {
+   "plate_cents": 990,
+   "target_bp": 3500,
+   "expect": 2850
+  },
+  {
+   "plate_cents": 1000,
+   "target_bp": 3500,
+   "expect": 2900
+  },
+  {
+   "plate_cents": 1010,
+   "target_bp": 3500,
+   "expect": 2900
+  },
+  {
+   "plate_cents": 1020,
+   "target_bp": 3500,
+   "expect": 2950
+  },
+  {
+   "plate_cents": 1030,
+   "target_bp": 3500,
+   "expect": 2950
+  },
+  {
+   "plate_cents": 1040,
+   "target_bp": 3500,
+   "expect": 3000
+  },
+  {
+   "plate_cents": 1050,
+   "target_bp": 3500,
+   "expect": 3000
+  },
+  {
+   "plate_cents": 1060,
+   "target_bp": 3500,
+   "expect": 3050
+  },
+  {
+   "plate_cents": 1070,
+   "target_bp": 3500,
+   "expect": 3100
+  },
+  {
+   "plate_cents": 1080,
+   "target_bp": 3500,
+   "expect": 3100
+  },
+  {
+   "plate_cents": 1090,
+   "target_bp": 3500,
+   "expect": 3150
+  },
+  {
+   "plate_cents": 1100,
+   "target_bp": 3500,
+   "expect": 3150
+  },
+  {
+   "plate_cents": 1110,
+   "target_bp": 3500,
+   "expect": 3200
+  },
+  {
+   "plate_cents": 1120,
+   "target_bp": 3500,
+   "expect": 3200
+  },
+  {
+   "plate_cents": 1130,
+   "target_bp": 3500,
+   "expect": 3250
+  },
+  {
+   "plate_cents": 1140,
+   "target_bp": 3500,
+   "expect": 3300
+  },
+  {
+   "plate_cents": 1150,
+   "target_bp": 3500,
+   "expect": 3300
+  },
+  {
+   "plate_cents": 1160,
+   "target_bp": 3500,
+   "expect": 3350
+  },
+  {
+   "plate_cents": 1170,
+   "target_bp": 3500,
+   "expect": 3350
+  },
+  {
+   "plate_cents": 1180,
+   "target_bp": 3500,
+   "expect": 3400
+  },
+  {
+   "plate_cents": 1190,
+   "target_bp": 3500,
+   "expect": 3400
+  },
+  {
+   "plate_cents": 1200,
+   "target_bp": 3500,
+   "expect": 3450
+  },
+  {
+   "plate_cents": 1210,
+   "target_bp": 3500,
+   "expect": 3500
+  },
+  {
+   "plate_cents": 1220,
+   "target_bp": 3500,
+   "expect": 3500
+  },
+  {
+   "plate_cents": 1230,
+   "target_bp": 3500,
+   "expect": 3550
+  },
+  {
+   "plate_cents": 1240,
+   "target_bp": 3500,
+   "expect": 3550
+  },
+  {
+   "plate_cents": 1250,
+   "target_bp": 3500,
+   "expect": 3600
+  },
+  {
+   "plate_cents": 1260,
+   "target_bp": 3500,
+   "expect": 3600
+  },
+  {
+   "plate_cents": 1270,
+   "target_bp": 3500,
+   "expect": 3650
+  },
+  {
+   "plate_cents": 1280,
+   "target_bp": 3500,
+   "expect": 3700
+  },
+  {
+   "plate_cents": 1290,
+   "target_bp": 3500,
+   "expect": 3700
+  },
+  {
+   "plate_cents": 1300,
+   "target_bp": 3500,
+   "expect": 3750
+  },
+  {
+   "plate_cents": 1310,
+   "target_bp": 3500,
+   "expect": 3750
+  },
+  {
+   "plate_cents": 1320,
+   "target_bp": 3500,
+   "expect": 3800
+  },
+  {
+   "plate_cents": 1330,
+   "target_bp": 3500,
+   "expect": 3800
+  },
+  {
+   "plate_cents": 1340,
+   "target_bp": 3500,
+   "expect": 3850
+  },
+  {
+   "plate_cents": 1350,
+   "target_bp": 3500,
+   "expect": 3900
+  },
+  {
+   "plate_cents": 1360,
+   "target_bp": 3500,
+   "expect": 3900
+  },
+  {
+   "plate_cents": 1370,
+   "target_bp": 3500,
+   "expect": 3950
+  },
+  {
+   "plate_cents": 1380,
+   "target_bp": 3500,
+   "expect": 3950
+  },
+  {
+   "plate_cents": 1390,
+   "target_bp": 3500,
+   "expect": 4000
+  },
+  {
+   "plate_cents": 1400,
+   "target_bp": 3500,
+   "expect": 4000
+  },
+  {
+   "plate_cents": 1410,
+   "target_bp": 3500,
+   "expect": 4050
+  },
+  {
+   "plate_cents": 1420,
+   "target_bp": 3500,
+   "expect": 4100
+  },
+  {
+   "plate_cents": 1430,
+   "target_bp": 3500,
+   "expect": 4100
+  },
+  {
+   "plate_cents": 1440,
+   "target_bp": 3500,
+   "expect": 4150
+  },
+  {
+   "plate_cents": 1450,
+   "target_bp": 3500,
+   "expect": 4150
+  },
+  {
+   "plate_cents": 1460,
+   "target_bp": 3500,
+   "expect": 4200
+  },
+  {
+   "plate_cents": 1470,
+   "target_bp": 3500,
+   "expect": 4200
+  },
+  {
+   "plate_cents": 1480,
+   "target_bp": 3500,
+   "expect": 4250
+  },
+  {
+   "plate_cents": 1490,
+   "target_bp": 3500,
+   "expect": 4300
+  },
+  {
+   "plate_cents": 1500,
+   "target_bp": 3500,
+   "expect": 4300
+  },
+  {
+   "plate_cents": 1510,
+   "target_bp": 3500,
+   "expect": 4350
+  },
+  {
+   "plate_cents": 1520,
+   "target_bp": 3500,
+   "expect": 4350
+  },
+  {
+   "plate_cents": 1530,
+   "target_bp": 3500,
+   "expect": 4400
+  },
+  {
+   "plate_cents": 1540,
+   "target_bp": 3500,
+   "expect": 4400
+  },
+  {
+   "plate_cents": 1550,
+   "target_bp": 3500,
+   "expect": 4450
+  },
+  {
+   "plate_cents": 1560,
+   "target_bp": 3500,
+   "expect": 4500
+  },
+  {
+   "plate_cents": 1570,
+   "target_bp": 3500,
+   "expect": 4500
+  },
+  {
+   "plate_cents": 1580,
+   "target_bp": 3500,
+   "expect": 4550
+  },
+  {
+   "plate_cents": 1590,
+   "target_bp": 3500,
+   "expect": 4550
+  },
+  {
+   "plate_cents": 1600,
+   "target_bp": 3500,
+   "expect": 4600
+  },
+  {
+   "plate_cents": 1610,
+   "target_bp": 3500,
+   "expect": 4600
+  },
+  {
+   "plate_cents": 1620,
+   "target_bp": 3500,
+   "expect": 4650
+  },
+  {
+   "plate_cents": 1630,
+   "target_bp": 3500,
+   "expect": 4700
+  },
+  {
+   "plate_cents": 1640,
+   "target_bp": 3500,
+   "expect": 4700
+  },
+  {
+   "plate_cents": 1650,
+   "target_bp": 3500,
+   "expect": 4750
+  },
+  {
+   "plate_cents": 1660,
+   "target_bp": 3500,
+   "expect": 4750
+  },
+  {
+   "plate_cents": 1670,
+   "target_bp": 3500,
+   "expect": 4800
+  },
+  {
+   "plate_cents": 1680,
+   "target_bp": 3500,
+   "expect": 4800
+  },
+  {
+   "plate_cents": 1690,
+   "target_bp": 3500,
+   "expect": 4850
+  },
+  {
+   "plate_cents": 1700,
+   "target_bp": 3500,
+   "expect": 4900
+  },
+  {
+   "plate_cents": 1710,
+   "target_bp": 3500,
+   "expect": 4900
+  },
+  {
+   "plate_cents": 1720,
+   "target_bp": 3500,
+   "expect": 4950
+  },
+  {
+   "plate_cents": 1730,
+   "target_bp": 3500,
+   "expect": 4950
+  },
+  {
+   "plate_cents": 1740,
+   "target_bp": 3500,
+   "expect": 5000
+  },
+  {
+   "plate_cents": 1750,
+   "target_bp": 3500,
+   "expect": 5000
+  },
+  {
+   "plate_cents": 1760,
+   "target_bp": 3500,
+   "expect": 5050
+  },
+  {
+   "plate_cents": 1770,
+   "target_bp": 3500,
+   "expect": 5100
+  },
+  {
+   "plate_cents": 1780,
+   "target_bp": 3500,
+   "expect": 5100
+  },
+  {
+   "plate_cents": 1790,
+   "target_bp": 3500,
+   "expect": 5150
+  },
+  {
+   "plate_cents": 1800,
+   "target_bp": 3500,
+   "expect": 5150
+  },
+  {
+   "plate_cents": 1810,
+   "target_bp": 3500,
+   "expect": 5200
+  },
+  {
+   "plate_cents": 1820,
+   "target_bp": 3500,
+   "expect": 5200
+  },
+  {
+   "plate_cents": 1830,
+   "target_bp": 3500,
+   "expect": 5250
+  },
+  {
+   "plate_cents": 1840,
+   "target_bp": 3500,
+   "expect": 5300
+  },
+  {
+   "plate_cents": 1850,
+   "target_bp": 3500,
+   "expect": 5300
+  },
+  {
+   "plate_cents": 1860,
+   "target_bp": 3500,
+   "expect": 5350
+  },
+  {
+   "plate_cents": 1870,
+   "target_bp": 3500,
+   "expect": 5350
+  },
+  {
+   "plate_cents": 1880,
+   "target_bp": 3500,
+   "expect": 5400
+  },
+  {
+   "plate_cents": 1890,
+   "target_bp": 3500,
+   "expect": 5400
+  },
+  {
+   "plate_cents": 1900,
+   "target_bp": 3500,
+   "expect": 5450
+  },
+  {
+   "plate_cents": 1910,
+   "target_bp": 3500,
+   "expect": 5500
+  },
+  {
+   "plate_cents": 1920,
+   "target_bp": 3500,
+   "expect": 5500
+  },
+  {
+   "plate_cents": 1930,
+   "target_bp": 3500,
+   "expect": 5550
+  },
+  {
+   "plate_cents": 1940,
+   "target_bp": 3500,
+   "expect": 5550
+  },
+  {
+   "plate_cents": 1950,
+   "target_bp": 3500,
+   "expect": 5600
+  },
+  {
+   "plate_cents": 1960,
+   "target_bp": 3500,
+   "expect": 5600
+  },
+  {
+   "plate_cents": 1970,
+   "target_bp": 3500,
+   "expect": 5650
+  },
+  {
+   "plate_cents": 1980,
+   "target_bp": 3500,
+   "expect": 5700
+  },
+  {
+   "plate_cents": 1990,
+   "target_bp": 3500,
+   "expect": 5700
+  },
+  {
+   "plate_cents": 2000,
+   "target_bp": 3500,
+   "expect": 5750
+  }
+ ],
+ "fc_status": [
+  {
+   "plate_cents": 3004,
+   "menu_cents": 10000,
+   "target_bp": 3000,
+   "expect_fc": "30.0",
+   "expect_status": "ok"
+  },
+  {
+   "plate_cents": 3005,
+   "menu_cents": 10000,
+   "target_bp": 3000,
+   "expect_fc": "30.1",
+   "expect_status": "watch"
+  },
+  {
+   "plate_cents": 3205,
+   "menu_cents": 10000,
+   "target_bp": 3000,
+   "expect_fc": "32.1",
+   "expect_status": "danger"
+  },
+  {
+   "plate_cents": 3200,
+   "menu_cents": 10000,
+   "target_bp": 3000,
+   "expect_fc": "32.0",
+   "expect_status": "watch"
+  },
+  {
+   "plate_cents": 1,
+   "menu_cents": 10000,
+   "target_bp": 3000,
+   "expect_fc": "0.0",
+   "expect_status": "ok"
+  },
+  {
+   "plate_cents": 9999,
+   "menu_cents": 10000,
+   "target_bp": 3000,
+   "expect_fc": "100.0",
+   "expect_status": "danger"
+  },
+  {
+   "plate_cents": 2500,
+   "menu_cents": 10000,
+   "target_bp": 2500,
+   "expect_fc": "25.0",
+   "expect_status": "ok"
+  },
+  {
+   "plate_cents": 331,
+   "menu_cents": 1100,
+   "target_bp": 3000,
+   "expect_fc": "30.1",
+   "expect_status": "watch"
+  },
+  {
+   "plate_cents": 662,
+   "menu_cents": 1100,
+   "target_bp": 3000,
+   "expect_fc": "60.2",
+   "expect_status": "danger"
+  }
+ ],
+ "drift": [
+  {
+   "name": "same-date tie broken by recorded_at",
+   "rows": [
+    {
+     "purchased_on": "2026-07-01",
+     "recorded_at": "2026-07-01T08:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000001",
+     "unit_price": "2.000000",
+     "deleted": false
+    },
+    {
+     "purchased_on": "2026-07-01",
+     "recorded_at": "2026-07-01T09:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000002",
+     "unit_price": "3.000000",
+     "deleted": false
+    },
+    {
+     "purchased_on": "2026-06-01",
+     "recorded_at": "2026-06-01T00:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000003",
+     "unit_price": "1.000000",
+     "deleted": false
+    },
+    {
+     "purchased_on": "2026-05-01",
+     "recorded_at": "2026-05-01T00:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000004",
+     "unit_price": "1.000000",
+     "deleted": false
+    },
+    {
+     "purchased_on": "2026-04-20",
+     "recorded_at": "2026-04-20T00:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000005",
+     "unit_price": "1.000000",
+     "deleted": false
+    }
+   ],
+   "expect": {
+    "latest_price": "3.000000",
+    "latest_on": "2026-07-01",
+    "window_start": "2026-04-02",
+    "baseline_n": 4,
+    "trailing_avg": "1.250000",
+    "drift_pct": "140.0"
+   }
+  },
+  {
+   "name": "full tie broken by id",
+   "rows": [
+    {
+     "purchased_on": "2026-07-01",
+     "recorded_at": "2026-07-01T00:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000001",
+     "unit_price": "2.000000",
+     "deleted": false
+    },
+    {
+     "purchased_on": "2026-07-01",
+     "recorded_at": "2026-07-01T00:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000002",
+     "unit_price": "3.000000",
+     "deleted": false
+    },
+    {
+     "purchased_on": "2026-06-01",
+     "recorded_at": "2026-06-01T00:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000003",
+     "unit_price": "1.000000",
+     "deleted": false
+    },
+    {
+     "purchased_on": "2026-05-01",
+     "recorded_at": "2026-05-01T00:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000004",
+     "unit_price": "1.000000",
+     "deleted": false
+    },
+    {
+     "purchased_on": "2026-04-20",
+     "recorded_at": "2026-04-20T00:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000005",
+     "unit_price": "1.000000",
+     "deleted": false
+    }
+   ],
+   "expect": {
+    "latest_price": "3.000000",
+    "latest_on": "2026-07-01",
+    "window_start": "2026-04-02",
+    "baseline_n": 4,
+    "trailing_avg": "1.250000",
+    "drift_pct": "140.0"
+   }
+  },
+  {
+   "name": "boundary minus-90 in minus-91 out",
+   "rows": [
+    {
+     "purchased_on": "2024-01-01",
+     "recorded_at": "2024-01-01T00:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000001",
+     "unit_price": "5.000000",
+     "deleted": false
+    },
+    {
+     "purchased_on": "2023-10-03",
+     "recorded_at": "2023-10-03T00:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000002",
+     "unit_price": "4.000000",
+     "deleted": false
+    },
+    {
+     "purchased_on": "2023-10-02",
+     "recorded_at": "2023-10-02T00:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000003",
+     "unit_price": "9.990000",
+     "deleted": false
+    },
+    {
+     "purchased_on": "2023-12-01",
+     "recorded_at": "2023-12-01T00:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000004",
+     "unit_price": "4.000000",
+     "deleted": false
+    },
+    {
+     "purchased_on": "2023-11-01",
+     "recorded_at": "2023-11-01T00:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000005",
+     "unit_price": "4.000000",
+     "deleted": false
+    }
+   ],
+   "expect": {
+    "latest_price": "5.000000",
+    "latest_on": "2024-01-01",
+    "window_start": "2023-10-03",
+    "baseline_n": 3,
+    "trailing_avg": "4.000000",
+    "drift_pct": "25.0"
+   }
+  },
+  {
+   "name": "tombstone excluded",
+   "rows": [
+    {
+     "purchased_on": "2026-07-01",
+     "recorded_at": "2026-07-01T00:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000001",
+     "unit_price": "9.000000",
+     "deleted": true
+    },
+    {
+     "purchased_on": "2026-06-01",
+     "recorded_at": "2026-06-01T00:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000002",
+     "unit_price": "2.000000",
+     "deleted": false
+    },
+    {
+     "purchased_on": "2026-05-01",
+     "recorded_at": "2026-05-01T00:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000003",
+     "unit_price": "1.000000",
+     "deleted": false
+    },
+    {
+     "purchased_on": "2026-04-15",
+     "recorded_at": "2026-04-15T00:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000004",
+     "unit_price": "1.000000",
+     "deleted": false
+    },
+    {
+     "purchased_on": "2026-04-01",
+     "recorded_at": "2026-04-01T00:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000005",
+     "unit_price": "1.000000",
+     "deleted": false
+    }
+   ],
+   "expect": {
+    "latest_price": "2.000000",
+    "latest_on": "2026-06-01",
+    "window_start": "2026-03-03",
+    "baseline_n": 3,
+    "trailing_avg": "1.000000",
+    "drift_pct": "100.0"
+   }
+  },
+  {
+   "name": "baseline floor two rows",
+   "rows": [
+    {
+     "purchased_on": "2026-07-01",
+     "recorded_at": "2026-07-01T00:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000001",
+     "unit_price": "2.000000",
+     "deleted": false
+    },
+    {
+     "purchased_on": "2026-06-01",
+     "recorded_at": "2026-06-01T00:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000002",
+     "unit_price": "1.000000",
+     "deleted": false
+    },
+    {
+     "purchased_on": "2026-05-01",
+     "recorded_at": "2026-05-01T00:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000003",
+     "unit_price": "1.000000",
+     "deleted": false
+    }
+   ],
+   "expect": {
+    "latest_price": "2.000000",
+    "latest_on": "2026-07-01",
+    "window_start": "2026-04-02",
+    "baseline_n": 2,
+    "trailing_avg": "1.000000",
+    "drift_pct": null
+   }
+  },
+  {
+   "name": "single row no baseline",
+   "rows": [
+    {
+     "purchased_on": "2026-07-01",
+     "recorded_at": "2026-07-01T00:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000001",
+     "unit_price": "2.000000",
+     "deleted": false
+    }
+   ],
+   "expect": {
+    "latest_price": "2.000000",
+    "latest_on": "2026-07-01",
+    "window_start": "2026-04-02",
+    "baseline_n": 0,
+    "trailing_avg": null,
+    "drift_pct": null
+   }
+  },
+  {
+   "name": "all tombstoned",
+   "rows": [
+    {
+     "purchased_on": "2026-07-01",
+     "recorded_at": "2026-07-01T00:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000001",
+     "unit_price": "2.000000",
+     "deleted": true
+    }
+   ],
+   "expect": null
+  },
+  {
+   "name": "negative drift",
+   "rows": [
+    {
+     "purchased_on": "2026-07-01",
+     "recorded_at": "2026-07-01T00:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000001",
+     "unit_price": "1.000000",
+     "deleted": false
+    },
+    {
+     "purchased_on": "2026-06-01",
+     "recorded_at": "2026-06-01T00:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000002",
+     "unit_price": "2.000000",
+     "deleted": false
+    },
+    {
+     "purchased_on": "2026-05-01",
+     "recorded_at": "2026-05-01T00:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000003",
+     "unit_price": "2.000000",
+     "deleted": false
+    },
+    {
+     "purchased_on": "2026-04-15",
+     "recorded_at": "2026-04-15T00:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000004",
+     "unit_price": "2.000000",
+     "deleted": false
+    }
+   ],
+   "expect": {
+    "latest_price": "1.000000",
+    "latest_on": "2026-07-01",
+    "window_start": "2026-04-02",
+    "baseline_n": 3,
+    "trailing_avg": "2.000000",
+    "drift_pct": "-50.0"
+   }
+  },
+  {
+   "name": "repeating-decimal avg",
+   "rows": [
+    {
+     "purchased_on": "2026-07-01",
+     "recorded_at": "2026-07-01T00:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000001",
+     "unit_price": "2.000000",
+     "deleted": false
+    },
+    {
+     "purchased_on": "2026-06-01",
+     "recorded_at": "2026-06-01T00:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000002",
+     "unit_price": "1.000000",
+     "deleted": false
+    },
+    {
+     "purchased_on": "2026-05-01",
+     "recorded_at": "2026-05-01T00:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000003",
+     "unit_price": "1.000000",
+     "deleted": false
+    },
+    {
+     "purchased_on": "2026-04-15",
+     "recorded_at": "2026-04-15T00:00:00.000000Z",
+     "id": "00000000-0000-7000-8000-000000000004",
+     "unit_price": "1.010000",
+     "deleted": false
+    }
+   ],
+   "expect": {
+    "latest_price": "2.000000",
+    "latest_on": "2026-07-01",
+    "window_start": "2026-04-02",
+    "baseline_n": 3,
+    "trailing_avg": "1.003333",
+    "drift_pct": "99.3"
+   }
+  }
+ ]
+}
