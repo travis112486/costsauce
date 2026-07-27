@@ -98,9 +98,20 @@ async def tombstone_ingredient(location_id: uuid.UUID, ingredient_id: uuid.UUID,
                                caller: CallerIdentity = Depends(require_caller)):
     async with tenant_connection(request.app.state.pool, caller.claims) as conn:
         await _require_location(conn, location_id)
+        # Self-review finding: scoped to location_id (recipe_items carries its
+        # own, per migration 0012), not just ingredient_id. Org-wide RLS on
+        # recipe_items means an unscoped count leaks a DIFFERENT location's
+        # in-use state for an ingredient_id that does not even belong to this
+        # URL's location — a pro-plan org with multiple locations could get a
+        # 409 "in use" for an ingredient this location never had, instead of
+        # the correct 404. Scoping here makes the count 0 for any ingredient
+        # that isn't actually in this location, so it falls through to the
+        # UPDATE below, which already 404s on that case via its own
+        # location_id-scoped WHERE.
         cur = await conn.execute(
             "SELECT count(*) FROM recipe_items"
-            " WHERE ingredient_id = %s AND deleted_at IS NULL", (ingredient_id,))
+            " WHERE ingredient_id = %s AND location_id = %s AND deleted_at IS NULL",
+            (ingredient_id, location_id))
         (in_use,) = await cur.fetchone()
         if in_use:
             raise HTTPException(

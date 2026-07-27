@@ -1,4 +1,6 @@
-from tests.factories import make_ingredient, make_purchase, make_recipe, add_recipe_item
+from tests.factories import (
+    make_ingredient, make_location, make_purchase, make_recipe, add_recipe_item,
+)
 from tests.test_auth import mint
 
 
@@ -85,3 +87,23 @@ async def test_history_ordering(app_client, seeded_biz, raw_conn):
     prices = [p["total_price"] for p in r.json()["purchases"]]
     assert prices == ["30.00", "20.00", "10.00"]     # rule, not insertion order
     assert r.json()["purchases"][0]["unit_price"] == "3.000000"
+
+
+async def test_delete_in_use_guard_is_scoped_to_location(app_client, seeded_biz, raw_conn):
+    """Self-review regression: a same-org, different-location ingredient's
+    in-use state must not leak into this location's 409/404 decision.
+
+    acme2 is a second location in Alice's own org. `ing` lives there and is
+    in use by a recipe there. Deleting the SAME ingredient_id through
+    acme_loc's URL must 404 (ingredient not found at this location) rather
+    than 409 (in use) -- 409 would mean the guard read acme2's recipe_items
+    without location scoping."""
+    s = seeded_biz
+    acme2 = await make_location(raw_conn, s["acme"], "Acme Second")
+    ing = await make_ingredient(raw_conn, acme2, "Truffle Oil")
+    rec = await make_recipe(raw_conn, acme2, "Risotto", "22.00")
+    await add_recipe_item(raw_conn, acme2, rec, ing, "0.10")
+    await raw_conn.commit()
+    r = await app_client.delete(
+        f"/locations/{s['acme_loc']}/ingredients/{ing}", headers=auth(s["alice"]))
+    assert r.status_code == 404
