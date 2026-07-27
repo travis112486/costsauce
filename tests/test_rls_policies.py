@@ -106,12 +106,36 @@ async def test_all_seven_tenant_tables_enable_and_force_rls(raw_conn):
 
 
 async def test_every_policy_carries_with_check_where_it_can_write(raw_conn):
-    """USING alone lets a caller write a row into another org."""
-    await apply_migrations(raw_conn, upto=4)
+    """USING alone lets a caller write a row into another org.
+
+    Full migration set, not upto=4. One name is excluded, not by role:
+    `purge_definer_org_lock` (0008) is `FOR UPDATE TO purge_definer USING
+    (true)` with no explicit WITH CHECK. That is not the hole this audit
+    hunts for: `purge_definer` never issues a real UPDATE through it (0008's
+    own header explains why the GRANT/policy exist at all -- a `SELECT ...
+    FOR UPDATE` row lock requires actual UPDATE privilege plus a matching
+    policy, even though nothing is ever written), and PostgreSQL's own
+    documented default -- reusing USING as WITH CHECK when the latter is
+    omitted -- is not limited to FOR ALL policies; confirmed directly against
+    a live Postgres 17 with a synthetic FOR UPDATE-only policy (USING (tag =
+    'old'), no WITH CHECK): an UPDATE setting tag = 'new' is silently
+    blocked, proving the reuse applies here too. So the *effective* check is
+    already `true`, identical to what an explicit `WITH CHECK (true)` would
+    add, and matches `purge_definer`'s already-unconditional DELETE on the
+    same table. `purge_definer` is also unreachable from any request-path
+    role (see the definer-hygiene tests below), so there is no caller in the
+    sense this audit defends against. Every other definer-role write policy
+    in the schema -- asserted exactly, by name, in
+    `test_application_policies_never_apply_to_the_definer_role` -- does
+    carry an explicit WITH CHECK; a new one that omits it fails THAT test
+    the moment it lands, because it will not be on the allowlist yet.
+    """
+    await apply_migrations(raw_conn)
     cur = await raw_conn.execute(
         "SELECT tablename, policyname, cmd FROM pg_policies "
         "WHERE schemaname = 'public' AND cmd IN ('ALL', 'INSERT', 'UPDATE') "
-        "AND with_check IS NULL ORDER BY tablename, policyname"
+        "AND with_check IS NULL AND policyname <> 'purge_definer_org_lock' "
+        "ORDER BY tablename, policyname"
     )
     assert await cur.fetchall() == []
 
@@ -338,20 +362,39 @@ async def test_the_owner_can_still_do_its_own_work(pool):
 # The one deliberate bypass. If `rls_definer` were reachable, or its policy
 # wider than one SELECT, the whole scheme would be decoration.
 # --------------------------------------------------------------------------
-async def test_rls_definer_cannot_be_logged_into_or_escalated(raw_conn):
-    await apply_migrations(raw_conn, upto=4)
+DEFINER_ROLES = (
+    "rls_definer", "deletion_definer", "purge_definer", "sync_definer",
+    # Not in the phase-1c brief's inventory -- found by grepping every
+    # migration's CREATE ROLE/POLICY rather than trusting that list: 0006
+    # (accept_invite_definer, phase 1a) creates this fifth definer role for
+    # `accept_invite_tx`, brackets it with the identical
+    # GRANT .. TO CURRENT_USER / REVOKE .. FROM CURRENT_USER pattern as the
+    # other four, and never drops it. It is exactly as reachable (i.e. not
+    # reachable) as the other four and belongs in every audit that iterates
+    # "the definer roles", not just the ones this file already had a test
+    # for at upto=4.
+    "invite_definer",
+)
+
+
+@pytest.mark.parametrize("role", DEFINER_ROLES)
+async def test_rls_definer_cannot_be_logged_into_or_escalated(raw_conn, role):
+    await apply_migrations(raw_conn)
     cur = await raw_conn.execute(
         "SELECT rolcanlogin, rolbypassrls, rolsuper, rolinherit "
-        "FROM pg_roles WHERE rolname = 'rls_definer'")
+        "FROM pg_roles WHERE rolname = %s", (role,))
     canlogin, bypass, super_, inherit = await cur.fetchone()
-    assert canlogin is False, "rls_definer must not be a login role"
+    assert canlogin is False, f"{role} must not be a login role"
     assert bypass is False and super_ is False and inherit is False
 
     cur = await raw_conn.execute(
-        "SELECT pg_has_role('app_user', 'rls_definer', 'MEMBER'), "
-        "       pg_has_role('authenticated', 'rls_definer', 'MEMBER')")
+        "SELECT pg_has_role('app_user', %s, 'MEMBER'), "
+        "       pg_has_role('authenticated', %s, 'MEMBER')", (role, role))
     assert await cur.fetchone() == (False, False), \
-        "the request-path roles must not be able to SET ROLE rls_definer"
+        f"the request-path roles must not be able to SET ROLE {role}"
+
+    if role != "rls_definer":
+        return
 
     cur = await raw_conn.execute(
         "SELECT cmd, qual FROM pg_policies WHERE policyname = 'membership_definer_read'")
@@ -368,24 +411,30 @@ async def test_rls_definer_cannot_be_logged_into_or_escalated(raw_conn):
     assert (await cur.fetchone())[0] == 0, "rls_definer must own no table"
 
 
-async def test_nothing_is_left_a_member_of_rls_definer(raw_conn):
-    """The migration grants itself rls_definer to reassign ownership, then
-    gives it back. If the REVOKE is ever dropped, FORCE is measurably softened:
-    RLS role matching uses has_privs_of_role(), so `membership_definer_read`
-    reaches any INHERIT member and a non-superuser migration runner reads every
-    membership row unfiltered.
+@pytest.mark.parametrize("role", DEFINER_ROLES)
+async def test_nothing_is_left_a_member_of_rls_definer(raw_conn, role):
+    """Each definer migration grants itself the role to do its one-time
+    privileged setup, then gives it back. If any REVOKE is ever dropped,
+    FORCE is measurably softened for that role: RLS role matching uses
+    has_privs_of_role(), so its permissive read/write policy reaches any
+    INHERIT member and a non-superuser migration runner reads or writes
+    unfiltered through it.
 
     Checked against pg_auth_members, not pg_has_role() -- the latter answers
     true for a superuser no matter what, so it cannot see this regression in a
     harness whose `postgres` is a superuser.
+
+    Parametrised over all five definer roles (0004, 0006, 0007 x2, 0014) so
+    that every GRANT ... TO CURRENT_USER / REVOKE ... FROM CURRENT_USER
+    bracket in the schema is checked, not just rls_definer's.
     """
-    await apply_migrations(raw_conn, upto=4)
+    await apply_migrations(raw_conn)
     cur = await raw_conn.execute(
         "SELECT g.rolname FROM pg_auth_members m "
         "JOIN pg_roles r ON r.oid = m.roleid "
         "JOIN pg_roles g ON g.oid = m.member "
-        "WHERE r.rolname = 'rls_definer'")
-    assert await cur.fetchall() == [], "rls_definer must be left with no members"
+        "WHERE r.rolname = %s", (role,))
+    assert await cur.fetchall() == [], f"{role} must be left with no members"
 
 
 async def test_definer_read_policy_is_load_bearing(pool, raw_conn):
@@ -408,15 +457,80 @@ async def test_definer_read_policy_is_load_bearing(pool, raw_conn):
         await raw_conn.commit()
 
 
+# Exact inventory of every non-["authenticated"] policy in the schema after
+# the full migration set (0001-0015), (table, policy, role, cmd). Verified
+# directly against a live migrated Postgres 17 -- `SELECT tablename,
+# policyname, cmd, roles, qual FROM pg_policies WHERE schemaname = 'public'`
+# -- not carried over from the phase-1c brief's own inventory, which named
+# only four definer roles and six policies: it missed `invite_definer`
+# (0006, phase 1a) entirely, and with it three more policies
+# (invite_definer_rw, membership_definer_write, invite_definer_profile_read),
+# plus three more on the four roles it did name
+# (deletion_definer_org_read from 0007, and purge_definer_org_read /
+# purge_definer_org_delete / purge_definer_org_lock from 0007/0008 --
+# `purge_definer` had picked up a SELECT+DELETE+UPDATE trio by 0008, not the
+# single SELECT the brief assumed). This dict is the real count: 14 policies
+# across 5 roles. Every entry here must keep `qual = 'true'` (asserted
+# below) -- the same permissive-bypass shape every *_definer role uses, so
+# that none of them can recurse back into the RLS they exist to sidestep.
+DEFINER_POLICIES = {
+    ("memberships", "membership_definer_read", "rls_definer", "SELECT"),
+    ("locations", "location_deletion_definer_read", "deletion_definer", "SELECT"),
+    ("organizations", "deletion_definer_org_read", "deletion_definer", "SELECT"),
+    ("organizations", "purge_definer_org_read", "purge_definer", "SELECT"),
+    ("organizations", "purge_definer_org_delete", "purge_definer", "DELETE"),
+    ("organizations", "purge_definer_org_lock", "purge_definer", "UPDATE"),
+    ("deleted_accounts", "purge_definer_tombstone_read", "purge_definer", "SELECT"),
+    ("locations", "location_sync_definer_read", "sync_definer", "SELECT"),
+    ("organizations", "org_sync_definer_read", "sync_definer", "SELECT"),
+    ("organizations", "org_sync_definer_update", "sync_definer", "UPDATE"),
+    ("sync_ops", "sync_ops_definer_all", "sync_definer", "ALL"),
+    ("invites", "invite_definer_rw", "invite_definer", "ALL"),
+    ("memberships", "membership_definer_write", "invite_definer", "ALL"),
+    ("profiles", "invite_definer_profile_read", "invite_definer", "SELECT"),
+}
+
+
 async def test_application_policies_never_apply_to_the_definer_role(raw_conn):
     """If any policy reached rls_definer, the recursion would come back.
 
-    A policy with no `TO` clause is `TO PUBLIC`, which includes rls_definer.
+    A policy with no `TO` clause is `TO PUBLIC`, which includes rls_definer
+    (and every other definer role). Full migration set, not upto=4: every
+    non-`authenticated` policy in the final schema must be on the exact
+    `DEFINER_POLICIES` allowlist above, target exactly one `*_definer` role,
+    and stay a permissive `USING (true)`. Checked in both directions --
+    nothing extra, and nothing missing -- so a future migration that widens
+    an existing definer policy's roles, narrows its qual, or adds a new one
+    without updating this allowlist fails here rather than silently.
+
+    Also asserts no `tmp_backfill_*` policy survives: 0013 and 0014 each
+    open a `TO CURRENT_USER` bracket to backfill under FORCE RLS and close it
+    with a matching DROP POLICY in the same file: `tmp_backfill_ingredients`,
+    `_purchases`, `_recipes`, `_recipe_items`, `_organizations`,
+    `_locations` (0014), and the analogous seed-insert policies from 0009 /
+    0013's sample-data seeds. A left-open bracket would show up as `TO
+    CURRENT_USER` here -- the migration-running role -- not a `*_definer`
+    role, and fail the allowlist check on its own; the name check below adds
+    a second, less easily bypassed guard.
     """
-    await apply_migrations(raw_conn, upto=4)
+    await apply_migrations(raw_conn)
     cur = await raw_conn.execute(
-        "SELECT tablename, policyname, roles FROM pg_policies "
-        "WHERE schemaname = 'public' AND policyname <> 'membership_definer_read' "
-        "ORDER BY tablename, policyname")
-    for table, policy, roles in await cur.fetchall():
-        assert roles == ["authenticated"], f"{table}.{policy} is scoped to {roles}"
+        "SELECT tablename, policyname, cmd, roles, qual FROM pg_policies "
+        "WHERE schemaname = 'public' ORDER BY tablename, policyname")
+    seen = set()
+    for table, policy, cmd, roles, qual in await cur.fetchall():
+        assert not policy.startswith("tmp_backfill_"), \
+            f"{table}.{policy}: a temporary backfill policy from 0013/0014 survived migration"
+        if roles == ["authenticated"]:
+            continue
+        assert len(roles) == 1 and roles[0].endswith("_definer"), \
+            f"{table}.{policy} is scoped to {roles}, not a single *_definer role"
+        role = roles[0]
+        entry = (table, policy, role, cmd)
+        assert entry in DEFINER_POLICIES, \
+            f"{table}.{policy} (role={role}, cmd={cmd}) is not on the definer-policy allowlist"
+        assert qual == "true", \
+            f"{table}.{policy} must stay a permissive USING (true), found {qual!r}"
+        seen.add(entry)
+    missing = DEFINER_POLICIES - seen
+    assert missing == set(), f"expected definer policies missing from the schema: {missing}"
