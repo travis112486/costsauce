@@ -194,6 +194,18 @@ WITH CHECK (
 -- already maps to HTTP 410. Same GRANT/REVOKE bracket as 0007. 0007 already
 -- gives deletion_definer its organizations read; only the locations read is
 -- new here. (Check 0007 before finalizing; drop any line it already covers.)
+--
+-- The REVOKE deliberately comes LAST, after the four CREATE TRIGGER
+-- statements below, not right after the function is defined. PostgreSQL
+-- checks EXECUTE on a trigger's function at CREATE TRIGGER time, and the
+-- function is deletion_definer-owned with EXECUTE revoked from PUBLIC -- so
+-- a non-superuser migration runner (Supabase's `postgres`) still needs its
+-- membership in deletion_definer to be live when each CREATE TRIGGER runs.
+-- Revoking the membership any earlier makes all four CREATE TRIGGER
+-- statements fail with "permission denied for function". 0007 has this
+-- exact shape already (its triggers precede its own REVOKE, see that file's
+-- comments near the role bootstrap and its closing REVOKE): this file now
+-- matches it.
 -- ---------------------------------------------------------------------------
 GRANT deletion_definer TO CURRENT_USER;
 
@@ -222,8 +234,6 @@ $$;
 ALTER FUNCTION reject_write_to_scheduled_org_location() OWNER TO deletion_definer;
 REVOKE ALL ON FUNCTION reject_write_to_scheduled_org_location() FROM PUBLIC;
 
-REVOKE deletion_definer FROM CURRENT_USER;
-
 CREATE TRIGGER ingredients_reject_scheduled
   BEFORE INSERT OR UPDATE ON ingredients
   FOR EACH ROW EXECUTE FUNCTION reject_write_to_scheduled_org_location();
@@ -236,3 +246,5 @@ CREATE TRIGGER recipes_reject_scheduled
 CREATE TRIGGER recipe_items_reject_scheduled
   BEFORE INSERT OR UPDATE ON recipe_items
   FOR EACH ROW EXECUTE FUNCTION reject_write_to_scheduled_org_location();
+
+REVOKE deletion_definer FROM CURRENT_USER;
