@@ -133,19 +133,24 @@ async def test_route_pre_scan_still_reports_named_matches(app_client, seeded_biz
     assert r2.json()["detail"]["matches"][0]["name"] == "Chicken Breast"
 
 
-async def test_route_race_loser_is_409_not_500(app_client, seeded_biz, raw_conn):
+async def test_pre_scan_catches_normalized_collision_seeded_off_route(
+        app_client, seeded_biz, raw_conn):
     """Per the brief: a true race (insert landing between the route's scan
     and its own INSERT) can't be reproduced in-process on a single
-    connection. The prescribed stand-in seeds a normalized-colliding row via
-    the factory (bypassing the route's scan at seed time) with a raw form
-    that differs from the POSTed name ("Chicken  Breast" vs "chicken
-    breasts"), then POSTs the collision and asserts 409, not 500 -- covering
-    the route end-to-end whether the pre-scan or the new except-branch is
-    what actually catches it (both must map to the same friendly shape;
-    since both use the identical normalize_name, a live duplicate the scan
-    would find is also one the index would find, so a genuine execution of
-    only the except-branch requires real concurrency, which this test does
-    not attempt)."""
+    connection. This is the brief's prescribed stand-in: seed a normalized-
+    colliding row via the factory (bypassing the route's scan at seed time)
+    with a raw form that differs from the POSTed name ("Chicken  Breast" vs
+    "chicken breasts"), then POST the collision and assert 409, not 500.
+
+    Fix (review round 1, Important-1): this test's 409 comes from the
+    pre-scan, NOT the except-branch -- create_ingredient's own live-candidate
+    scan runs at request time and finds the seeded row (both use the
+    identical normalize_name, so anything the scan misses the index would
+    also miss). It is kept, correctly named now, as coverage for "pre-scan
+    still works when the collision was seeded outside the route." The
+    except-branch itself is covered by
+    test_race_loser_409_comes_from_except_branch below, which forces
+    execution past the scan deterministically via monkeypatch."""
     s = seeded_biz
     await make_ingredient(raw_conn, s["acme_loc"], "Chicken  Breast")
     await raw_conn.commit()
@@ -155,3 +160,34 @@ async def test_route_race_loser_is_409_not_500(app_client, seeded_biz, raw_conn)
         headers=auth(s["alice"]))
     assert r.status_code == 409
     assert r.json()["detail"]["detail"] == "duplicate"
+
+
+async def test_race_loser_409_comes_from_except_branch(
+        app_client, seeded_biz, raw_conn, monkeypatch):
+    """Fix (review round 1, Important-1): deterministically exercises the new
+    except-UniqueViolation branch in create_ingredient, rather than relying
+    on the pre-scan to (mis-)report the same 409 shape.
+
+    Seeds a normalized-colliding row via the factory, then monkeypatches
+    `api.routes.ingredients._candidates` to return an empty list -- standing
+    in for "another create landed in the TOCTOU window after our scan ran"
+    without needing real concurrency. With the scan blinded, the route
+    proceeds straight to the INSERT, which the migration 0015 partial unique
+    index rejects; the except-branch must turn that UniqueViolation into the
+    friendly 409 shape rather than an unhandled 500."""
+    import api.routes.ingredients as ingredients_route
+    s = seeded_biz
+    await make_ingredient(raw_conn, s["acme_loc"], "Chicken  Breast")
+    await raw_conn.commit()
+
+    async def _no_candidates(conn, location_id):
+        return []
+
+    monkeypatch.setattr(ingredients_route, "_candidates", _no_candidates)
+
+    r = await app_client.post(
+        f"/locations/{s['acme_loc']}/ingredients",
+        json={"name": "chicken breasts", "base_unit": "lb"},
+        headers=auth(s["alice"]))
+    assert r.status_code == 409
+    assert r.json()["detail"] == {"detail": "duplicate", "matches": []}
