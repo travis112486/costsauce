@@ -154,12 +154,38 @@ async def _apply_insert(conn, table, op):
             return {"status": "needs_attention",
                     "reason": f"referenced {label} is not live"}
 
-    # Plain INSERT for this task; Task 5 replaces recipe_items's insert with
-    # the canonical ON CONFLICT (recipe_id, ingredient_id) WHERE deleted_at
-    # IS NULL upsert against recipe_items_live_uq.
-    cols = ["id", "location_id", "client_mutated_at"] + list(op.fields.keys())
-    placeholders = ", ".join(["%s"] * len(cols))
-    values = [op.row_id, op.location_id, op.client_mutated_at] + list(op.fields.values())
-    await conn.execute(
-        f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({placeholders})", values)
-    return {"status": "applied", "row_id": str(op.row_id)}
+    # Task 5: recipe_items uses ON CONFLICT upsert for canonical (recipe_id,
+    # ingredient_id) rows; other tables use plain INSERT.
+    if table == "recipe_items":
+        fields = op.fields
+        cur = await conn.execute(
+            "INSERT INTO recipe_items (id, location_id, recipe_id, ingredient_id,"
+            " qty_base_units, deleted_at, client_mutated_at)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s)"
+            " ON CONFLICT (recipe_id, ingredient_id) WHERE deleted_at IS NULL"
+            " DO UPDATE SET qty_base_units = EXCLUDED.qty_base_units,"
+            "               deleted_at = EXCLUDED.deleted_at,"
+            "               client_mutated_at = EXCLUDED.client_mutated_at"
+            " WHERE recipe_items.client_mutated_at <= EXCLUDED.client_mutated_at"
+            " RETURNING id",
+            (op.row_id, op.location_id, fields.get("recipe_id"),
+             fields.get("ingredient_id"), fields.get("qty_base_units"),
+             fields.get("deleted_at"), op.client_mutated_at))
+        row = await cur.fetchone()
+        if row is None:
+            # conflict arbitration ran and the existing line's clock was newer
+            cur = await conn.execute(
+                "SELECT id FROM recipe_items WHERE recipe_id = %s AND ingredient_id = %s"
+                " AND deleted_at IS NULL",
+                (fields.get("recipe_id"), fields.get("ingredient_id")))
+            (canonical,) = await cur.fetchone()
+            return {"status": "stale", "reason": "older", "row_id": str(canonical)}
+        return {"status": "applied", "row_id": str(row[0])}
+    else:
+        # Plain INSERT for other tables
+        cols = ["id", "location_id", "client_mutated_at"] + list(op.fields.keys())
+        placeholders = ", ".join(["%s"] * len(cols))
+        values = [op.row_id, op.location_id, op.client_mutated_at] + list(op.fields.values())
+        await conn.execute(
+            f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({placeholders})", values)
+        return {"status": "applied", "row_id": str(op.row_id)}

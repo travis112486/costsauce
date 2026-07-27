@@ -251,3 +251,93 @@ async def test_savepoint_isolation_lets_next_op_apply_after_failure(pool, actors
         assert bad_result["status"] == "needs_attention"
         good_result = await apply_op(conn, actors["acme"], good_op)
         assert good_result == {"status": "applied", "row_id": str(good_row_id)}
+
+
+async def test_recipe_item_insert_with_newer_cm_updates_existing_line(pool, actors, raw_conn):
+    """Insert op with newer cm, same (recipe_id, ingredient_id) → updates existing line."""
+    cur = await raw_conn.execute(
+        "SELECT client_mutated_at FROM recipe_items WHERE id = %s",
+        (actors["recipe_item"],))
+    (cm0,) = await cur.fetchone()
+    newer_cm = cm0 + timedelta(seconds=1)
+    new_row_id = uuid.uuid4()
+    op = mkop(table="recipe_items", row_id=new_row_id, location_id=actors["loc"],
+              client_mutated_at=newer_cm,
+              fields={"recipe_id": str(actors["recipe"]),
+                      "ingredient_id": str(actors["ing"]),
+                      "qty_base_units": "3.0000"})
+    async with tenant_connection(pool, {"sub": str(actors["alice"])}) as conn:
+        result = await apply_op(conn, actors["acme"], op)
+        # result row_id should be the existing line's id, not the op's row_id
+        assert result["status"] == "applied"
+        assert result["row_id"] == str(actors["recipe_item"])
+        # Verify qty was updated
+        cur = await conn.execute(
+            "SELECT qty_base_units FROM recipe_items WHERE id = %s",
+            (actors["recipe_item"],))
+        (qty,) = await cur.fetchone()
+        assert str(qty) == "3.0000"
+        # Verify line count for recipe is still 1
+        cur = await conn.execute(
+            "SELECT COUNT(*) FROM recipe_items WHERE recipe_id = %s AND deleted_at IS NULL",
+            (actors["recipe"],))
+        (count,) = await cur.fetchone()
+        assert count == 1
+
+
+async def test_recipe_item_insert_with_older_cm_is_stale(pool, actors, raw_conn):
+    """Insert op with older cm, same (recipe_id, ingredient_id) → stale, older."""
+    cur = await raw_conn.execute(
+        "SELECT client_mutated_at FROM recipe_items WHERE id = %s",
+        (actors["recipe_item"],))
+    (cm0,) = await cur.fetchone()
+    older_cm = cm0 - timedelta(seconds=1)
+    new_row_id = uuid.uuid4()
+    op = mkop(table="recipe_items", row_id=new_row_id, location_id=actors["loc"],
+              client_mutated_at=older_cm,
+              fields={"recipe_id": str(actors["recipe"]),
+                      "ingredient_id": str(actors["ing"]),
+                      "qty_base_units": "5.0000"})
+    async with tenant_connection(pool, {"sub": str(actors["alice"])}) as conn:
+        result = await apply_op(conn, actors["acme"], op)
+        assert result["status"] == "stale"
+        assert result["reason"] == "older"
+        # row_id should be canonical (existing line's id)
+        assert result["row_id"] == str(actors["recipe_item"])
+        # Verify qty was NOT updated
+        cur = await conn.execute(
+            "SELECT qty_base_units FROM recipe_items WHERE id = %s",
+            (actors["recipe_item"],))
+        (qty,) = await cur.fetchone()
+        assert str(qty) == "2.0000"  # original qty from fixture
+
+
+async def test_recipe_item_insert_new_pair_creates_new_row(pool, actors):
+    """Insert op for new (recipe_id, ingredient_id) pair → creates new row with id == op.row_id."""
+    new_ing = None
+    async with tenant_connection(pool, {"sub": str(actors["alice"])}) as conn:
+        # First create a new ingredient
+        cur = await conn.execute(
+            "INSERT INTO ingredients (location_id, name, base_unit)"
+            " VALUES (%s, %s, %s) RETURNING id",
+            (actors["loc"], "New Ingredient", "kg"))
+        (new_ing,) = await cur.fetchone()
+
+        # Now insert a recipe_item with a fresh row_id for this new pair
+        new_row_id = uuid.uuid4()
+        op = mkop(table="recipe_items", row_id=new_row_id, location_id=actors["loc"],
+                  client_mutated_at=datetime.now(timezone.utc),
+                  fields={"recipe_id": str(actors["recipe"]),
+                          "ingredient_id": str(new_ing),
+                          "qty_base_units": "1.5000"})
+        result = await apply_op(conn, actors["acme"], op)
+        assert result["status"] == "applied"
+        assert result["row_id"] == str(new_row_id)
+        # Verify row exists with correct data
+        cur = await conn.execute(
+            "SELECT id, qty_base_units FROM recipe_items"
+            " WHERE recipe_id = %s AND ingredient_id = %s",
+            (actors["recipe"], new_ing))
+        row_id, qty = await cur.fetchone()
+        assert row_id == new_row_id
+        assert str(qty) == "1.5000"
