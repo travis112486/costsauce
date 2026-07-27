@@ -30,8 +30,17 @@ def app_url(url: str) -> str:
 
 @pytest.fixture
 async def seeded(raw_conn):
-    """Two orgs, three users. Seeded as the owner, which bypasses RLS."""
-    await apply_migrations(raw_conn, upto=4)
+    """Two orgs, three users. Seeded as the owner, which bypasses RLS.
+
+    Applies every migration (not just upto=4): `TENANT_TABLES` now includes
+    the four business tables from 0012, and the `test_a_valid_but_unknown_sub_sees_nothing`-
+    style loops below iterate all of TENANT_TABLES. No rows are seeded into
+    the business tables here -- this file's job is the phase-1a tenant
+    tables -- so those loops see zero rows regardless of policy, which is
+    the correct (vacuously passing) answer for a table nothing was written
+    into.
+    """
+    await apply_migrations(raw_conn)
     for uid, email in ((ALICE, "alice@acme.test"), (BOB, "bob@bistro.test"),
                        (CAROL, "carol@acme.test"), (DAVE, "dave@acme.test")):
         await raw_conn.execute(
@@ -56,8 +65,8 @@ async def seeded(raw_conn):
             (oid, email, f"hash-{oid}", uid))
     for uid in (ALICE, BOB):
         await raw_conn.execute(
-            "INSERT INTO email_verifications (user_id, token_hash, expires_at) "
-            "VALUES (%s, %s, now() + interval '1 day')", (uid, f"ev-{uid}"))
+            "INSERT INTO email_verifications (user_id, email, token_hash, expires_at) "
+            "VALUES (%s, %s, %s, now() + interval '1 day')", (uid, f"ev-{uid}@test.example", f"ev-{uid}"))
         await raw_conn.execute(
             "INSERT INTO apple_link_requests (apple_sub, token_hash, expires_at) "
             "VALUES (%s, %s, now() + interval '1 day')", (uid, f"al-{uid}"))
@@ -80,7 +89,9 @@ async def pool(db_url, seeded):
 # container instead, so the check as written would silently not run.
 # --------------------------------------------------------------------------
 async def test_all_seven_tenant_tables_enable_and_force_rls(raw_conn):
-    await apply_migrations(raw_conn, upto=4)
+    # Full migration set, not upto=4: TENANT_TABLES now also carries the four
+    # 0012 business tables, and this test asserts against the whole tuple.
+    await apply_migrations(raw_conn)
     cur = await raw_conn.execute(
         "SELECT relname, relrowsecurity, relforcerowsecurity FROM pg_class "
         "WHERE relname = ANY(%s) AND relnamespace = 'public'::regnamespace "
@@ -225,8 +236,8 @@ async def test_forged_claims_grant_nothing(pool):
      "VALUES (%s, 'x@x.test', 'owner', 'trojan', %s, now() + interval '1 day')", (BISTRO, ALICE)),
     ("INSERT INTO profiles (user_id, contact_email) VALUES (%s, 'x@x.test')",
      ("44444444-4444-7444-8444-444444444444",)),
-    ("INSERT INTO email_verifications (user_id, token_hash, expires_at) "
-     "VALUES (%s, 'trojan', now() + interval '1 day')", (BOB,)),
+    ("INSERT INTO email_verifications (user_id, email, token_hash, expires_at) "
+     "VALUES (%s, 'trojan@x.test', 'trojan', now() + interval '1 day')", (BOB,)),
     ("INSERT INTO apple_link_requests (apple_sub, token_hash, expires_at) "
      "VALUES (%s, 'trojan', now() + interval '1 day')", (BOB,)),
 ])

@@ -1,4 +1,9 @@
 # api/models.py
+from datetime import date
+from decimal import Decimal
+from typing import Literal
+import uuid
+
 from pydantic import BaseModel
 
 PLAN_LIMITS = {
@@ -51,3 +56,41 @@ class MeResponse(BaseModel):
     apple_linked: bool
     # No top-level entitlement: see the comment on MembershipOut.entitlement.
     memberships: list[MembershipOut]
+
+
+class IngredientIn(BaseModel):
+    name: str
+    base_unit: Literal["lb", "oz", "kg", "g", "each"]
+    vendor: str | None = None
+    category: str | None = None
+
+
+class PurchaseIn(BaseModel):
+    ingredient_id: uuid.UUID
+    purchased_on: date
+    qty: Decimal
+    unit: str
+    total_price: Decimal
+    qty_in_case: Decimal | None = None
+
+
+class RecipeItemIn(BaseModel):
+    # stdlib uuid.UUID, not pydantic's UUID4: this project's ids are UUIDv7
+    # (see PurchaseIn above), and UUID4's validator rejects them outright.
+    id: uuid.UUID | None = None
+    ingredient_id: uuid.UUID
+    qty_base_units: Decimal
+
+
+class RecipeIn(BaseModel):
+    name: str
+    menu_price: Decimal
+    target_fc_pct: Decimal = Decimal("30.00")
+    items: list[RecipeItemIn] = []
+
+
+class MergeIn(BaseModel):
+    # stdlib uuid.UUID, not pydantic's UUID4: brief erratum -- this project's
+    # ids are UUIDv7 (see RecipeItemIn above), and UUID4's validator rejects
+    # them outright.
+    from_id: uuid.UUID
