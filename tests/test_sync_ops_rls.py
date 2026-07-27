@@ -9,6 +9,7 @@ would sail through any policy being tested.
 """
 import uuid
 
+import psycopg
 import pytest
 
 from tests.conftest import apply_migrations
@@ -127,7 +128,34 @@ async def test_delete_is_not_granted(db_url, two_orgs):
     assert "permission denied" in str(exc.value).lower(), str(exc.value)
 
 
-# --- (c) purge_expired_sync_ops -----------------------------------------
+# --- (c) scheduled-org write freeze -------------------------------------
+
+
+async def test_insert_blocked_for_org_scheduled_for_deletion(db_url, raw_conn, two_orgs):
+    """sync_ops carries org_id directly, the same shape as
+    memberships/locations/invites -- so it takes 0007's
+    reject_write_to_scheduled_org() trigger, and must raise the same CS410
+    SQLSTATE test_deletion.py::test_locations_write_blocked pins for
+    locations. Not merely a catalog check: this exercises the trigger firing
+    through the real tenant_connection checkout path."""
+    await raw_conn.execute(
+        "UPDATE organizations SET deletion_scheduled_at = now() WHERE id = %s",
+        (two_orgs["acme"],),
+    )
+    await raw_conn.commit()
+    pool = await pool_open(app_url(db_url))
+    with pytest.raises(psycopg.Error) as exc:
+        async with tenant_connection(pool, {"sub": str(two_orgs["alice"])}) as conn:
+            await conn.execute(
+                "INSERT INTO sync_ops (op_id, org_id, batch_id, result_json)"
+                " VALUES (uuid_generate_v7(), %s, uuid_generate_v7(), '{}')",
+                (two_orgs["acme"],),
+            )
+    await pool.close()
+    assert exc.value.sqlstate == "CS410"
+
+
+# --- (d) purge_expired_sync_ops -----------------------------------------
 
 
 async def test_purge_expired_sync_ops_deletes_old_keeps_fresh(raw_conn, two_orgs):

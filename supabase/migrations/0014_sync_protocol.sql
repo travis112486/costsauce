@@ -226,9 +226,19 @@ CREATE INDEX sync_ops_org_idx ON sync_ops (org_id);
 -- expected set from pg_attribute rather than a hand-maintained list, so any
 -- org_id-bearing table missing this trigger fails that test on its own --
 -- this is not optional decoration.
+--
+-- Same GRANT/REVOKE deletion_definer bracket as 0007/0012, and for the same
+-- reason: reject_write_to_scheduled_org() is deletion_definer-owned with
+-- EXECUTE revoked from PUBLIC, and CREATE TRIGGER checks EXECUTE on the
+-- function at creation time -- a non-superuser migration runner (Supabase's
+-- `postgres`) needs its membership in deletion_definer live for this one
+-- statement. The REVOKE comes right back after, mirroring 0007's own
+-- CREATE-then-REVOKE shape for this exact function.
+GRANT deletion_definer TO CURRENT_USER;
 CREATE TRIGGER sync_ops_reject_write_to_scheduled_org
   BEFORE INSERT OR UPDATE ON sync_ops
   FOR EACH ROW EXECUTE FUNCTION reject_write_to_scheduled_org();
+REVOKE deletion_definer FROM CURRENT_USER;
 
 ALTER TABLE sync_ops ENABLE ROW LEVEL SECURITY;
 ALTER TABLE sync_ops FORCE ROW LEVEL SECURITY;
