@@ -252,3 +252,88 @@ async def test_every_table_in_public_enables_and_forces_rls(raw_conn):
         "lines and its policies to the migration, and add it to TENANT_TABLES and "
         "to the `spec` fixture in this file."
     )
+
+
+async def test_every_security_definer_function_in_public_is_hardened(raw_conn):
+    """Final-review Important-6, promoted from deferred.
+
+    Every deliberate RLS bypass in this system is a `SECURITY DEFINER`
+    function in `public` owned by a dedicated NOLOGIN role
+    (`current_user_memberships` 0004, `accept_invite_tx` 0006,
+    `reject_write_to_scheduled_org` / `accounts_pending_identity_purge` /
+    `purge_scheduled_orgs` 0007, `organizations_pending_purge` 0008). Each
+    one runs with its owner's privileges, so each is exactly as safe as its
+    `search_path` pin and its EXECUTE grant, and no more.
+
+    That discipline was applied by hand, six times, checked only by review --
+    on the one surface where this branch's own catalog-driven habit had been
+    skipped, and which has already produced a demonstrated Critical
+    (`accept_invite_tx` shipped without `pg_temp` last, so a caller-owned
+    TEMP table could shadow an unqualified name inside a definer function and
+    answer on its own behalf). So it is derived from the catalog instead, and
+    a seventh definer function added by any later migration is covered the
+    day it lands rather than the day someone remembers.
+
+    Three properties, all of them things a real migration got wrong at least
+    once:
+
+      1. `search_path` is PINNED. Unset, the function resolves unqualified
+         names against the CALLER's search_path, which the caller controls.
+      2. `pg_temp` is not FIRST. Postgres never consults `pg_temp` for
+         FUNCTION names, but it does for TABLE names, so a leading `pg_temp`
+         lets a caller shadow `public.memberships` (etc.) with its own temp
+         table inside a function running as a bypassing role. `pg_temp` last
+         -- or absent, as 0004's two helpers have it -- is fine; first is
+         not.
+      3. PUBLIC holds no EXECUTE. Functions grant EXECUTE to PUBLIC BY
+         DEFAULT, so a definer function whose migration forgets
+         `REVOKE ALL ... FROM PUBLIC` is reachable by every role in the
+         cluster, including `authenticated` and `app_user`. A NULL `proacl`
+         is that default, i.e. a failure, not an absence of information.
+    """
+    await apply_migrations(raw_conn)
+    cur = await raw_conn.execute(
+        "SELECT p.proname, p.proconfig, p.proacl IS NULL, "
+        "       coalesce((SELECT bool_or(a.privilege_type = 'EXECUTE') "
+        "                   FROM aclexplode(p.proacl) a WHERE a.grantee = 0), false) "
+        "  FROM pg_proc p "
+        " WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef "
+        " ORDER BY p.proname"
+    )
+    rows = await cur.fetchall()
+    assert len(rows) >= 6, (
+        f"expected at least the six known SECURITY DEFINER functions, found "
+        f"{[r[0] for r in rows]}"
+    )
+
+    unpinned, pg_temp_first, public_executable = [], [], []
+    for name, proconfig, acl_is_default, public_has_execute in rows:
+        settings = dict(
+            entry.split("=", 1) for entry in (proconfig or []) if "=" in entry
+        )
+        search_path = settings.get("search_path")
+        if search_path is None:
+            unpinned.append(name)
+        elif [s.strip() for s in search_path.split(",")][0] == "pg_temp":
+            pg_temp_first.append(name)
+        if acl_is_default or public_has_execute:
+            public_executable.append(name)
+
+    assert unpinned == [], (
+        f"{unpinned}: every SECURITY DEFINER function must SET search_path. "
+        "Without it, unqualified names inside a function running as a "
+        "bypassing role resolve against the caller's own search_path."
+    )
+    assert pg_temp_first == [], (
+        f"{pg_temp_first}: pg_temp must never come first in a SECURITY DEFINER "
+        "function's search_path -- a caller-owned TEMP table would shadow the "
+        "public table the function means to read. Put it last (0006/0007/0008) "
+        "or leave it out (0004)."
+    )
+    assert public_executable == [], (
+        f"{public_executable}: every SECURITY DEFINER function must "
+        "`REVOKE ALL ... FROM PUBLIC` and then grant EXECUTE only to the one "
+        "role that needs it. Functions are EXECUTE-to-PUBLIC by default, so "
+        "forgetting the REVOKE hands the bypass to `authenticated` and "
+        "`app_user` alike."
+    )

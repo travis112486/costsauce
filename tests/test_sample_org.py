@@ -133,37 +133,59 @@ async def test_seed_insert_applies_for_a_non_superuser_owner(raw_conn, db_url):
     await raw_conn.commit()
 
     restricted_url = db_url.replace("postgres:postgres", "test_sample_org_seed_runner:x")
-    conn = await psycopg.AsyncConnection.connect(restricted_url, autocommit=False)
     try:
-        await conn.execute(migration_sql)
-        await conn.commit()
+        conn = await psycopg.AsyncConnection.connect(restricted_url, autocommit=False)
+        try:
+            await conn.execute(migration_sql)
+            await conn.commit()
+        finally:
+            await conn.close()
+
+        # Not just "it didn't raise": confirm the actual rows landed, over the
+        # superuser connection this time (reading the result is not the part
+        # under test here -- writing it, as the restricted role, is).
+        cur = await raw_conn.execute(
+            "SELECT name, plan, is_sample FROM organizations "
+            "WHERE id = '00000000-0000-7000-8000-00000000cafe'"
+        )
+        (name, plan, is_sample) = await cur.fetchone()
+        assert (name, plan, is_sample) == ("The Copper Ladle (Sample)", "pro", True)
+
+        cur = await raw_conn.execute(
+            "SELECT name FROM locations "
+            "WHERE org_id = '00000000-0000-7000-8000-00000000cafe'"
+        )
+        (loc_name,) = await cur.fetchone()
+        assert loc_name == "Sample Kitchen"
+
+        # Defense in depth: the transient seed-insert policies must not survive
+        # the migration. Left in place, either one is a live, permanent widening
+        # of "no INSERT policy on organizations" (0004) for whichever role ran
+        # this migration -- harmless in isolation (that role already has full
+        # DDL power over the schema) but not what 0004 documents as the
+        # invariant, and not what this migration's own comment promises.
+        cur = await raw_conn.execute(
+            "SELECT policyname FROM pg_policies "
+            "WHERE tablename IN ('organizations', 'locations') "
+            "  AND policyname LIKE '%seed_insert%'"
+        )
+        assert await cur.fetchall() == []
     finally:
-        await conn.close()
-
-    # Not just "it didn't raise": confirm the actual rows landed, over the
-    # superuser connection this time (reading the result is not the part
-    # under test here -- writing it, as the restricted role, is).
-    cur = await raw_conn.execute(
-        "SELECT name, plan, is_sample FROM organizations "
-        "WHERE id = '00000000-0000-7000-8000-00000000cafe'"
-    )
-    (name, plan, is_sample) = await cur.fetchone()
-    assert (name, plan, is_sample) == ("The Copper Ladle (Sample)", "pro", True)
-
-    cur = await raw_conn.execute(
-        "SELECT name FROM locations WHERE org_id = '00000000-0000-7000-8000-00000000cafe'"
-    )
-    (loc_name,) = await cur.fetchone()
-    assert loc_name == "Sample Kitchen"
-
-    # Defense in depth: the transient seed-insert policies must not survive
-    # the migration. Left in place, either one is a live, permanent widening
-    # of "no INSERT policy on organizations" (0004) for whichever role ran
-    # this migration -- harmless in isolation (that role already has full
-    # DDL power over the schema) but not what 0004 documents as the
-    # invariant, and not what this migration's own comment promises.
-    cur = await raw_conn.execute(
-        "SELECT policyname FROM pg_policies "
-        "WHERE tablename IN ('organizations', 'locations') AND policyname LIKE '%seed_insert%'"
-    )
-    assert await cur.fetchall() == []
+        # Final-review Minor: roles are CLUSTER-level, so they outlive the
+        # `DROP SCHEMA public CASCADE` every test performs. Without this,
+        # running this file twice in one session (`pytest tests/x.py
+        # tests/test_sample_org.py`, a re-run under `--lf`, or simply a second
+        # parametrisation later) fails on `CREATE ROLE ... already exists`,
+        # for a reason that has nothing to do with what is being tested.
+        # tests/test_purge_job.py's equivalent role already cleans up in a
+        # `finally`; this matches it.
+        #
+        # REASSIGN before DROP: this role was made the OWNER of
+        # `organizations`/`locations` above, and Postgres refuses to drop a
+        # role that still owns objects or holds privileges.
+        await raw_conn.execute(
+            "REASSIGN OWNED BY test_sample_org_seed_runner TO CURRENT_USER"
+        )
+        await raw_conn.execute("DROP OWNED BY test_sample_org_seed_runner")
+        await raw_conn.execute("DROP ROLE test_sample_org_seed_runner")
+        await raw_conn.commit()

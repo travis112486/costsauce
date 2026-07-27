@@ -755,10 +755,27 @@ async def test_accept_invite_tx_has_no_orphaned_two_arg_overload(raw_conn):
 # derive the "held" side's key -- exactly what FastAPI/Pydantic does
 # internally to a path parameter, not a reimplementation of the fix.
 
-async def test_concurrent_removals_with_different_uuid_spellings_still_serialize(
-    pool, app_client, raw_conn, seeded
+# Final-review Important-5, promoted from Task 9's deferred minors. The
+# version of this test that shipped drove `remove_member` ONLY. Reverting
+# just `change_role`'s `uuid.UUID` typing left the whole suite green while a
+# probe yielded 8/12 zero-owner via concurrent `PATCH`es spelled with
+# differing URL case: two of the three org-locking routes carried no
+# regression guard at all for the exact cause that took three rounds to find,
+# on an invariant that has already regenerated three times.
+#
+# So it is parametrised over every route in this file that reaches
+# `_lock_org` -- `remove_member` and `change_role` directly, `create_invite`
+# through `_check_member_limit`. The load-bearing assertion is the same for
+# all three and is what a reverted `uuid.UUID` annotation breaks: a request
+# whose URL spells the org id differently must STILL block on the lock held
+# under the canonical spelling. The per-route status and the surviving owner
+# count are asserted after, so a route that blocks correctly but then decides
+# wrongly is still caught.
+@pytest.mark.parametrize("route", ["remove_member", "change_role", "create_invite"])
+async def test_every_org_locking_route_normalizes_uuid_spelling_before_locking(
+    pool, app_client, raw_conn, seeded, route
 ):
-    # Each side removes ITSELF, with its OWN JWT -- not one side removing the
+    # Each side acts on ITSELF, with its OWN JWT -- not one side acting on the
     # other. (An earlier draft of this test had alice's request remove boss
     # while alice's own membership was concurrently deleted by the other
     # side: once alice's own row was gone, RLS's membership_select policy
@@ -766,14 +783,44 @@ async def test_concurrent_removals_with_different_uuid_spellings_still_serialize
     # has nothing to return for a caller who is no longer a member of
     # anything, so EVERY row in that org becomes invisible to her, not just
     # her own. That is correct RLS behavior, not the bug under test, and it
-    # produced a misleading 404. Self-removal on both sides avoids it.)
+    # produced a misleading 404. Self-action on both sides avoids it.)
     boss = await make_user(raw_conn, "boss@acme.example.com")
     await add_member(raw_conn, boss, seeded["acme"], "owner")
+    # `create_invite` is gated by _check_member_limit before it ever reaches
+    # the lock-sensitive work; `starter` caps max_members at 1, which would
+    # 402 this org before the race is interesting. The plan is irrelevant to
+    # what is under test, so lift it out of the way.
+    await raw_conn.execute("UPDATE organizations SET plan = 'pro' WHERE id = %s",
+                           (seeded["acme"],))
     await raw_conn.commit()
 
     org_id_canonical = uuid.UUID(str(seeded["acme"]))
     org_id_uppercase_url = str(seeded["acme"]).upper()
     assert org_id_uppercase_url != str(org_id_canonical), "fixture value must not already be upper"
+
+    boss_auth = {"Authorization": f"Bearer {mint(str(boss))}"}
+    # Every request is spelled UPPERCASE in the URL -- a different, equally
+    # valid spelling of the same uuid as `org_id_canonical` above, which is
+    # what the holder locks under.
+    requests = {
+        "remove_member": lambda: app_client.delete(
+            f"/orgs/{org_id_uppercase_url}/members/{boss}", headers=boss_auth,
+        ),
+        "change_role": lambda: app_client.patch(
+            f"/orgs/{org_id_uppercase_url}/members/{boss}",
+            json={"role": "manager"}, headers=boss_auth,
+        ),
+        "create_invite": lambda: app_client.post(
+            f"/orgs/{org_id_uppercase_url}/invites",
+            json={"email": "invitee@acme-diner.example.com", "role": "manager"},
+            headers=boss_auth,
+        ),
+    }
+    # remove_member: boss removing himself is the last owner -> refused.
+    # change_role:   boss demoting himself is the last owner -> refused.
+    # create_invite: nothing about the last owner; it must simply succeed,
+    #                having correctly waited its turn on the lock.
+    expected_status = {"remove_member": 409, "change_role": 409, "create_invite": 200}[route]
 
     lock_acquired = asyncio.Event()
     proceed = asyncio.Event()
@@ -797,30 +844,24 @@ async def test_concurrent_removals_with_different_uuid_spellings_still_serialize
             )
             return "removed"
 
-    async def boss_removes_self_via_http_uppercase_spelling():
-        # boss removing himself, using his OWN JWT -- the org_id in the URL
-        # is deliberately spelled uppercase (a different, equally valid
-        # spelling from org_id_canonical above).
-        return await app_client.delete(
-            f"/orgs/{org_id_uppercase_url}/members/{boss}",
-            headers={"Authorization": f"Bearer {mint(str(boss))}"},
-        )
-
     async def racer():
         await lock_acquired.wait()
-        task = asyncio.create_task(boss_removes_self_via_http_uppercase_spelling())
+        task = asyncio.create_task(requests[route]())
         await asyncio.sleep(0.3)
         assert not task.done(), (
-            "a request spelled with a different (but equal) uuid case must still "
-            "block on the SAME org lock"
+            f"{route}: a request spelled with a different (but equal) uuid case "
+            "must still block on the SAME org lock"
         )
         proceed.set()
         return await task
 
     alice_result, boss_response = await asyncio.gather(hold_lock_removing_alice(), racer())
     assert alice_result == "removed"
-    assert boss_response.status_code == 409
-    assert "last owner" in str(boss_response.json()).lower()
+    assert boss_response.status_code == expected_status, (
+        f"{route}: {boss_response.status_code} {boss_response.text!r}"
+    )
+    if expected_status == 409:
+        assert "last owner" in str(boss_response.json()).lower()
 
     cur = await raw_conn.execute(
         "SELECT count(*) FROM memberships WHERE org_id = %s AND role = 'owner'",

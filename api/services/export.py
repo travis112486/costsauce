@@ -23,9 +23,9 @@ class ExportError(RuntimeError):
 #   organizations        -> _ORG_SQL below (the export's own subject; not
 #                            in TABLES because it is resolved and checked
 #                            before anything else, see build_export)
-#   locations             -> TABLES["locations.csv"]
-#   memberships           -> TABLES["members.csv"]
-#   invites               -> TABLES["invites.csv"] (org_id NOT NULL FK to
+#   locations             -> TABLES["locations"]
+#   memberships           -> TABLES["memberships"]
+#   invites               -> TABLES["invites"] (org_id NOT NULL FK to
 #                            organizations, migration 0002 lines 40-51;
 #                            missed in the first version of this file)
 #   profiles              -> DELIBERATELY EXCLUDED. No org_id column and no
@@ -50,7 +50,23 @@ class ExportError(RuntimeError):
 #                            today.
 _ORG_SQL = "SELECT id, name, plan, created_at FROM organizations WHERE id = %s"
 
-# Per table: (sql, must_be_non_empty).
+# Keyed by TABLE NAME, not by filename, so this dict can be checked against
+# the live catalog rather than against a second hand-written list.
+#
+# Review round 1 already caught `invites` missing from here, and the audit
+# comment above was the only thing that was supposed to prevent a recurrence.
+# A comment is not a check: Phase 1b adds ingredients, purchases, recipes and
+# recipe_items, all org-scoped, and each would be silently omitted from the
+# zip handed to a user immediately before an irreversible purge, with every
+# test still green. So the completeness of this dict is now PINNED by
+# `test_export_covers_every_org_scoped_table_in_the_catalog`
+# (tests/test_deletion_services.py), which derives the expected set from
+# `pg_attribute`'s `attname = 'org_id'` -- the same catalog sweep
+# tests/test_deletion.py already uses for the deletion-guard triggers.
+# Adding an org-scoped table means adding it here, or to EXCLUDED_ORG_TABLES
+# below with a reason; there is no third option that leaves the suite green.
+#
+# Per table: (filename, sql, must_be_non_empty).
 #
 # must_be_non_empty says whether a ZERO-row result is itself evidence of a
 # broken export -- an invariant elsewhere in this schema guarantees a real,
@@ -73,22 +89,46 @@ _ORG_SQL = "SELECT id, name, plan, created_at FROM organizations WHERE id = %s"
 #   invites    -- legitimately empty. Most orgs have no pending invitation
 #                 at any given moment; zero is the common case, not a bug.
 TABLES = {
-    "locations.csv": (
+    "locations": (
+        "locations.csv",
         "SELECT id, name, target_fc_pct, drift_threshold_pct "
         "FROM locations WHERE org_id = %s",
         False,
     ),
-    "members.csv": (
+    "memberships": (
+        "members.csv",
         "SELECT m.user_id, m.role, p.contact_email FROM memberships m "
         "LEFT JOIN profiles p ON p.user_id = m.user_id WHERE m.org_id = %s",
         True,
     ),
-    "invites.csv": (
+    "invites": (
+        "invites.csv",
         "SELECT id, email, role, invited_by, expires_at, accepted_at, created_at "
         "FROM invites WHERE org_id = %s",
         False,
     ),
 }
+
+# Tables that DO carry an `org_id` and are deliberately not in the export.
+#
+# Empty today, and that is a statement rather than an omission: every
+# org-scoped table this schema has is exported. It exists so that excluding
+# one later is an explicit, reviewed decision recorded here with a reason,
+# instead of a table quietly missing from TABLES.
+#
+# The bar for adding a name here: the rows are not the ORG'S data (they
+# belong to another party, or to the platform), or they are derived data the
+# user already has in full elsewhere in the same zip. "Nobody has gotten to
+# it yet" is not a reason -- this export is the user's last copy before an
+# irreversible purge.
+#
+# `organizations` is correctly absent from both dicts: it keys on `id`, not
+# `org_id`, and is resolved separately by `_ORG_SQL` above. `profiles`,
+# `email_verifications`, `apple_link_requests` and `deleted_accounts` are
+# absent for the same structural reason -- see the audit comment above
+# `_ORG_SQL`; none of them carries an `org_id` at all, so the catalog sweep
+# never proposes them.
+EXCLUDED_ORG_TABLES: frozenset[str] = frozenset()
 
 
 def _rows_to_csv(headers, rows) -> str:
@@ -143,7 +183,7 @@ async def build_export(conn, org_id: str) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("organization.csv", _rows_to_csv(org_headers, org_rows))
-        for filename, (sql, must_be_non_empty) in TABLES.items():
+        for filename, sql, must_be_non_empty in TABLES.values():
             cur = await conn.execute(sql, (org_id,))
             rows = await cur.fetchall()
             if must_be_non_empty and not rows:

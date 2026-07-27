@@ -8,7 +8,12 @@ import stripe
 import stripe._http_client as stripe_http_client
 from api.services.apple import revoke_apple_token, AppleRevokeError
 from api.services.billing import cancel_subscription, BillingError
-from api.services.export import build_export, ExportError
+from api.services.export import (
+    EXCLUDED_ORG_TABLES,
+    TABLES,
+    build_export,
+    ExportError,
+)
 from api.db import pool_open, tenant_connection
 from tests.factories import make_location, make_org
 import api.services.apple as apple_module
@@ -41,12 +46,66 @@ async def test_export_contains_every_table_as_csv(raw_conn, seeded):
     blob = await build_export(raw_conn, str(seeded["acme"]))
     with zipfile.ZipFile(io.BytesIO(blob)) as z:
         names = set(z.namelist())
-    assert {"organization.csv", "locations.csv", "members.csv"} <= names
+    # Derived from TABLES, not hand-written: a hardcoded filename list here
+    # was the second half of the same defect as the allowlist itself -- both
+    # sides could be edited into agreement while the export silently dropped
+    # a table. `organization.csv` is the one literal, because it is the one
+    # file build_export writes outside TABLES (from `_ORG_SQL`).
+    expected = {"organization.csv"} | {filename for filename, _, _ in TABLES.values()}
+    assert expected <= names
     # Review round 1, Important-1: invites carries org_id (migration 0002,
     # NOT NULL FK to organizations) and is one of the seven TENANT_TABLES --
     # the first version of this file omitted it, which would have silently
     # dropped real org data from every export.
     assert "invites.csv" in names
+
+
+async def test_export_covers_every_org_scoped_table_in_the_catalog(raw_conn, seeded):
+    """Final-review Important-3. Deliberately NOT an allowlist check --
+    the same reasoning, and the same catalog sweep, as
+    `test_every_org_scoped_table_carries_the_deletion_guard_trigger`
+    (tests/test_deletion.py) and
+    `test_every_table_in_public_enables_and_forces_rls`
+    (tests/test_rls_cross_org.py).
+
+    `api/services/export.py`'s TABLES was the last hand-written, comment
+    -audited allowlist on the branch, and it sits on the operation with the
+    worst failure mode: the zip handed to a user immediately before an
+    irreversible purge. This defect class has already fired here once --
+    `invites` was omitted and was caught only in review, by a human reading
+    a comment. Phase 1b adds ingredients, purchases, recipes and
+    recipe_items, all org-scoped; without this test each would be silently
+    omitted from every export with the whole suite green.
+
+    So the expected set is derived from `pg_attribute` instead: every
+    ordinary table in `public` carrying an `org_id` column is either exported
+    or explicitly excluded, with a reason recorded next to
+    `EXCLUDED_ORG_TABLES`. `organizations` is correctly absent -- it keys on
+    `id` and is resolved separately by `_ORG_SQL`.
+    """
+    cur = await raw_conn.execute(
+        "SELECT c.relname FROM pg_class c "
+        "JOIN pg_attribute a ON a.attrelid = c.oid AND a.attname = 'org_id' "
+        "                   AND a.attnum > 0 AND NOT a.attisdropped "
+        "WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'p')"
+    )
+    org_scoped = {r[0] for r in await cur.fetchall()}
+    assert org_scoped, "sanity: some table in public must carry an org_id"
+
+    assert EXCLUDED_ORG_TABLES <= org_scoped, (
+        f"EXCLUDED_ORG_TABLES names tables that no longer carry an org_id: "
+        f"{sorted(EXCLUDED_ORG_TABLES - org_scoped)}. Remove them, or the "
+        "exclusion list becomes a place stale names hide."
+    )
+    assert set(TABLES) == org_scoped - EXCLUDED_ORG_TABLES, (
+        f"org-scoped tables missing from the export: "
+        f"{sorted(org_scoped - EXCLUDED_ORG_TABLES - set(TABLES))}; "
+        f"exported tables that are not org-scoped: "
+        f"{sorted(set(TABLES) - org_scoped)}. Every table in `public` with an "
+        "org_id must either be in api/services/export.py's TABLES or be listed "
+        "in EXCLUDED_ORG_TABLES with a reason -- this zip is the user's last "
+        "copy of their data before the purge deletes it forever."
+    )
 
 
 # ---------------------------------------------------------------------------
