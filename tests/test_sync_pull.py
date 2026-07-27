@@ -184,6 +184,12 @@ async def test_page_cap_walk_no_gaps_or_dupes_and_chained_cursors(
 # Org resolution + tenant isolation
 # ---------------------------------------------------------------------------
 
+async def test_since_larger_than_bigint_bound_is_422(app_client, seeded_biz):
+    s = seeded_biz
+    r = await pull(app_client, s["acme"], actor=s["alice"], since=2**70)
+    assert r.status_code == 422
+
+
 async def test_non_member_org_is_404(app_client, seeded_biz):
     s = seeded_biz
     r = await pull(app_client, s["bistro"], actor=s["alice"])

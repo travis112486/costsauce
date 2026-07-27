@@ -474,11 +474,10 @@ Expected: identical `results[0]`, but with `"replayed": true` merged in
 (`{"op_id": "...", "status": "applied", "row_id": "...", "replayed": true}`)
 and `cursor` **unchanged** from the first call — confirms `sync_ops`
 idempotency (§5.3 of `0014`) is live end-to-end, not just at the SQL layer.
-Clean up the smoke-test row afterward (`DELETE /locations/<LOCATION_ID>/purchases/...`
-doesn't apply here — it's an ingredient; tombstone it via a normal `DELETE`-
-equivalent PUT with `deleted_at` set through the app, or a follow-up sync op
-with `"fields": {"deleted_at": "<now>"}\`, or just leave it — it is inert
-demo-adjacent data, not something a real tenant will see).
+Clean up the smoke-test row afterward with
+`DELETE /locations/<LOCATION_ID>/ingredients/<INGREDIENT_ID>` (it's an
+ingredient, not a purchase), or just leave it — it is inert demo-adjacent
+data, not something a real tenant will see.
 
 ---
 

@@ -138,15 +138,60 @@ async def test_op_against_tombstoned_row_is_stale_deleted(pool, actors, raw_conn
 
 
 async def test_tombstone_op_applies_and_row_is_tombstoned(pool, actors, raw_conn):
+    # A fresh ingredient with no recipe_items reference, not actors["ing"]
+    # (which the fixture wires into a live recipe line) -- this test covers
+    # the generic tombstone-applies case; the in-use guard has its own
+    # dedicated test below.
+    free_ing = await make_ingredient(raw_conn, actors["loc"], "Unused Ingredient")
+    await raw_conn.commit()
+    cur = await raw_conn.execute(
+        "SELECT client_mutated_at FROM ingredients WHERE id = %s", (free_ing,))
+    (cm0,) = await cur.fetchone()
+    new_cm = cm0 + timedelta(seconds=1)
+    op = mkop(table="ingredients", row_id=free_ing, location_id=actors["loc"],
+              client_mutated_at=new_cm, fields={"deleted_at": new_cm.isoformat()})
+    async with tenant_connection(pool, {"sub": str(actors["alice"])}) as conn:
+        result = await apply_op(conn, actors["acme"], op)
+        assert result == {"status": "applied", "row_id": str(free_ing)}
+        cur = await conn.execute(
+            "SELECT deleted_at FROM ingredients WHERE id = %s", (free_ing,))
+        (deleted_at,) = await cur.fetchone()
+        assert deleted_at is not None
+
+
+async def test_ingredient_tombstone_needs_attention_when_used_by_live_recipe_line(
+        pool, actors, raw_conn):
+    """spec line 416: the route-only in-use guard (DELETE
+    /locations/{id}/ingredients/{id}) must also apply on the sync path --
+    a tombstone op against an ingredient with a live recipe_items reference
+    must not bypass it."""
     cur = await raw_conn.execute(
         "SELECT client_mutated_at FROM ingredients WHERE id = %s", (actors["ing"],))
     (cm0,) = await cur.fetchone()
     new_cm = cm0 + timedelta(seconds=1)
-    op = mkop(table="ingredients", row_id=actors["ing"], location_id=actors["loc"],
-              client_mutated_at=new_cm, fields={"deleted_at": new_cm.isoformat()})
+    tombstone_op = mkop(table="ingredients", row_id=actors["ing"], location_id=actors["loc"],
+                        client_mutated_at=new_cm, fields={"deleted_at": new_cm.isoformat()})
+
     async with tenant_connection(pool, {"sub": str(actors["alice"])}) as conn:
-        result = await apply_op(conn, actors["acme"], op)
-        assert result == {"status": "applied", "row_id": str(actors["ing"])}
+        result = await apply_op(conn, actors["acme"], tombstone_op)
+        assert result == {"status": "needs_attention",
+                           "reason": "ingredient is used by live recipe lines; "
+                                     "remove or merge it first"}
+        cur = await conn.execute(
+            "SELECT deleted_at FROM ingredients WHERE id = %s", (actors["ing"],))
+        (deleted_at,) = await cur.fetchone()
+        assert deleted_at is None
+
+    # Tombstone the recipe line that was blocking it -- the SAME op must
+    # now apply.
+    await raw_conn.execute(
+        "UPDATE recipe_items SET deleted_at = now() WHERE id = %s",
+        (actors["recipe_item"],))
+    await raw_conn.commit()
+
+    async with tenant_connection(pool, {"sub": str(actors["alice"])}) as conn:
+        result2 = await apply_op(conn, actors["acme"], tombstone_op)
+        assert result2 == {"status": "applied", "row_id": str(actors["ing"])}
         cur = await conn.execute(
             "SELECT deleted_at FROM ingredients WHERE id = %s", (actors["ing"],))
         (deleted_at,) = await cur.fetchone()

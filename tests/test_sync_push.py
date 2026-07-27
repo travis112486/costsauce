@@ -246,6 +246,30 @@ async def test_child_before_parent_in_payload_still_applies_via_table_order(
 
 
 # ---------------------------------------------------------------------------
+# Aware-datetime contract: offsetless client_mutated_at is a 422 at the door
+# ---------------------------------------------------------------------------
+
+async def test_naive_client_mutated_at_against_existing_row_is_422(
+        app_client, seeded_biz, raw_conn):
+    s = seeded_biz
+    ing = await make_ingredient(raw_conn, s["acme_loc"], "Basil")
+    await raw_conn.commit()
+    cm = datetime.now(timezone.utc)
+
+    naive_op = op("ingredients", row_id=ing, location_id=s["acme_loc"],
+                  fields={"name": "Basilico"}, client_mutated_at=cm)
+    naive_op["client_mutated_at"] = cm.replace(tzinfo=None).isoformat()  # no offset
+    r = await push(app_client, s["acme"], [naive_op], actor=s["alice"])
+    assert r.status_code == 422
+
+    aware_op = dict(naive_op)
+    aware_op["client_mutated_at"] = cm.isoformat()  # well-formed "+00:00"
+    r2 = await push(app_client, s["acme"], [aware_op], actor=s["alice"])
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["results"][0]["status"] == "applied"
+
+
+# ---------------------------------------------------------------------------
 # Scheduled-org freeze: 410, whole batch discarded
 # ---------------------------------------------------------------------------
 

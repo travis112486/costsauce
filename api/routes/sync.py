@@ -1,6 +1,35 @@
 # api/routes/sync.py
+"""POST/GET /sync -- the batch push and cursor pull endpoints (Phase 1c, §5-6).
+
+Client contract (read this before writing the Phase 2a device client):
+
+(a) Never adopt this endpoint's response `cursor` as your next pull `since`
+    unless the device is already caught up (i.e. you pulled until
+    `has_more: false` before pushing). POST /sync's cursor is the org's
+    *global* sync_counter at the moment your batch finished applying -- it
+    can be higher than what you've actually pulled if other devices wrote
+    rows in between. Adopting it blind skips those other-device rows
+    forever. Only GET /sync's own returned `cursor` is safe to feed back
+    into the next GET /sync `since`.
+
+(b) A recipe tombstone op does NOT cascade to its recipe_items, unlike
+    DELETE /locations/{id}/recipes/{id} (the route cascades server-side).
+    Sync ops are applied one row at a time with no implicit fan-out --
+    the device must enqueue explicit tombstone ops for every live item
+    row when it tombstones a recipe. cost_recipe's completeness contract
+    surfaces an orphaned live item against a dead recipe loudly (it does
+    not silently drop it), so a client that skips this will see it as a
+    visible data-integrity complaint, not a quiet gap.
+
+(c) purchases.qty_base_units is replicated exactly as sent -- sync trusts
+    the device kernel's own qty/unit -> base-units derivation and does not
+    recompute or validate it server-side. This differs from the route path
+    (POST /locations/{id}/purchases), which derives/validates
+    qty_base_units itself. A device kernel bug here writes wrong data with
+    no server-side backstop.
+"""
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from psycopg.types.json import Jsonb
 from api.auth import CallerIdentity, require_caller
 from api.db import tenant_connection
@@ -73,7 +102,8 @@ async def push(body: SyncPushIn, request: Request,
 
 
 @router.get("/sync")
-async def pull_changes(org_id: uuid.UUID, request: Request, since: int = 0,
+async def pull_changes(org_id: uuid.UUID, request: Request,
+                       since: int = Query(0, ge=0, le=2**62),
                        caller: CallerIdentity = Depends(require_caller)):
     async with tenant_connection(request.app.state.pool, caller.claims) as conn:
         # Reads stay available during the deletion grace window -- the export

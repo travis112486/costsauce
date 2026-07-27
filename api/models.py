@@ -4,7 +4,7 @@ from decimal import Decimal
 from typing import Literal
 import uuid
 
-from pydantic import BaseModel
+from pydantic import AwareDatetime, BaseModel
 
 PLAN_LIMITS = {
     "starter": {"max_locations": 1, "max_invoices_per_month": 30, "max_recipes": 25, "max_members": 1},
@@ -101,7 +101,13 @@ class SyncOpIn(BaseModel):
     table: Literal["ingredients", "recipes", "recipe_items", "purchases"]
     row_id: uuid.UUID
     location_id: uuid.UUID
-    client_mutated_at: datetime
+    # AwareDatetime, not datetime: pydantic v2's plain `datetime` silently
+    # accepts an offsetless string as naive, and the LWW comparison in
+    # api/services/sync.py (`op.client_mutated_at < row_cm`, row_cm always
+    # tz-aware from Postgres) then raises TypeError -- an unhandled 500 on
+    # the update path. Requiring an explicit offset rejects that input at
+    # the door with a 422 instead.
+    client_mutated_at: AwareDatetime
     fields: dict[str, str | None] = {}
 
 

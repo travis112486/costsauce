@@ -129,6 +129,21 @@ async def _apply_update(conn, table, op, row):
         return {"status": "needs_attention",
                 "reason": f"unknown or immutable field: {sorted(unknown)[0]}"}
 
+    if table == "ingredients" and op.fields.get("deleted_at") is not None:
+        # spec line 416: the ingredient in-use guard is otherwise route-only
+        # (DELETE /locations/{id}/ingredients/{id}, api/routes/ingredients.py)
+        # -- a sync tombstone op must not be able to bypass it. Same
+        # location-scoped live-recipe-line count the route runs.
+        cur = await conn.execute(
+            "SELECT count(*) FROM recipe_items"
+            " WHERE ingredient_id = %s AND location_id = %s AND deleted_at IS NULL",
+            (op.row_id, op.location_id))
+        (in_use,) = await cur.fetchone()
+        if in_use:
+            return {"status": "needs_attention",
+                    "reason": "ingredient is used by live recipe lines; "
+                              "remove or merge it first"}
+
     sets = [f"{k} = %s" for k in op.fields]
     sets.append("client_mutated_at = %s")
     values = list(op.fields.values()) + [op.client_mutated_at, op.row_id]
