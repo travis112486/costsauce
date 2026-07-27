@@ -133,17 +133,11 @@ CREATE INDEX recipe_items_server_seq_idx ON recipe_items (server_seq);
 -- ---------------------------------------------------------------------------
 DO $$
 BEGIN
-  DROP TRIGGER IF EXISTS ingredients_sync_stamp ON ingredients;
-  DROP TRIGGER IF EXISTS purchases_sync_stamp ON purchases;
-  DROP TRIGGER IF EXISTS recipes_sync_stamp ON recipes;
-  DROP TRIGGER IF EXISTS recipe_items_sync_stamp ON recipe_items;
-  DROP FUNCTION IF EXISTS sync_row_stamp();
-  DROP ROLE IF EXISTS sync_definer;
-EXCEPTION WHEN OTHERS THEN
-  NULL;
-END $$;
-
-CREATE ROLE sync_definer NOLOGIN NOINHERIT NOBYPASSRLS;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sync_definer') THEN
+    CREATE ROLE sync_definer NOLOGIN NOINHERIT NOBYPASSRLS NOSUPERUSER;
+  END IF;
+END
+$$;
 GRANT sync_definer TO CURRENT_USER;
 
 GRANT USAGE ON SCHEMA public TO sync_definer;
