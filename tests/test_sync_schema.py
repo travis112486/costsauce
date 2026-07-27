@@ -142,6 +142,41 @@ async def test_trigger_names_order_reject_before_stamp(raw_conn):
         assert names.index(f"{table}_reject_scheduled") < names.index(f"{table}_sync_stamp")
 
 
+async def test_route_updates_advance_client_mutated_at(app_client, seeded_biz, raw_conn):
+    """Route UPDATEs must stamp client_mutated_at = now() to ensure LWW
+    works: a web edit beats an older offline device edit."""
+    from tests.factories import make_recipe
+    from tests.test_ingredients_routes import auth
+    s = seeded_biz
+    # Create a recipe via POST — INSERT will set client_mutated_at via DEFAULT
+    r = await app_client.post(
+        f"/locations/{s['acme_loc']}/recipes",
+        json={"name": "Chicken Piccata", "menu_price": "18.99", "target_fc_pct": "35.00",
+              "items": []},
+        headers=auth(s["alice"]))
+    assert r.status_code == 201, r.text
+    recipe_id = r.json()["recipe_id"]
+    await raw_conn.commit()
+    # Read initial client_mutated_at
+    cur = await raw_conn.execute(
+        "SELECT client_mutated_at FROM recipes WHERE id = %s", (recipe_id,))
+    (cm1,) = await cur.fetchone()
+    # PUT a rename — UPDATE must stamp client_mutated_at = now()
+    r = await app_client.put(
+        f"/locations/{s['acme_loc']}/recipes/{recipe_id}",
+        json={"name": "Chicken Piccata Lemon", "menu_price": "19.99", "target_fc_pct": "35.00",
+              "items": []},
+        headers=auth(s["alice"]))
+    assert r.status_code == 200, r.text
+    await raw_conn.commit()
+    # Read updated client_mutated_at
+    cur = await raw_conn.execute(
+        "SELECT client_mutated_at FROM recipes WHERE id = %s", (recipe_id,))
+    (cm2,) = await cur.fetchone()
+    # Verify it advanced (now() moves per statement in PostgreSQL)
+    assert cm2 > cm1, f"client_mutated_at must advance on route UPDATE: {cm1} -> {cm2}"
+
+
 async def test_sync_definer_is_inert(raw_conn):
     """Same hygiene bar rls_definer is held to in test_rls_policies.py."""
     await apply_migrations(raw_conn)

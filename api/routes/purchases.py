@@ -41,3 +41,19 @@ async def create_purchase(location_id: uuid.UUID, body: PurchaseIn,
         r = await cur.fetchone()
     return dict(id=r[0], purchased_on=r[1], qty_base_units=r[2],
                 total_price=r[3], unit_price=r[4])
+
+
+@router.delete("/locations/{location_id}/purchases/{purchase_id}", status_code=204)
+async def tombstone_purchase(location_id: uuid.UUID, purchase_id: uuid.UUID,
+                             request: Request,
+                             caller: CallerIdentity = Depends(require_caller)):
+    """Spec §13: DELETE /purchases/{id} exists so bad data is fixable
+    in-product (B1's recovery gap). Tombstone, never a row DELETE."""
+    async with tenant_connection(request.app.state.pool, caller.claims) as conn:
+        await _require_location(conn, location_id)
+        cur = await conn.execute(
+            "UPDATE purchases SET deleted_at = now(), client_mutated_at = now()"
+            " WHERE id = %s AND location_id = %s AND deleted_at IS NULL",
+            (purchase_id, location_id))
+        if cur.rowcount != 1:
+            raise HTTPException(404, "purchase not found")

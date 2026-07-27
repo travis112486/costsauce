@@ -73,3 +73,43 @@ async def test_foreign_ingredient_404(app_client, seeded_biz, raw_conn):
               "qty": "1", "unit": "lb", "total_price": "4.00"},
         headers=auth(s["alice"]))
     assert r.status_code == 404
+
+
+async def test_delete_purchase_tombstones(app_client, seeded_biz, raw_conn):
+    """Spec §13: DELETE /purchases tombstones, never deletes. Bad data is fixable
+    in-product. Row must have deleted_at set and client_mutated_at advanced."""
+    from tests.factories import make_purchase
+    s = seeded_biz
+    ing = await make_ingredient(raw_conn, s["acme_loc"], "Beef Tenderloin")
+    purchase_id = await make_purchase(
+        raw_conn, s["acme_loc"], ing, "2026-07-15", "10.0", "45.00")
+    await raw_conn.commit()
+    # Read initial state
+    cur = await raw_conn.execute(
+        "SELECT deleted_at, client_mutated_at FROM purchases WHERE id = %s",
+        (purchase_id,))
+    (del1, cm1) = await cur.fetchone()
+    assert del1 is None, "purchase should not be deleted on creation"
+    # DELETE as alice
+    r = await app_client.delete(
+        f"/locations/{s['acme_loc']}/purchases/{purchase_id}",
+        headers=auth(s["alice"]))
+    assert r.status_code == 204, r.text
+    await raw_conn.commit()
+    # Verify tombstone and client_mutated_at advanced
+    cur = await raw_conn.execute(
+        "SELECT deleted_at, client_mutated_at FROM purchases WHERE id = %s",
+        (purchase_id,))
+    (del2, cm2) = await cur.fetchone()
+    assert del2 is not None, "DELETE must set deleted_at"
+    assert cm2 > cm1, f"DELETE must advance client_mutated_at: {cm1} -> {cm2}"
+    # Second DELETE should 404
+    r = await app_client.delete(
+        f"/locations/{s['acme_loc']}/purchases/{purchase_id}",
+        headers=auth(s["alice"]))
+    assert r.status_code == 404, r.text
+    # Cross-org DELETE should 404
+    r = await app_client.delete(
+        f"/locations/{s['acme_loc']}/purchases/{purchase_id}",
+        headers=auth(s["bob"]))
+    assert r.status_code == 404, r.text

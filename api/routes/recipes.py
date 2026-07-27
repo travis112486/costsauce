@@ -83,7 +83,7 @@ async def update_recipe(location_id: uuid.UUID, recipe_id: uuid.UUID,
     async with tenant_connection(request.app.state.pool, caller.claims) as conn:
         await _require_location(conn, location_id)
         cur = await conn.execute(
-            "UPDATE recipes SET name = %s, menu_price = %s, target_fc_pct = %s"
+            "UPDATE recipes SET name = %s, menu_price = %s, target_fc_pct = %s, client_mutated_at = now()"
             " WHERE id = %s AND location_id = %s AND deleted_at IS NULL",
             (body.name.strip(), body.menu_price, body.target_fc_pct,
              recipe_id, location_id))
@@ -101,7 +101,7 @@ async def update_recipe(location_id: uuid.UUID, recipe_id: uuid.UUID,
                         404, f"item {item.id} is not a live line of this recipe")
                 sent_ids.add(item.id)
                 await conn.execute(
-                    "UPDATE recipe_items SET qty_base_units = %s WHERE id = %s",
+                    "UPDATE recipe_items SET qty_base_units = %s, client_mutated_at = now() WHERE id = %s",
                     (item.qty_base_units, item.id))
         for item in body.items:
             if item.id is None:
@@ -109,7 +109,7 @@ async def update_recipe(location_id: uuid.UUID, recipe_id: uuid.UUID,
         removed = live_ids - sent_ids
         if removed:
             await conn.execute(
-                "UPDATE recipe_items SET deleted_at = now() WHERE id = ANY(%s)",
+                "UPDATE recipe_items SET deleted_at = now(), client_mutated_at = now() WHERE id = ANY(%s)",
                 (list(removed),))
         return await _costed_one(conn, location_id, recipe_id)
 
@@ -121,11 +121,11 @@ async def delete_recipe(location_id: uuid.UUID, recipe_id: uuid.UUID,
     async with tenant_connection(request.app.state.pool, caller.claims) as conn:
         await _require_location(conn, location_id)
         cur = await conn.execute(
-            "UPDATE recipes SET deleted_at = now()"
+            "UPDATE recipes SET deleted_at = now(), client_mutated_at = now()"
             " WHERE id = %s AND location_id = %s AND deleted_at IS NULL",
             (recipe_id, location_id))
         if cur.rowcount != 1:
             raise HTTPException(404, "recipe not found")
         await conn.execute(
-            "UPDATE recipe_items SET deleted_at = now()"
+            "UPDATE recipe_items SET deleted_at = now(), client_mutated_at = now()"
             " WHERE recipe_id = %s AND deleted_at IS NULL", (recipe_id,))

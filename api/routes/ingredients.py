@@ -118,7 +118,7 @@ async def tombstone_ingredient(location_id: uuid.UUID, ingredient_id: uuid.UUID,
                 409, f"ingredient is used by {in_use} live recipe line(s); "
                      "remove or merge it first")
         cur = await conn.execute(
-            "UPDATE ingredients SET deleted_at = now()"
+            "UPDATE ingredients SET deleted_at = now(), client_mutated_at = now()"
             " WHERE id = %s AND location_id = %s AND deleted_at IS NULL",
             (ingredient_id, location_id))
         if cur.rowcount != 1:
@@ -168,13 +168,13 @@ async def merge_ingredients(location_id: uuid.UUID, keep_id: uuid.UUID,
             if await cur.fetchone() is None:
                 raise HTTPException(404, f"ingredient {iid} not found")
         cur = await conn.execute(
-            "UPDATE purchases SET ingredient_id = %s WHERE ingredient_id = %s",
+            "UPDATE purchases SET ingredient_id = %s, client_mutated_at = now() WHERE ingredient_id = %s",
             (keep_id, body.from_id))
         repointed_purchases = cur.rowcount
         # 1) sum colliding live lines into the keeper's line
         cur = await conn.execute(
             "UPDATE recipe_items k"
-            "   SET qty_base_units = k.qty_base_units + f.qty_base_units"
+            "   SET qty_base_units = k.qty_base_units + f.qty_base_units, client_mutated_at = now()"
             "  FROM recipe_items f"
             " WHERE k.recipe_id = f.recipe_id"
             "   AND k.ingredient_id = %s AND f.ingredient_id = %s"
@@ -183,7 +183,7 @@ async def merge_ingredients(location_id: uuid.UUID, keep_id: uuid.UUID,
         combined = cur.rowcount
         # 2) tombstone the loser's collided lines
         await conn.execute(
-            "UPDATE recipe_items f SET deleted_at = now()"
+            "UPDATE recipe_items f SET deleted_at = now(), client_mutated_at = now()"
             " WHERE f.ingredient_id = %s AND f.deleted_at IS NULL"
             "   AND EXISTS (SELECT 1 FROM recipe_items k"
             "                WHERE k.recipe_id = f.recipe_id"
@@ -192,12 +192,12 @@ async def merge_ingredients(location_id: uuid.UUID, keep_id: uuid.UUID,
             (body.from_id, keep_id))
         # 3) repoint the loser's remaining live lines
         cur = await conn.execute(
-            "UPDATE recipe_items SET ingredient_id = %s"
+            "UPDATE recipe_items SET ingredient_id = %s, client_mutated_at = now()"
             " WHERE ingredient_id = %s AND deleted_at IS NULL",
             (keep_id, body.from_id))
         repointed_items = cur.rowcount
         await conn.execute(
-            "UPDATE ingredients SET deleted_at = now() WHERE id = %s",
+            "UPDATE ingredients SET deleted_at = now(), client_mutated_at = now() WHERE id = %s",
             (body.from_id,))
     return dict(repointed_purchases=repointed_purchases,
                 repointed_items=repointed_items, combined_items=combined)
