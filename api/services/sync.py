@@ -136,6 +136,79 @@ async def _apply_update(conn, table, op, row):
     return {"status": "applied", "row_id": str(op.row_id)}
 
 
+_PULL = {
+    "ingredients": (
+        "SELECT 'ingredients' AS tbl, t.server_seq AS seq, jsonb_build_object("
+        "'id', t.id::text, 'location_id', t.location_id::text, 'name', t.name,"
+        " 'base_unit', t.base_unit, 'vendor', t.vendor, 'category', t.category,"
+        " 'source', t.source, 'client_mutated_at', t.client_mutated_at::text,"
+        " 'server_seq', t.server_seq, 'updated_at', t.updated_at::text,"
+        " 'deleted_at', t.deleted_at::text, 'created_at', t.created_at::text) AS row"
+        " FROM ingredients t JOIN locations l ON l.id = t.location_id"
+        " WHERE l.org_id = %(org)s AND t.server_seq > %(since)s"),
+    "recipes": (
+        "SELECT 'recipes', t.server_seq, jsonb_build_object("
+        "'id', t.id::text, 'location_id', t.location_id::text, 'name', t.name,"
+        " 'menu_price', t.menu_price::text, 'target_fc_pct', t.target_fc_pct::text,"
+        " 'client_mutated_at', t.client_mutated_at::text, 'server_seq', t.server_seq,"
+        " 'updated_at', t.updated_at::text, 'deleted_at', t.deleted_at::text,"
+        " 'created_at', t.created_at::text)"
+        " FROM recipes t JOIN locations l ON l.id = t.location_id"
+        " WHERE l.org_id = %(org)s AND t.server_seq > %(since)s"),
+    "recipe_items": (
+        "SELECT 'recipe_items', t.server_seq, jsonb_build_object("
+        "'id', t.id::text, 'location_id', t.location_id::text,"
+        " 'recipe_id', t.recipe_id::text, 'ingredient_id', t.ingredient_id::text,"
+        " 'qty_base_units', t.qty_base_units::text,"
+        " 'client_mutated_at', t.client_mutated_at::text, 'server_seq', t.server_seq,"
+        " 'updated_at', t.updated_at::text, 'deleted_at', t.deleted_at::text,"
+        " 'created_at', t.created_at::text)"
+        " FROM recipe_items t JOIN locations l ON l.id = t.location_id"
+        " WHERE l.org_id = %(org)s AND t.server_seq > %(since)s"),
+    "purchases": (
+        "SELECT 'purchases', t.server_seq, jsonb_build_object("
+        "'id', t.id::text, 'location_id', t.location_id::text,"
+        " 'ingredient_id', t.ingredient_id::text, 'purchased_on', t.purchased_on::text,"
+        " 'recorded_at', t.recorded_at::text, 'qty', t.qty::text, 'unit', t.unit,"
+        " 'qty_in_case', t.qty_in_case::text, 'qty_base_units', t.qty_base_units::text,"
+        " 'total_price', t.total_price::text, 'unit_price', t.unit_price::text,"
+        " 'source', t.source, 'client_mutated_at', t.client_mutated_at::text,"
+        " 'server_seq', t.server_seq, 'updated_at', t.updated_at::text,"
+        " 'deleted_at', t.deleted_at::text, 'created_at', t.created_at::text)"
+        " FROM purchases t JOIN locations l ON l.id = t.location_id"
+        " WHERE l.org_id = %(org)s AND t.server_seq > %(since)s"),
+}
+_PULL_SQL = " UNION ALL ".join(_PULL[t] for t in TABLE_ORDER) + \
+    " ORDER BY 2 LIMIT %(lim)s"
+
+
+async def pull(conn, org_id, since, limit=None):
+    """Global cursor pull across all four syncable tables (§5, Task 7).
+
+    `since` is the caller's last-seen server_seq; rows are ordered by
+    server_seq ACROSS tables (column 2 of the UNION ALL, not per-table), so
+    a client walking pages in order sees a single monotonic timeline.
+    Tombstones are included -- a pulled row with deleted_at set IS the
+    delete, there is no separate deletion feed. Fetches `cap + 1` rows to
+    learn whether more remain without a second round trip; `page` is the
+    cap-sized slice actually returned. `limit` is caller-overridable (the
+    page-cap test uses it / monkeypatches SYNC_PAGE_CAP) but the route
+    itself always passes none, so the effective cap is the module constant
+    resolved at call time -- monkeypatching SYNC_PAGE_CAP after import still
+    works because this reads the name from the module's own globals, not a
+    captured default.
+    """
+    cap = limit if limit is not None else SYNC_PAGE_CAP
+    cur = await conn.execute(
+        _PULL_SQL, {"org": org_id, "since": since, "lim": cap + 1})
+    rows = await cur.fetchall()
+    page = rows[:cap]
+    changes = [{"table": tbl, "row": payload} for tbl, _seq, payload in page]
+    return {"changes": changes,
+            "cursor": page[-1][1] if page else since,
+            "has_more": len(rows) > cap}
+
+
 async def _apply_insert(conn, table, op):
     unknown = set(op.fields) - INSERT_FIELDS[table]
     if unknown:

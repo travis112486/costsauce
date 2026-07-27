@@ -70,3 +70,13 @@ async def push(body: SyncPushIn, request: Request,
         (cursor,) = await cur.fetchone()
     return {"results": [results[i] for i in range(len(body.ops))],
             "cursor": cursor}
+
+
+@router.get("/sync")
+async def pull_changes(org_id: uuid.UUID, request: Request, since: int = 0,
+                       caller: CallerIdentity = Depends(require_caller)):
+    async with tenant_connection(request.app.state.pool, caller.claims) as conn:
+        # Reads stay available during the deletion grace window -- the export
+        # path depends on them; only writes are frozen (§6.2).
+        await _require_member_org(conn, org_id)
+        return await svc.pull(conn, org_id, since)
