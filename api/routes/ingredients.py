@@ -1,6 +1,7 @@
 # api/routes/ingredients.py
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, Request
+from psycopg.errors import UniqueViolation
 from api.auth import CallerIdentity, require_caller
 from api.db import tenant_connection
 from api.kernel import match_ingredient, normalize_name
@@ -81,11 +82,19 @@ async def create_ingredient(location_id: uuid.UUID, body: IngredientIn,
             raise HTTPException(
                 409, detail={"detail": "duplicate",
                              "matches": [dict(id=c[0], name=c[1]) for c in exact]})
-        cur = await conn.execute(
-            "INSERT INTO ingredients (location_id, name, base_unit, vendor, category)"
-            " VALUES (%s, %s, %s, %s, %s) RETURNING id::text",
-            (location_id, body.name.strip(), body.base_unit, body.vendor,
-             body.category))
+        try:
+            cur = await conn.execute(
+                "INSERT INTO ingredients (location_id, name, base_unit, vendor, category)"
+                " VALUES (%s, %s, %s, %s, %s) RETURNING id::text",
+                (location_id, body.name.strip(), body.base_unit, body.vendor,
+                 body.category))
+        except UniqueViolation:
+            # Race loser: another create for a normalized-equal name landed
+            # between our scan above and this INSERT. The pre-scan above
+            # answers the common case with named matches; this is the DB-
+            # enforced backstop (migration 0015) for the TOCTOU window.
+            raise HTTPException(
+                409, detail={"detail": "duplicate", "matches": []})
         (iid,) = await cur.fetchone()
     return dict(id=iid, name=body.name.strip(), base_unit=body.base_unit,
                 vendor=body.vendor, category=body.category)
