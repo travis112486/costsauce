@@ -1,5 +1,8 @@
 # api/models.py
+from datetime import date
+from decimal import Decimal
 from typing import Literal
+import uuid
 
 from pydantic import BaseModel
 
@@ -60,3 +63,12 @@ class IngredientIn(BaseModel):
     base_unit: Literal["lb", "oz", "kg", "g", "each"]
     vendor: str | None = None
     category: str | None = None
+
+
+class PurchaseIn(BaseModel):
+    ingredient_id: uuid.UUID
+    purchased_on: date
+    qty: Decimal
+    unit: str
+    total_price: Decimal
+    qty_in_case: Decimal | None = None
