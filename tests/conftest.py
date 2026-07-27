@@ -27,6 +27,7 @@ MIGRATIONS = pathlib.Path(__file__).parent.parent / "supabase" / "migrations"
 TENANT_TABLES = (
     "organizations", "memberships", "locations", "invites",
     "profiles", "email_verifications", "apple_link_requests",
+    "ingredients", "purchases", "recipes", "recipe_items",
 )
 
 

@@ -24,7 +24,9 @@ The brief specified seven assertions; they are all still here, widened:
 """
 import pytest
 from tests.conftest import apply_migrations, TENANT_TABLES
-from tests.factories import make_user, make_org, add_member, make_location
+from tests.factories import (
+    make_user, make_org, add_member, make_location,
+    make_ingredient, make_purchase, make_recipe, add_recipe_item)
 from api.db import pool_open, tenant_connection
 
 
@@ -39,7 +41,7 @@ async def two_orgs(raw_conn):
     Seeded through `raw_conn`, which is the owner and bypasses RLS. Nothing
     below reads it back through that connection.
     """
-    await apply_migrations(raw_conn, upto=4)
+    await apply_migrations(raw_conn)
     alice = await make_user(raw_conn, "alice@acme.test")
     bob = await make_user(raw_conn, "bob@bistro.test")
     acme = await make_org(raw_conn, "Acme Diner")
@@ -61,6 +63,19 @@ async def two_orgs(raw_conn):
 
     ids = dict(alice=alice, bob=bob, mallory=mallory, acme=acme, bistro=bistro,
                alice_m=alice_m, bob_m=bob_m, acme_loc=acme_loc, bistro_loc=bistro_loc)
+
+    # One row per business table per org, through the same factories
+    # `test_business_rls.py` uses -- these tables have no dedicated per-table
+    # loop above because they were not TENANT_TABLES until this task.
+    for side, loc in (("acme", acme_loc), ("bistro", bistro_loc)):
+        ing = await make_ingredient(raw_conn, loc, f"{side}-flour")
+        ids[f"{side}_ing"] = ing
+        ids[f"{side}_purchase"] = await make_purchase(
+            raw_conn, loc, ing, "2026-07-01", 10, 20.00)
+        recipe = await make_recipe(raw_conn, loc, f"{side}-special", 12.00)
+        ids[f"{side}_recipe"] = recipe
+        ids[f"{side}_item"] = await add_recipe_item(raw_conn, loc, recipe, ing, 1)
+
     for side, org, user in (("acme", acme, alice), ("bistro", bistro, bob)):
         cur = await raw_conn.execute(
             "INSERT INTO invites (org_id, email, role, token_hash, invited_by, expires_at)"
@@ -69,9 +84,9 @@ async def two_orgs(raw_conn):
         )
         (ids[f"{side}_invite"],) = await cur.fetchone()
         cur = await raw_conn.execute(
-            "INSERT INTO email_verifications (user_id, token_hash, expires_at)"
-            " VALUES (%s, %s, now() + interval '1 day') RETURNING id",
-            (user, f"verify-{side}"),
+            "INSERT INTO email_verifications (user_id, email, token_hash, expires_at)"
+            " VALUES (%s, %s, %s, now() + interval '1 day') RETURNING id",
+            (user, f"verify-{side}@test.example", f"verify-{side}"),
         )
         (ids[f"{side}_ev"],) = await cur.fetchone()
         cur = await raw_conn.execute(
@@ -137,6 +152,33 @@ def spec(two_orgs):
                     " VALUES (%s, 'trojan-link', now() + interval '1 day')",
                     (str(t["bob"]),)),
         ),
+        "ingredients": dict(
+            key="id", mine=t["acme_ing"], theirs=t["bistro_ing"],
+            col="name", val="pwned",
+            insert=("INSERT INTO ingredients (location_id, name, base_unit)"
+                    " VALUES (%s, 'Trojan', 'lb')", (t["bistro_loc"],)),
+        ),
+        "purchases": dict(
+            key="id", mine=t["acme_purchase"], theirs=t["bistro_purchase"],
+            col="unit", val="pwned",
+            insert=("INSERT INTO purchases (location_id, ingredient_id,"
+                    " purchased_on, qty, unit, qty_base_units, total_price)"
+                    " VALUES (%s, %s, '2026-07-01', 1, 'lb', 1, 1.00)",
+                    (t["bistro_loc"], t["bistro_ing"])),
+        ),
+        "recipes": dict(
+            key="id", mine=t["acme_recipe"], theirs=t["bistro_recipe"],
+            col="name", val="pwned",
+            insert=("INSERT INTO recipes (location_id, name, menu_price)"
+                    " VALUES (%s, 'Trojan', 1.00)", (t["bistro_loc"],)),
+        ),
+        "recipe_items": dict(
+            key="id", mine=t["acme_item"], theirs=t["bistro_item"],
+            col="qty_base_units", val="9.9999",
+            insert=("INSERT INTO recipe_items (location_id, recipe_id,"
+                    " ingredient_id, qty_base_units) VALUES (%s, %s, %s, 1)",
+                    (t["bistro_loc"], t["bistro_recipe"], t["bistro_ing"])),
+        ),
     }
 
 
@@ -181,13 +223,31 @@ async def test_org_a_cannot_update_org_b_row_by_id(db_url, two_orgs, spec, table
     await pool.close()
 
 
+# The four 0012 business tables tombstone (`deleted_at`) rather than hard
+# deleting, and 0012 REVOKEs DELETE from `authenticated` on all four to make
+# that structural rather than a convention -- see that migration's comment
+# and `test_business_rls.py::test_delete_is_not_granted`, which pins the
+# same-org case. That is a grant-level denial ("permission denied"), not an
+# RLS one, and it applies uniformly regardless of whose row is targeted -- so
+# a cross-org DELETE against one of these fails the same way a same-org one
+# does, never reaching the "0 rows matched" RLS outcome the other tenant
+# tables produce.
+NO_DELETE_GRANT_TABLES = {"ingredients", "purchases", "recipes", "recipe_items"}
+
+
 @pytest.mark.parametrize("table", TENANT_TABLES)
 async def test_org_a_cannot_delete_org_b_row(db_url, two_orgs, spec, table):
     s = spec[table]
     pool = await pool_open(app_url(db_url))
-    async with tenant_connection(pool, {"sub": str(two_orgs["alice"])}) as conn:
-        cur = await conn.execute(f"DELETE FROM {table} WHERE {s['key']} = %s", (s["theirs"],))
-        assert cur.rowcount == 0, f"TENANCY LEAK: deleted another org's {table} row"
+    if table in NO_DELETE_GRANT_TABLES:
+        with pytest.raises(Exception) as exc:
+            async with tenant_connection(pool, {"sub": str(two_orgs["alice"])}) as conn:
+                await conn.execute(f"DELETE FROM {table} WHERE {s['key']} = %s", (s["theirs"],))
+        assert "permission denied" in str(exc.value).lower()
+    else:
+        async with tenant_connection(pool, {"sub": str(two_orgs["alice"])}) as conn:
+            cur = await conn.execute(f"DELETE FROM {table} WHERE {s['key']} = %s", (s["theirs"],))
+            assert cur.rowcount == 0, f"TENANCY LEAK: deleted another org's {table} row"
     await pool.close()
 
 
