@@ -94,7 +94,11 @@ export function normalizePurchase({ baseUnit, qty, unit, totalPrice, qtyInCase }
       throw new KernelError(`unsupported unit ${unit}`);
     baseQty = ratDiv(ratMul(q, WEIGHT_TO_LB[unit]), WEIGHT_TO_LB[baseUnit]);
   }
-  return roundHalfAway(baseQty, 4);
+  const result = roundHalfAway(baseQty, 4);
+  if (parseDec(result).n <= 0n)
+    throw new KernelError(
+      "quantity is too small to register at 4 decimal places");
+  return result;
 }
 
 export function unitPrice(totalPrice, qtyBaseUnits) {

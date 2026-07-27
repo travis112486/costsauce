@@ -37,12 +37,24 @@ def norm_purchase(base_unit, qty, unit, total_price, qty_in_case):
     if unit == "case":
         if not qty_in_case or Fraction(qty_in_case) <= 0:
             return None
-        return rha(qty * Fraction(qty_in_case), 4)
-    if base_unit == "each":
-        return rha(qty, 4) if unit == "each" else None
-    if unit not in W or base_unit not in W:
+        result = rha(qty * Fraction(qty_in_case), 4)
+    elif base_unit == "each":
+        if unit != "each":
+            return None
+        result = rha(qty, 4)
+    else:
+        if unit not in W or base_unit not in W:
+            return None
+        result = rha(qty * W[unit] / W[base_unit], 4)
+    # A valid-looking input can still quantize to 0.0000 at 4dp (e.g. a
+    # gram-scale purchase of a lb-tracked ingredient too small to register).
+    # The DB's generated unit_price column is round(total/qty_base_units, 6),
+    # so a zero qty_base_units would divide by zero before the CHECK
+    # constraint ever fires -- the oracle treats underflow-to-zero as an
+    # error, same as every other invalid input.
+    if Fraction(result) <= 0:
         return None
-    return rha(qty * W[unit] / W[base_unit], 4)
+    return result
 
 
 def suggested(plate_cents, target_bp):
@@ -117,6 +129,7 @@ def main():
         ("zero qty", "lb", "0", "lb", "4.00", None),
         ("zero price", "lb", "1", "lb", "0", None),
         ("unknown unit", "lb", "1", "stone", "4.00", None),
+        ("underflow to zero", "lb", "0.00001", "g", "4.00", None),
     ]
     vectors["normalize_purchase"] = []
     for name, b, q, u, t, qc in np_cases:

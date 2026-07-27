@@ -33,6 +33,10 @@ def test_normalize_purchase_paths():
         normalize_purchase("lb", Decimal("1"), "lb", Decimal("0"))
     with pytest.raises(KernelError):
         normalize_purchase("lb", Decimal("1"), "stone", Decimal("4.00"))
+    with pytest.raises(KernelError):   # rounds to 0.0000 at 4dp -- would
+        # divide-by-zero in the DB's generated unit_price column before the
+        # CHECK constraint ever fires
+        normalize_purchase("lb", Decimal("0.00001"), "g", Decimal("4.00"))
 
 
 def test_unit_price_mirrors_db_generated_column():

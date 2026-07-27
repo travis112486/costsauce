@@ -127,6 +127,15 @@
    "total_price": "4.00",
    "qty_in_case": null,
    "expect_error": true
+  },
+  {
+   "name": "underflow to zero",
+   "base_unit": "lb",
+   "qty": "0.00001",
+   "unit": "g",
+   "total_price": "4.00",
+   "qty_in_case": null,
+   "expect_error": true
   }
  ],
  "unit_price": [

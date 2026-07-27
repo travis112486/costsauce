@@ -102,7 +102,11 @@ def normalize_purchase(
             raise KernelError(
                 f"unsupported unit {unit!r} for a weight-tracked ingredient")
         base_qty = Fraction(qty) * WEIGHT_TO_LB[unit] / WEIGHT_TO_LB[base_unit]
-    return round_half_away(base_qty, 4)
+    result = round_half_away(base_qty, 4)
+    if result <= 0:
+        raise KernelError(
+            "quantity is too small to register at 4 decimal places")
+    return result
 
 
 def unit_price(total_price: Decimal, qty_base_units: Decimal) -> Decimal:
