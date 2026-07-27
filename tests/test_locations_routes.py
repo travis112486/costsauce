@@ -84,6 +84,22 @@ async def test_patch_zero_target_fc_pct_is_422(app_client, seeded_biz):
     assert r.status_code == 422
 
 
+async def test_patch_explicit_null_alongside_name_is_422(app_client, seeded_biz):
+    s = seeded_biz
+    r = await app_client.patch(
+        f"/locations/{s['acme_loc']}",
+        json={"name": "Foo", "target_fc_pct": None}, headers=auth(s["alice"]))
+    assert r.status_code == 422
+
+
+async def test_patch_explicit_null_only_is_422(app_client, seeded_biz):
+    s = seeded_biz
+    r = await app_client.patch(
+        f"/locations/{s['acme_loc']}",
+        json={"target_fc_pct": None}, headers=auth(s["alice"]))
+    assert r.status_code == 422
+
+
 async def test_patch_cross_org_is_404(app_client, seeded_biz):
     s = seeded_biz
     r = await app_client.patch(

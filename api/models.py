@@ -94,6 +94,24 @@ class LocationPatch(BaseModel):
     target_fc_pct: Decimal | None = Field(default=None, gt=0)
     drift_threshold_pct: Decimal | None = Field(default=None, gt=0)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_explicit_nulls(cls, data):
+        # pydantic v2 doesn't apply `gt=0` to an explicit JSON `null` on a
+        # `Decimal | None` field (null short-circuits the constraint, since
+        # None is a legitimately-typed value for the field), and
+        # model_dump(exclude_unset=True) treats an explicit null as "set" --
+        # so {"target_fc_pct": null} would otherwise reach the UPDATE as
+        # `target_fc_pct = NULL`, hit the column's NOT NULL, and surface as
+        # an unhandled 500 (NotNullViolation isn't mapped by the global
+        # handler). Rejecting explicit nulls here, before field validation
+        # runs, turns that into a clean 422 instead.
+        if isinstance(data, dict):
+            for key in ("name", "target_fc_pct", "drift_threshold_pct"):
+                if key in data and data[key] is None:
+                    raise ValueError(f"{key} must not be null")
+        return data
+
     @model_validator(mode="after")
     def _at_least_one_and_name_nonempty(self):
         if self.name is not None:
