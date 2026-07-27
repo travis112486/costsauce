@@ -72,3 +72,18 @@ class PurchaseIn(BaseModel):
     unit: str
     total_price: Decimal
     qty_in_case: Decimal | None = None
+
+
+class RecipeItemIn(BaseModel):
+    # stdlib uuid.UUID, not pydantic's UUID4: this project's ids are UUIDv7
+    # (see PurchaseIn above), and UUID4's validator rejects them outright.
+    id: uuid.UUID | None = None
+    ingredient_id: uuid.UUID
+    qty_base_units: Decimal
+
+
+class RecipeIn(BaseModel):
+    name: str
+    menu_price: Decimal
+    target_fc_pct: Decimal = Decimal("30.00")
+    items: list[RecipeItemIn] = []
