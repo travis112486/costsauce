@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import {
   money, pct, signedPct, todayLocalISO, centsFromString, pickDefaultMembership,
 } from "../../web/js/lib.mjs";
-import { parseFragment } from "../../web/js/auth.mjs";
+import { parseFragment, magicLinkBody, gotrueErrorDetail } from "../../web/js/auth.mjs";
 
 test("money formats a decimal string without re-rounding", () => {
   assert.equal(money("3.31"), "$3.31");
@@ -94,4 +94,23 @@ test("parseFragment returns null for an empty fragment", () => {
 
 test("parseFragment returns null when access_token is absent", () => {
   assert.equal(parseFragment("#t=x&foo=bar"), null);
+});
+
+test("magicLinkBody sends the exact frozen GoTrue OTP shape", () => {
+  assert.deepEqual(magicLinkBody("a@b.com", "https://app.costsauce.example"), {
+    email: "a@b.com",
+    create_user: false,
+    options: { email_redirect_to: "https://app.costsauce.example/app/" },
+  });
+});
+
+test("gotrueErrorDetail prefers msg, then error_description, then error", () => {
+  assert.equal(gotrueErrorDetail({ msg: "rate limited" }, 429), "rate limited");
+  assert.equal(gotrueErrorDetail({ error_description: "bad email" }, 400), "bad email");
+  assert.equal(gotrueErrorDetail({ error: "invalid_request" }, 400), "invalid_request");
+});
+
+test("gotrueErrorDetail falls back to a readable string naming the status, never a raw object", () => {
+  assert.equal(gotrueErrorDetail({}, 400), "magic link request failed (HTTP 400)");
+  assert.equal(gotrueErrorDetail(null, 500), "magic link request failed (HTTP 500)");
 });
