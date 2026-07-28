@@ -66,7 +66,7 @@ below if you're only interested in the API/host side.
 Everything Phase 1a-1c already required (`DATABASE_URL`, `JWT_SECRET`,
 `JWT_ISSUER`, `REVIEWER_OTP_ENABLED`/`REVIEWER_EMAIL`/`REVIEWER_CODE`/
 `REVIEWER_USER_ID`, `RETURN_INVITE_TOKEN_ENABLED`, `PURGE_DATABASE_URL`)
-still applies unchanged — see `phase-1a-deploy.md` §9-§11. Phase 1d adds
+still applies unchanged — see `phase-1a-deploy.md` §6-§8. Phase 1d adds
 exactly two, both consumed only by `GET /config`:
 
 | Var | Purpose |
@@ -141,12 +141,16 @@ done
 A short throwaway script (not committed — lives only in a scratch dir),
 reusing `tests.conftest.apply_migrations` and `tests.factories` exactly as
 the test suite does, so the seeded state is provably the same shape the
-1443 pytest cases already exercise:
+1443 pytest cases already exercise. Save it anywhere (e.g.
+`scratch/bootstrap.py`) and run it **from the repo root** with `uv run
+python`, so `tests` resolves as a plain top-level import the same way
+`pyproject.toml`'s `pythonpath = ["."]` makes it resolve for pytest — no
+`sys.path` hacking needed as long as the working directory is the repo
+root when this runs:
 
 ```python
-# bootstrap.py — see task-7-report.md for the full listing
-import asyncio, os, pathlib, sys
-sys.path.insert(0, "/path/to/repo")
+# bootstrap.py — run as: uv run python scratch/bootstrap.py (from repo root)
+import asyncio, os
 import psycopg
 from tests.conftest import apply_migrations
 from tests.factories import make_org, add_member, make_location
@@ -179,8 +183,9 @@ asyncio.run(main())
 ```
 
 ```bash
+# from the repo root:
 DB_URL="postgresql://postgres:postgres@127.0.0.1:55440/postgres" \
-  uv run python bootstrap.py
+  uv run python scratch/bootstrap.py
 # -> ORG_ID=019fa657-92db-748b-acb7-a231055f09e9
 #    LOCATION_ID=019fa657-92e1-76e9-83bd-c7e085c8bd1b
 ```
@@ -212,28 +217,228 @@ project.
 
 ### 4.4 Exercise the flow via curl, as the reviewer token
 
-All steps below ran against the container above and **passed**:
+Every command below is copy-paste runnable in sequence (bash), against the
+server from §4.3, using the `$ORG_ID`/`$LOC_ID` printed by §4.2's bootstrap
+script. All of it ran against the container above and **passed** — the
+inline comments after each block are the actual response bodies observed,
+trimmed only where noted.
 
-| Step | Call | Result |
-|---|---|---|
-| 1 | `GET /config` | `{"supabase_url":null,"supabase_anon_key":null}` |
-| 2 | `GET /app/` | `<!DOCTYPE html>...<title>CostSauce — Food Cost Analysis</title>...` |
-| 3 | `GET /shared/kernel.js` | `// shared/kernel.js` header + kernel source |
-| 4 | `POST /auth/reviewer-otp` `{"email":"reviewer@example.com","code":"123456"}` | `{"access_token": "<jwt>"}` |
-| 5 | `GET /me` | 1 membership, `role":"owner"`, org `Smoke Test Diner` |
-| 6 | `GET /orgs/{org}/locations` | 1 location, `Smoke Test Main`, `target_fc_pct:"30.00"`, `drift_threshold_pct:"5.00"` |
-| 7 | `POST .../ingredients` ×2 | Flour + Sugar created, `201` |
-| 8 | `POST .../purchases` ×2 | Flour `$12.50/10lb`, Sugar `$6.00/5lb`, `unit_price` `1.250000`/`1.200000` |
-| 9 | `POST .../recipes` (2 lines) | `plate_cost:"3.70"`, `fc_pct:"46.3"`, both items `is_resolvable:true` |
-| 10 | `GET .../recipes/{id}` | same 2 item ids captured: `...d29e` (Flour), `...669e` (Sugar) |
-| 11 | `PUT .../recipes/{id}` (Flour qty 2→3, both ids round-tripped) | same 2 item ids echoed back; `plate_cost:"4.95"` |
-| 12 | **SQL**: `SELECT id, qty_base_units, deleted_at FROM recipe_items WHERE recipe_id = <id>` | **exactly 2 rows, `deleted_at` NULL on both, ids identical to step 10/11** — the 1d acceptance criterion: update-in-place, never delete-and-reinsert |
-| 13 | `POST .../purchases/import` (2-row CSV, Butter + Eggs) | `{"rows_processed":2,"created":2,"matched":0,"errors":[]}` |
-| 14 | `PATCH /locations/{id}` `{"drift_threshold_pct":"12.50"}` | `{"drift_threshold_pct":"12.50", ...}` |
-| 15 | `GET .../dashboard` | `location.drift_threshold_pct:"12.50"` — settings change reflected immediately, no cache to invalidate |
+**1. `GET /config`**
 
-Full request/response transcript: `task-7-report.md` (this task's report,
-alongside this runbook).
+```bash
+curl -sS http://127.0.0.1:8400/config
+```
+```
+{"supabase_url":null,"supabase_anon_key":null}
+```
+
+**2. `GET /app/` serves the SPA shell**
+
+```bash
+curl -sS http://127.0.0.1:8400/app/ | head -c 300
+```
+```
+<!DOCTYPE html>
+<html lang="en">
+...
+<title>CostSauce — Food Cost Analysis</title>
+...
+```
+
+**3. `GET /shared/kernel.js` serves the kernel port**
+
+```bash
+curl -sS http://127.0.0.1:8400/shared/kernel.js | head -c 200
+```
+```
+// shared/kernel.js
+// The CostSauce costing kernel, JavaScript implementation. ES module, zero
+// dependencies, Node >= 18 or any modern browser.
+```
+
+**4. `POST /auth/reviewer-otp` — sign in, capture the token**
+
+```bash
+RESP=$(curl -sS -X POST http://127.0.0.1:8400/auth/reviewer-otp \
+  -H "Content-Type: application/json" \
+  -d '{"email":"reviewer@example.com","code":"123456"}')
+echo "$RESP"
+TOKEN=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+```
+```
+{"access_token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTcwMDAtODAwMC0wMDAwMDAwZDFkMDEiLCJhdWQiOiJhdXRoZW50aWNhdGVkIiwiaXNzIjoiY29zdHNhdWNlLXRlc3RzIiwiZXhwIjoxNzg1MjA1ODA3fQ.kj6lavI7grkB-s_7nL7l3rjPwCt6n2mplDs9XnOa0lI"}
+```
+
+**5. `GET /me`**
+
+```bash
+curl -sS http://127.0.0.1:8400/me -H "Authorization: Bearer $TOKEN"
+```
+```json
+{"user_id":"00000000-0000-7000-8000-0000000d1d01","contact_email":"reviewer@example.com",
+ "contact_email_verified":true,"apple_linked":false,
+ "memberships":[{"org_id":"019fa657-92db-748b-acb7-a231055f09e9","org_name":"Smoke Test Diner",
+ "role":"owner","entitlement":{"plan":"starter","max_locations":1,"max_invoices_per_month":30,
+ "max_recipes":25,"max_members":1}}]}
+```
+
+**6. `GET /orgs/{org}/locations`**
+
+```bash
+curl -sS http://127.0.0.1:8400/orgs/$ORG_ID/locations -H "Authorization: Bearer $TOKEN"
+```
+```json
+[{"id":"019fa657-92e1-76e9-83bd-c7e085c8bd1b","name":"Smoke Test Main",
+  "target_fc_pct":"30.00","drift_threshold_pct":"5.00"}]
+```
+
+**7. Create two ingredients, capture their ids**
+
+```bash
+ING1=$(curl -sS -X POST http://127.0.0.1:8400/locations/$LOC_ID/ingredients \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"Flour","base_unit":"lb","vendor":"Acme Foods","category":"Dry Goods"}')
+echo "$ING1"
+ING1_ID=$(echo "$ING1" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+
+ING2=$(curl -sS -X POST http://127.0.0.1:8400/locations/$LOC_ID/ingredients \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"Sugar","base_unit":"lb","vendor":"Acme Foods","category":"Dry Goods"}')
+echo "$ING2"
+ING2_ID=$(echo "$ING2" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+```
+```
+{"id":"019fa658-0f93-7f58-8b3e-756c2b7d30e4","name":"Flour","base_unit":"lb","vendor":"Acme Foods","category":"Dry Goods"}
+{"id":"019fa658-0fe2-7dd2-8565-562b9f6661ab","name":"Sugar","base_unit":"lb","vendor":"Acme Foods","category":"Dry Goods"}
+```
+
+**8. Record a purchase for each ingredient**
+
+```bash
+curl -sS -X POST http://127.0.0.1:8400/locations/$LOC_ID/purchases \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d "{\"ingredient_id\":\"$ING1_ID\",\"purchased_on\":\"2026-07-20\",\"qty\":\"10\",\"unit\":\"lb\",\"total_price\":\"12.50\"}"
+
+curl -sS -X POST http://127.0.0.1:8400/locations/$LOC_ID/purchases \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d "{\"ingredient_id\":\"$ING2_ID\",\"purchased_on\":\"2026-07-20\",\"qty\":\"5\",\"unit\":\"lb\",\"total_price\":\"6.00\"}"
+```
+```
+{"id":"019fa658-3ea2-769f-b96c-bdb7ed55fb23","purchased_on":"2026-07-20","qty_base_units":"10.0000","total_price":"12.50","unit_price":"1.250000"}
+{"id":"019fa658-3ebd-79ba-a0a8-90603564deea","purchased_on":"2026-07-20","qty_base_units":"5.0000","total_price":"6.00","unit_price":"1.200000"}
+```
+
+**9. Create a recipe with 2 lines, capture the recipe id**
+
+```bash
+RECIPE=$(curl -sS -X POST http://127.0.0.1:8400/locations/$LOC_ID/recipes \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d "{\"name\":\"Test Bread\",\"menu_price\":\"8.00\",\"target_fc_pct\":\"30.00\",\"items\":[{\"ingredient_id\":\"$ING1_ID\",\"qty_base_units\":\"2\"},{\"ingredient_id\":\"$ING2_ID\",\"qty_base_units\":\"1\"}]}")
+echo "$RECIPE"
+RECIPE_ID=$(echo "$RECIPE" | python3 -c "import sys,json; print(json.load(sys.stdin)['recipe_id'])")
+```
+```json
+{"recipe_id":"019fa658-3ed1-7991-b013-335e5005cba5","name":"Test Bread","menu_price":"8.00",
+ "target_fc_pct":"30.00","plate_cost":"3.70","fc_pct":"46.3","status":"danger",
+ "suggested_price":"12.50","complete":true,
+ "items":[
+   {"id":"019fa658-3ed6-7374-90af-fa359148d29e","ingredient_id":"019fa658-0f93-7f58-8b3e-756c2b7d30e4",
+    "name":"Flour","qty_base_units":"2.0000","unit_price":"1.250000","cost":"2.50","is_resolvable":true},
+   {"id":"019fa658-3ed9-72d0-8054-f159aab8669e","ingredient_id":"019fa658-0fe2-7dd2-8565-562b9f6661ab",
+    "name":"Sugar","qty_base_units":"1.0000","unit_price":"1.200000","cost":"1.20","is_resolvable":true}]}
+```
+
+**10. `GET` the recipe back, capture both item ids**
+
+```bash
+GETR=$(curl -sS http://127.0.0.1:8400/locations/$LOC_ID/recipes/$RECIPE_ID -H "Authorization: Bearer $TOKEN")
+echo "$GETR"
+ITEM1_ID=$(echo "$GETR" | python3 -c "import sys,json; print(json.load(sys.stdin)['items'][0]['id'])")
+ITEM2_ID=$(echo "$GETR" | python3 -c "import sys,json; print(json.load(sys.stdin)['items'][1]['id'])")
+```
+Response is byte-identical to step 9's. `ITEM1_ID` = `019fa658-3ed6-7374-90af-fa359148d29e`
+(Flour), `ITEM2_ID` = `019fa658-3ed9-72d0-8054-f159aab8669e` (Sugar).
+
+**11. `PUT` the recipe — Flour qty 2→3, both item ids round-tripped in the body**
+
+```bash
+curl -sS -X PUT http://127.0.0.1:8400/locations/$LOC_ID/recipes/$RECIPE_ID \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d "{\"name\":\"Test Bread\",\"menu_price\":\"8.00\",\"target_fc_pct\":\"30.00\",\"items\":[{\"id\":\"$ITEM1_ID\",\"ingredient_id\":\"$ING1_ID\",\"qty_base_units\":\"3\"},{\"id\":\"$ITEM2_ID\",\"ingredient_id\":\"$ING2_ID\",\"qty_base_units\":\"1\"}]}"
+```
+```json
+{"recipe_id":"019fa658-3ed1-7991-b013-335e5005cba5","plate_cost":"4.95","fc_pct":"61.9",
+ "items":[
+   {"id":"019fa658-3ed6-7374-90af-fa359148d29e","qty_base_units":"3.0000","cost":"3.75"},
+   {"id":"019fa658-3ed9-72d0-8054-f159aab8669e","qty_base_units":"1.0000","cost":"1.20"}]}
+```
+Both item ids in the response are exactly `$ITEM1_ID`/`$ITEM2_ID` — no id churn from the update.
+
+**12. SQL assert — the 1d acceptance criterion**
+
+```bash
+docker exec cs-1d-smoke psql -U postgres -d postgres -c \
+  "SELECT id, qty_base_units, deleted_at FROM recipe_items WHERE recipe_id = '$RECIPE_ID' ORDER BY id;"
+docker exec cs-1d-smoke psql -U postgres -d postgres -tAc \
+  "SELECT count(*) FROM recipe_items WHERE recipe_id = '$RECIPE_ID' AND deleted_at IS NULL;"
+docker exec cs-1d-smoke psql -U postgres -d postgres -tAc \
+  "SELECT count(*) FROM recipe_items WHERE recipe_id = '$RECIPE_ID' AND deleted_at IS NULL AND id IN ('$ITEM1_ID','$ITEM2_ID');"
+```
+```
+                  id                  | qty_base_units | deleted_at
+---------------------------------------+----------------+------------
+ 019fa658-3ed6-7374-90af-fa359148d29e |         3.0000 |
+ 019fa658-3ed9-72d0-8054-f159aab8669e |         1.0000 |
+(2 rows)
+
+2
+2
+```
+Exactly 2 live rows, `deleted_at` NULL on both, and both ids match
+`$ITEM1_ID`/`$ITEM2_ID` — `update_recipe` (`api/routes/recipes.py`) updated
+the line in place; it never deleted and reinserted it, and the live line
+count held at 2 across the PUT.
+
+**13. CSV import, 2 rows**
+
+```bash
+cat > import.csv <<'EOF'
+item,vendor,date,qty,unit,total
+Butter,Acme Foods,2026-07-21,4,lb,10.00
+Eggs,Acme Foods,2026-07-21,60,each,9.00
+EOF
+
+curl -sS -X POST http://127.0.0.1:8400/locations/$LOC_ID/purchases/import \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "file=@import.csv;type=text/csv"
+```
+```
+{"rows_processed":2,"created":2,"matched":0,"errors":[]}
+```
+
+**14. `PATCH /locations/{id}` — change the drift threshold**
+
+```bash
+curl -sS -X PATCH http://127.0.0.1:8400/locations/$LOC_ID \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"drift_threshold_pct":"12.50"}'
+```
+```json
+{"id":"019fa657-92e1-76e9-83bd-c7e085c8bd1b","name":"Smoke Test Main",
+ "target_fc_pct":"30.00","drift_threshold_pct":"12.50"}
+```
+
+**15. `GET` the dashboard — confirm the new threshold is reflected**
+
+```bash
+curl -sS http://127.0.0.1:8400/locations/$LOC_ID/dashboard -H "Authorization: Bearer $TOKEN"
+```
+```json
+{"location":{"id":"019fa657-92e1-76e9-83bd-c7e085c8bd1b","name":"Smoke Test Main",
+ "drift_threshold_pct":"12.50"}, "alerts":[], "top_movers":[], "menu_items":[...], "summary":{...}}
+```
+`location.drift_threshold_pct` is `"12.50"` — the settings change from step
+14 is reflected immediately, no cache to invalidate.
 
 ### 4.5 Tear down
 
