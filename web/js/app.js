@@ -13,9 +13,11 @@
 import { api, ApiError, getToken, clearToken } from "./api.mjs";
 import { captureTokenFromFragment, requestMagicLink, reviewerLogin } from "./auth.mjs";
 import {
-  pickDefaultMembership, money, pct, signedPct, todayLocalISO,
+  pickDefaultMembership, money, pct, signedPct, todayLocalISO, centsFromString,
   barWidths, sparklinePoints, buildPurchasePayload,
+  buildRecipePayload, previewCost, buildSettingsPayload,
 } from "./lib.mjs";
+import { fcStatus, suggestedPriceCents } from "/shared/kernel.js";
 
 const CTX_KEY = "cs_ctx";
 const TABS = ["dashboard", "ingredients", "recipes", "import", "settings"];
@@ -264,6 +266,9 @@ function renderShell(me, membership, location) {
 function renderTab(tab, location) {
   if (tab === "dashboard") return renderDashboardTab(location);
   if (tab === "ingredients") return renderIngredientsTab(location);
+  if (tab === "recipes") return renderRecipesTab(location);
+  if (tab === "import") return renderImportTab(location);
+  if (tab === "settings") return renderSettingsTab(location);
   return renderTabStub(tab);
 }
 
@@ -667,6 +672,412 @@ async function resolveIngredientId(name, location) {
     }
     throw err;
   }
+}
+
+// moneyFromCents(cents) -> "12.34" from an EXACT integer cent count (as
+// returned by shared/kernel.js's suggestedPriceCents, or by
+// lib.mjs::previewCost). Pure integer arithmetic (Math.floor/% on an
+// already-integer Number) -- never float division of the kind that would
+// re-introduce the B3 bug this view exists to close. Pairs with
+// money(moneyFromCents(cents)) for display.
+function moneyFromCents(cents) {
+  const neg = cents < 0;
+  const abs = Math.abs(cents);
+  const dollars = Math.floor(abs / 100);
+  const rem = abs % 100;
+  return (neg ? "-" : "") + dollars + "." + String(rem).padStart(2, "0");
+}
+
+// ---------------------------------------------------------------------
+// RECIPES -- GET/POST/PUT/DELETE /locations/{loc}/recipes[/...]. The
+// editor carries each line's item `id` (recipe_items.id) end-to-end and
+// never drops it on save -- the client half of the double-plate-cost bug:
+// the legacy editor (product/static/js/app.js:469) rebuilt its rows from
+// {ingredient_id, qty_base_units} only, so every save re-inserted every
+// line instead of updating in place. The live preview is the B3-JS fix:
+// exact BigInt-rational cost (lib.mjs::previewCost) feeding
+// shared/kernel.js's fcStatus/suggestedPriceCents, not legacy float math.
+// ---------------------------------------------------------------------
+let recipeEditItems = []; // [{id, ingredient_id, qty_base_units}], in DOM order
+
+async function renderRecipesTab(location, editingRecipe) {
+  const content = document.getElementById("tab-content");
+  if (!content) return;
+  content.innerHTML = `<p class="subtle">Loading recipes…</p>`;
+
+  let recipes, ingredients;
+  try {
+    [recipes, ingredients] = await Promise.all([
+      api(`/locations/${location.id}/recipes`),
+      api(`/locations/${location.id}/ingredients`),
+    ]);
+  } catch (e) {
+    content.innerHTML = `<div class="empty-state"><h3>Couldn't load recipes</h3><p>${escapeHtml(errorMessage(e))}</p></div>`;
+    return;
+  }
+
+  const priceIndex = {};
+  ingredients.forEach((i) => { priceIndex[i.id] = i.latest_price; });
+
+  const listHtml = recipes.length ? `
+    <div class="table-scroll"><table>
+      <thead><tr><th>Recipe</th><th>Plate cost</th><th>Menu price</th><th>FC%</th><th>Status</th><th>Suggested</th><th></th></tr></thead>
+      <tbody>${recipes.map((r) => {
+        const status = r.status || "incomplete";
+        return `
+        <tr>
+          <td>${escapeHtml(r.name)}</td>
+          <td>${escapeHtml(money(r.plate_cost))}</td>
+          <td>${escapeHtml(money(r.menu_price))}</td>
+          <td>${escapeHtml(pct(r.fc_pct))}</td>
+          <td><span class="chip chip-${escapeHtml(status)}">${escapeHtml(status)}</span></td>
+          <td>${escapeHtml(money(r.suggested_price))}</td>
+          <td>
+            <button class="btn btn-secondary btn-sm" type="button" data-edit-recipe="${escapeHtml(r.recipe_id)}">Edit</button>
+            <button class="btn btn-danger btn-sm" type="button" data-delete-recipe="${escapeHtml(r.recipe_id)}">Delete</button>
+          </td>
+        </tr>`;
+      }).join("")}</tbody>
+    </table></div>` : `<div class="empty-state"><h3>No recipes yet</h3><p>Build your first one below.</p></div>`;
+
+  const editing = editingRecipe || null;
+  recipeEditItems = editing
+    ? editing.items.map((it) => ({ id: it.id, ingredient_id: it.ingredient_id, qty_base_units: it.qty_base_units }))
+    : [{ id: null, ingredient_id: ingredients[0] ? ingredients[0].id : "", qty_base_units: "1" }];
+
+  content.innerHTML = `
+    <div class="section-header"><h2>Recipes</h2></div>
+    <div class="card">${listHtml}</div>
+
+    <div class="section-header"><h2>${editing ? "Edit recipe" : "Build a recipe"}</h2></div>
+    <div class="card">
+      <form id="recipe-form">
+        <div class="entry-form" style="margin-bottom:12px;">
+          <div class="field">
+            <label>Name</label>
+            <input type="text" id="r-name" value="${editing ? escapeHtml(editing.name) : ""}" required>
+          </div>
+          <div class="field">
+            <label>Menu price</label>
+            <input type="number" id="r-menu-price" step="0.01" min="0.01" value="${editing ? escapeHtml(editing.menu_price) : ""}" required>
+          </div>
+          <div class="field">
+            <label>Target food cost %</label>
+            <input type="number" id="r-target" step="0.1" min="0.1" value="${editing ? escapeHtml(editing.target_fc_pct) : "30"}" required>
+          </div>
+        </div>
+
+        <div id="recipe-items"></div>
+        <button type="button" class="btn btn-secondary btn-sm" id="add-item">+ Add ingredient</button>
+
+        <div class="recipe-summary" id="recipe-preview"></div>
+
+        <button class="btn" type="submit">${editing ? "Save changes" : "Create recipe"}</button>
+        ${editing ? `<button type="button" class="btn btn-secondary" id="cancel-edit">Cancel</button>` : ""}
+      </form>
+    </div>`;
+
+  content.querySelectorAll("[data-edit-recipe]").forEach((b) => {
+    b.addEventListener("click", () => {
+      const r = recipes.find((x) => x.recipe_id === b.dataset.editRecipe);
+      if (r) renderRecipesTab(location, r);
+    });
+  });
+  content.querySelectorAll("[data-delete-recipe]").forEach((b) => {
+    b.addEventListener("click", () => deleteRecipe(b.dataset.deleteRecipe, location));
+  });
+  if (editing) {
+    document.getElementById("cancel-edit").addEventListener("click", () => renderRecipesTab(location));
+  }
+
+  document.getElementById("add-item").addEventListener("click", () => {
+    recipeEditItems.push({ id: null, ingredient_id: ingredients[0] ? ingredients[0].id : "", qty_base_units: "1" });
+    drawRecipeItems(ingredients, priceIndex);
+  });
+
+  document.getElementById("r-menu-price").addEventListener("input", () => updateRecipePreview(priceIndex));
+  document.getElementById("r-target").addEventListener("input", () => updateRecipePreview(priceIndex));
+  document.getElementById("recipe-form").addEventListener("submit", (e) => handleRecipeSubmit(e, location, editing));
+
+  drawRecipeItems(ingredients, priceIndex);
+}
+
+// drawRecipeItems -- redraws the ingredient/qty rows from recipeEditItems
+// and rewires their listeners. A row whose ingredient_id isn't in the
+// live `ingredients` list (a tombstoned ingredient still on an existing
+// recipe line) gets a synthetic "unavailable" option so the <select>'s
+// actual selection still matches recipeEditItems -- it stays excluded from
+// priceIndex, so the preview correctly treats it as unresolvable.
+function drawRecipeItems(ingredients, priceIndex) {
+  const el = document.getElementById("recipe-items");
+  if (!el) return;
+  el.innerHTML = recipeEditItems.map((row) => {
+    const known = ingredients.some((i) => i.id === row.ingredient_id);
+    const unavailableOption = known ? "" :
+      `<option value="${escapeHtml(row.ingredient_id)}" selected>Unavailable ingredient</option>`;
+    return `
+      <div class="recipe-item-row">
+        <select class="ri-ingredient">
+          ${unavailableOption}
+          ${ingredients.map((i) => `<option value="${escapeHtml(i.id)}" ${i.id === row.ingredient_id ? "selected" : ""}>${escapeHtml(i.name)} (${escapeHtml(i.base_unit)})</option>`).join("")}
+        </select>
+        <input type="text" class="ri-qty" value="${escapeHtml(row.qty_base_units)}" inputmode="decimal" placeholder="qty">
+        <button type="button" class="btn btn-danger btn-sm ri-remove">✕</button>
+      </div>`;
+  }).join("");
+
+  Array.from(el.querySelectorAll(".recipe-item-row")).forEach((rowEl, idx) => {
+    rowEl.querySelector(".ri-ingredient").addEventListener("change", (e) => {
+      recipeEditItems[idx].ingredient_id = e.target.value;
+      updateRecipePreview(priceIndex);
+    });
+    rowEl.querySelector(".ri-qty").addEventListener("input", (e) => {
+      recipeEditItems[idx].qty_base_units = e.target.value;
+      updateRecipePreview(priceIndex);
+    });
+    rowEl.querySelector(".ri-remove").addEventListener("click", () => {
+      recipeEditItems.splice(idx, 1);
+      drawRecipeItems(ingredients, priceIndex);
+    });
+  });
+
+  updateRecipePreview(priceIndex);
+}
+
+// updateRecipePreview -- the exact live preview (B3-JS fix). previewCost
+// sums every line's qty * unit_price as BigInt rationals and rounds to
+// cents exactly once; the resulting cents feed straight into
+// shared/kernel.js's fcStatus/suggestedPriceCents, so this always matches
+// what the server would compute for the same inputs. Never throws into
+// the caller: any parse failure (mid-edit qty, empty menu price, ...)
+// degrades to dashes, never NaN.
+function updateRecipePreview(priceIndex) {
+  const preview = document.getElementById("recipe-preview");
+  if (!preview) return;
+
+  let plateCents = null, complete = true;
+  try {
+    ({ cents: plateCents, complete } = previewCost(recipeEditItems, priceIndex));
+  } catch (e) {
+    plateCents = null; // an unparsable qty mid-edit -- show dashes, don't crash
+  }
+
+  const menuPriceStr = document.getElementById("r-menu-price").value.trim();
+  const targetStr = document.getElementById("r-target").value.trim();
+
+  let fcCell = "—";
+  let statusHtml = `<span class="chip chip-incomplete">incomplete</span>`;
+  let suggestedCell = "—";
+
+  if (plateCents !== null && complete) {
+    try {
+      const menuCents = menuPriceStr ? centsFromString(menuPriceStr) : 0;
+      const targetBp = targetStr ? centsFromString(targetStr) : 0;
+      if (menuCents > 0 && targetBp > 0) {
+        const result = fcStatus(plateCents, menuCents, targetBp);
+        const suggested = suggestedPriceCents(plateCents, targetBp);
+        fcCell = pct(result.fc);
+        statusHtml = `<span class="chip chip-${escapeHtml(result.status)}">${escapeHtml(result.status)}</span>`;
+        suggestedCell = money(moneyFromCents(suggested));
+      }
+    } catch (e) {
+      // invalid/incomplete menu price or target mid-edit -- leave dashes
+    }
+  }
+
+  preview.innerHTML = `
+    <div class="stat"><div class="num">${escapeHtml(plateCents === null ? "—" : money(moneyFromCents(plateCents)))}</div><div class="lbl">Plate cost</div></div>
+    <div class="stat"><div class="num">${escapeHtml(fcCell)}</div><div class="lbl">Food cost %</div></div>
+    <div class="stat"><div class="num">${statusHtml}</div><div class="lbl">Status</div></div>
+    <div class="stat"><div class="num">${escapeHtml(suggestedCell)}</div><div class="lbl">Suggested price</div></div>
+    ${!complete ? `<div class="stat" style="grid-column:1/-1;"><span class="subtle">Preview incomplete — one or more ingredients don't have a price yet.</span></div>` : ""}
+  `;
+}
+
+async function handleRecipeSubmit(e, location, editing) {
+  e.preventDefault();
+  const editingState = {
+    name: document.getElementById("r-name").value.trim(),
+    menu_price: document.getElementById("r-menu-price").value.trim(),
+    target_fc_pct: document.getElementById("r-target").value.trim(),
+    items: recipeEditItems.filter(
+      (it) => it.ingredient_id && String(it.qty_base_units).trim() !== ""),
+  };
+  if (editingState.items.length === 0) {
+    toast("Add at least one ingredient.", true);
+    return;
+  }
+
+  const isCreate = !editing;
+  const payload = buildRecipePayload(editingState, isCreate);
+  try {
+    if (editing) {
+      await api(`/locations/${location.id}/recipes/${editing.recipe_id}`, { method: "PUT", body: payload });
+      toast("Recipe updated.");
+    } else {
+      await api(`/locations/${location.id}/recipes`, { method: "POST", body: payload });
+      toast("Recipe created.");
+    }
+    renderRecipesTab(location);
+  } catch (err) {
+    toast("Couldn't save recipe: " + errorMessage(err), true);
+  }
+}
+
+async function deleteRecipe(id, location) {
+  try {
+    await api(`/locations/${location.id}/recipes/${id}`, { method: "DELETE" });
+    toast("Recipe deleted.");
+    renderRecipesTab(location);
+  } catch (e) {
+    toast("Couldn't delete recipe: " + errorMessage(e), true);
+  }
+}
+
+// ---------------------------------------------------------------------
+// IMPORT -- CSV only. No invoice photo upload/list/attach in this client
+// (the legacy invoice-photo flow and invoice_id attach are dropped
+// entirely, per the frozen contract -- purchases carry no invoice_id).
+// ---------------------------------------------------------------------
+async function renderImportTab(location) {
+  const content = document.getElementById("tab-content");
+  if (!content) return;
+  content.innerHTML = `
+    <div class="section-header"><h2>Import purchases</h2></div>
+    <div class="card">
+      <p class="subtle">Paste or upload a CSV with columns: <code>item,vendor,date,qty,unit,total</code></p>
+      <form id="csv-form">
+        <div class="field">
+          <label>Paste CSV</label>
+          <textarea id="csv-text" placeholder="item,vendor,date,qty,unit,total
+chicken breast,Reinhart,2026-07-20,30,lb,102.50"></textarea>
+        </div>
+        <div class="field" style="margin-top:8px;">
+          <label>...or upload a .csv file</label>
+          <input type="file" id="csv-file" accept=".csv,text/csv">
+        </div>
+        <button class="btn" type="submit" style="margin-top:10px;">Import</button>
+      </form>
+      <div id="import-result"></div>
+    </div>`;
+
+  document.getElementById("csv-form").addEventListener("submit", (e) => handleImportSubmit(e, location));
+}
+
+async function handleImportSubmit(e, location) {
+  e.preventDefault();
+  const file = document.getElementById("csv-file").files[0];
+  const text = document.getElementById("csv-text").value.trim();
+  if (!file && !text) {
+    toast("Paste some CSV or choose a file first.", true);
+    return;
+  }
+
+  const fd = new FormData();
+  if (file) {
+    fd.append("file", file);
+  } else {
+    fd.append("csv_text", text);
+  }
+
+  let result;
+  try {
+    result = await api(`/locations/${location.id}/purchases/import`, { method: "POST", body: fd });
+  } catch (err) {
+    toast("Import failed: " + errorMessage(err), true);
+    return;
+  }
+
+  const errHtml = result.errors.length
+    ? `<p style="color:var(--paprika)">${escapeHtml(String(result.errors.length))} row(s) had errors: ${result.errors.map((er) => `row ${escapeHtml(String(er.row))}: ${escapeHtml(er.error)}`).join("; ")}</p>`
+    : "";
+  document.getElementById("import-result").innerHTML = `
+    <div class="match-hint" style="margin-top:10px;">
+      Processed ${escapeHtml(String(result.rows_processed))} row(s): ${escapeHtml(String(result.created))} new ingredient(s), ${escapeHtml(String(result.matched))} matched to existing.
+    </div>${errHtml}`;
+  toast(`Imported ${result.rows_processed} row(s).`);
+}
+
+// ---------------------------------------------------------------------
+// SETTINGS -- current location's row from GET /orgs/{org}/locations;
+// PATCH /locations/{loc} via buildSettingsPayload. 403 (non-owner/manager)
+// gets a fixed, specific toast rather than the raw server detail.
+// ---------------------------------------------------------------------
+async function renderSettingsTab(location) {
+  const content = document.getElementById("tab-content");
+  if (!content) return;
+  content.innerHTML = `<p class="subtle">Loading settings…</p>`;
+
+  const ctx = getCtx();
+  let locations;
+  try {
+    locations = await api(`/orgs/${ctx.org_id}/locations`);
+  } catch (e) {
+    content.innerHTML = `<div class="empty-state"><h3>Couldn't load settings</h3><p>${escapeHtml(errorMessage(e))}</p></div>`;
+    return;
+  }
+  const current = locations.find((l) => l.id === location.id);
+  if (!current) {
+    content.innerHTML = `<div class="empty-state"><h3>Couldn't load settings</h3><p>This location is no longer available.</p></div>`;
+    return;
+  }
+
+  content.innerHTML = `
+    <div class="section-header"><h2>Settings</h2></div>
+    <div class="card" style="max-width:480px;">
+      <form id="settings-form">
+        <div class="field" style="margin-bottom:12px;">
+          <label>Restaurant name</label>
+          <input type="text" id="s-name" value="${escapeHtml(current.name)}">
+        </div>
+        <div class="field" style="margin-bottom:12px;">
+          <label>Default target food cost % (new recipes)</label>
+          <input type="number" id="s-target" step="0.1" min="0.1" value="${escapeHtml(current.target_fc_pct)}">
+        </div>
+        <div class="field" style="margin-bottom:12px;">
+          <label>Drift alert threshold %</label>
+          <input type="number" id="s-threshold" step="0.1" min="0.1" value="${escapeHtml(current.drift_threshold_pct)}">
+        </div>
+        <button class="btn" type="submit">Save settings</button>
+      </form>
+    </div>`;
+
+  document.getElementById("settings-form").addEventListener("submit", (e) => handleSettingsSubmit(e, location, current));
+}
+
+async function handleSettingsSubmit(e, location, current) {
+  e.preventDefault();
+  const form = {
+    name: document.getElementById("s-name").value.trim(),
+    target_fc_pct: document.getElementById("s-target").value.trim(),
+    drift_threshold_pct: document.getElementById("s-threshold").value.trim(),
+  };
+  const payload = buildSettingsPayload(form, current);
+  if (!payload) {
+    toast("Nothing changed.");
+    return;
+  }
+
+  let updated;
+  try {
+    updated = await api(`/locations/${location.id}`, { method: "PATCH", body: payload });
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 403) {
+      toast("owner or manager required", true);
+    } else {
+      toast("Couldn't save settings: " + errorMessage(err), true);
+    }
+    return;
+  }
+
+  toast("Settings saved.");
+  // Update the topbar and the in-memory location object shared across tabs
+  // (the cached ctx) so switching tabs afterward keeps showing the new name.
+  location.name = updated.name;
+  location.target_fc_pct = updated.target_fc_pct;
+  location.drift_threshold_pct = updated.drift_threshold_pct;
+  const nameEl = document.getElementById("restaurant-name");
+  if (nameEl) nameEl.textContent = updated.name;
 }
 
 function signOut() {

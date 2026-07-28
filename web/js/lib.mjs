@@ -135,3 +135,142 @@ export function buildPurchasePayload(form) {
   }
   return payload;
 }
+
+// ---------------------------------------------------------------------
+// recipes -- editor payload (the item.id round-trip / B-fix) + exact live
+// preview (the B3-JS fix). See tests/js/web-lib.test.mjs for the golden-
+// vector pin against shared/kernel.js.
+// ---------------------------------------------------------------------
+
+// buildRecipePayload(editing, isCreate) -> the exact POST/PUT
+// .../recipes body. `editing` is the editor's in-memory state: { name,
+// menu_price, target_fc_pct, items: [{id, ingredient_id, qty_base_units},
+// ...] }, where a line's `id` is the recipe_items row id for an existing
+// line (read straight off the costed payload's items[].id and carried
+// through every re-render) or null/undefined for a line added in this
+// editing session.
+//
+// On create, the server 422s if ANY item carries an `id` at all, so every
+// id key is stripped outright regardless of what's on the line. On
+// update, existing lines keep their id (so the server updates that row in
+// place); new lines omit the key entirely (so the server inserts); a line
+// the user removed is simply absent from `editing.items` -- the server
+// tombstones anything missing from the sent id set. This is the client
+// half of the double-plate-cost bug: the legacy editor
+// (product/static/js/app.js:469) rebuilt its rows from `{ingredient_id,
+// qty_base_units}` only, silently dropping `id` on every edit, so a save
+// re-inserted every line instead of updating in place.
+//
+// All scalar values (name/menu_price/target_fc_pct/qty_base_units) pass
+// through as the raw input strings -- never parseFloat'd -- and
+// ingredient_id (a UUID string) is never touched.
+export function buildRecipePayload(editing, isCreate) {
+  const items = (editing.items || []).map((it) => {
+    const line = { ingredient_id: it.ingredient_id, qty_base_units: it.qty_base_units };
+    if (!isCreate && it.id !== null && it.id !== undefined) {
+      line.id = it.id;
+    }
+    return line;
+  });
+  return {
+    name: editing.name,
+    menu_price: editing.menu_price,
+    target_fc_pct: editing.target_fc_pct,
+    items,
+  };
+}
+
+// ratFromString(s) -> {n: BigInt, d: BigInt}, the exact rational a decimal
+// string represents. Mirrors shared/kernel.js's internal parseDec,
+// deliberately duplicated rather than imported -- lib.mjs stays a
+// standalone module with zero imports (see file header), and this is the
+// one place besides centsFromString that needs exact decimal parsing.
+// Throws on anything that isn't an optionally-signed plain decimal (empty
+// string, "abc", "1.2.3", ...).
+export function ratFromString(s) {
+  const m = /^(-?)(\d+)(?:\.(\d+))?$/.exec(String(s).trim());
+  if (!m) throw new Error(`not a decimal string: ${JSON.stringify(s)}`);
+  const [, sign, ip, fp = ""] = m;
+  const n = BigInt(ip + fp) * (sign === "-" ? -1n : 1n);
+  const d = 10n ** BigInt(fp.length);
+  return { n, d };
+}
+
+function ratMul(a, b) {
+  return { n: a.n * b.n, d: a.d * b.d };
+}
+
+function ratAdd(a, b) {
+  return { n: a.n * b.d + b.n * a.d, d: a.d * b.d };
+}
+
+// centsFromRat(rat) -> the dollar rational `rat` rounded half-away-from-
+// zero to the nearest cent, as an integer. Bit-for-bit the same rounding
+// shared/kernel.js's roundHalfAway(rat, 2) performs (its `q` before the
+// ip/fp string split IS the cent count) -- reimplemented locally rather
+// than imported, for the same standalone-module reason as ratFromString.
+function centsFromRat(rat) {
+  let { n, d } = rat;
+  const neg = n < 0n;
+  if (neg) n = -n;
+  const scale = 100n;
+  const q = (2n * n * scale + d) / (2n * d);
+  return neg ? -Number(q) : Number(q);
+}
+
+// previewCost(lines, priceIndex) -> {cents, complete}, the recipe editor's
+// live plate-cost preview. `lines` are the editor's current
+// {ingredient_id, qty_base_units} rows (qty as the raw input string);
+// `priceIndex` maps ingredient_id -> unit_price string (or null/undefined
+// for an ingredient with no resolvable price).
+//
+// This is the B3-JS fix: the legacy preview
+// (product/static/js/app.js:563,568) accumulated `plateCost += latest_price
+// * qty_base_units` in plain floats and derived the suggested price via
+// `Math.ceil((plateCost / (target/100)) * 2) / 2`, which can disagree with
+// the server's exact BigInt-rational kernel at the boundary. Here every
+// line's contribution is computed as an exact BigInt rational
+// (qty * unit_price), summed exactly, and rounded to cents exactly once at
+// the very end -- feed that cents value straight into shared/kernel.js's
+// fcStatus/suggestedPriceCents and the preview matches the server exactly.
+//
+// A line with no known price is EXCLUDED from the sum (never contributes
+// NaN) and flips `complete` to false so the caller can show "preview
+// incomplete" instead of a misleadingly-precise total.
+export function previewCost(lines, priceIndex) {
+  let sum = { n: 0n, d: 1n };
+  let complete = true;
+  for (const line of lines || []) {
+    const price = priceIndex ? priceIndex[line.ingredient_id] : undefined;
+    if (price === null || price === undefined) {
+      complete = false;
+      continue;
+    }
+    const qty = ratFromString(line.qty_base_units);
+    const unitPrice = ratFromString(price);
+    sum = ratAdd(sum, ratMul(qty, unitPrice));
+  }
+  return { cents: centsFromRat(sum), complete };
+}
+
+// buildSettingsPayload(form, current) -> the exact PATCH /locations/{loc}
+// body, or null when nothing changed. `form` carries the settings form's
+// current (string) field values; `current` is the location row the form
+// was seeded from (also strings, straight off the API). Only fields that
+// differ from `current` are sent -- the server rejects an explicit null
+// with a 422 (a field it doesn't know changed must simply be absent, not
+// null), and re-sending unchanged values is a needless write. Comparison
+// is plain string equality; nothing here is parsed as a number.
+export function buildSettingsPayload(form, current) {
+  const payload = {};
+  if (form.name !== undefined && form.name !== current.name) {
+    payload.name = form.name;
+  }
+  if (form.target_fc_pct !== undefined && form.target_fc_pct !== current.target_fc_pct) {
+    payload.target_fc_pct = form.target_fc_pct;
+  }
+  if (form.drift_threshold_pct !== undefined && form.drift_threshold_pct !== current.drift_threshold_pct) {
+    payload.drift_threshold_pct = form.drift_threshold_pct;
+  }
+  return Object.keys(payload).length === 0 ? null : payload;
+}
