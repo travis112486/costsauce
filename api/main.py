@@ -3,10 +3,12 @@ import os
 import re
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import psycopg
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from api.auth import _decode
 from api.db import pool_open, tenant_connection
@@ -155,6 +157,33 @@ def create_app() -> FastAPI:
     app.include_router(locations.router)
     app.include_router(sync.router)
     app.post("/auth/reviewer-otp", include_in_schema=False)(reviewer_otp)
+
+    # /config bootstrap endpoint: returns Supabase credentials for SPA init.
+    @app.get("/config")
+    async def get_config():
+        return {
+            "supabase_url": os.environ.get("SUPABASE_URL"),
+            "supabase_anon_key": os.environ.get("SUPABASE_ANON_KEY"),
+        }
+
+    # / redirects to /app/
+    @app.get("/", include_in_schema=False)
+    async def redirect_to_app():
+        return RedirectResponse(url="/app/", status_code=307)
+
+    # Compute paths CWD-independent: repo root is parent of api/ directory.
+    repo_root = Path(__file__).resolve().parents[1]
+    shared_dir = repo_root / "shared"
+    web_dir = repo_root / "web"
+
+    # Mount /shared static files (e.g., kernel.js).
+    if shared_dir.is_dir():
+        app.mount("/shared", StaticFiles(directory=shared_dir), name="shared")
+
+    # Mount /app static files with html=True for SPA routing.
+    if web_dir.is_dir():
+        app.mount("/app", StaticFiles(directory=web_dir, html=True), name="web")
+
     return app
 
 
