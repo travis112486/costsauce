@@ -173,3 +173,58 @@ async def test_header_only_csv_is_zeros(app_client, seeded_biz):
         headers=auth(s["alice"]))
     assert r.status_code == 200, r.text
     assert r.json() == {"rows_processed": 0, "created": 0, "matched": 0, "errors": []}
+
+
+async def test_bom_prefixed_csv_text_imports(app_client, seeded_biz):
+    """Fix report round 2, Important-1: Excel's 'CSV UTF-8' export prepends
+    a U+FEFF BOM. Before the fix this glued onto the first header
+    ("﻿item"), so the required-column check 400'd on a CSV that
+    plainly has an `item` column."""
+    s = seeded_biz
+    csv_text = "﻿" + CSV_TWO_ROWS
+    r = await app_client.post(
+        f"/locations/{s['acme_loc']}/purchases/import",
+        data={"csv_text": csv_text},
+        headers=auth(s["alice"]))
+    assert r.status_code == 200, r.text
+    assert r.json() == {"rows_processed": 2, "created": 2, "matched": 0, "errors": []}
+
+
+async def test_bom_prefixed_file_upload_imports(app_client, seeded_biz):
+    s = seeded_biz
+    csv_bytes = "﻿".encode("utf-8") + CSV_TWO_ROWS.encode("utf-8")
+    r = await app_client.post(
+        f"/locations/{s['acme_loc']}/purchases/import",
+        files={"file": ("p.csv", csv_bytes, "text/csv")},
+        headers=auth(s["alice"]))
+    assert r.status_code == 200, r.text
+    assert r.json() == {"rows_processed": 2, "created": 2, "matched": 0, "errors": []}
+
+
+async def test_blank_line_preserves_physical_row_numbers(app_client, seeded_biz, raw_conn):
+    """Fix report round 2, Important-2: DictReader silently skips blank
+    physical lines, so a plain `enumerate(reader, start=2)` undercounts once
+    a CSV has one. The frozen contract is "row = physical line, header = 1"
+    -- reader.line_num must be used instead so the reported row still lines
+    up with what a human counts opening the file."""
+    s = seeded_biz
+    csv_text = (
+        "item,vendor,date,qty,unit,total\n"          # line 1 (header)
+        "Flour,Vendor A,2026-07-01,10,lb,20.00\n"     # line 2 (good)
+        "\n"                                           # line 3 (blank)
+        "Sugar,Vendor B,not-a-date,5,lb,10.00\n"      # line 4 (bad date)
+    )
+    r = await app_client.post(
+        f"/locations/{s['acme_loc']}/purchases/import",
+        data={"csv_text": csv_text},
+        headers=auth(s["alice"]))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["rows_processed"] == 2                # blank line isn't a data row
+    assert body["created"] == 1                        # Flour landed
+    assert len(body["errors"]) == 1
+    assert body["errors"][0]["row"] == 4                # physical line, not sequence position
+
+    cur = await raw_conn.execute(
+        "SELECT count(*) FROM purchases WHERE location_id = %s", (s["acme_loc"],))
+    assert (await cur.fetchone())[0] == 1

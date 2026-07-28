@@ -35,9 +35,12 @@ async def import_purchases(location_id: uuid.UUID, request: Request,
                            csv_text: str | None = Form(None),
                            caller: CallerIdentity = Depends(require_caller)):
     if file is not None:
-        content = (await file.read()).decode("utf-8", errors="ignore")
+        # utf-8-sig: Excel's "CSV UTF-8" export prepends a BOM. Plain "utf-8"
+        # leaves it attached to the first header ("﻿item"), which then
+        # fails the required-column check even though "item" is right there.
+        content = (await file.read()).decode("utf-8-sig", errors="ignore")
     elif csv_text:
-        content = csv_text
+        content = csv_text.lstrip("﻿")
     else:
         raise HTTPException(422, "provide a file or csv_text")
 
@@ -59,7 +62,14 @@ async def import_purchases(location_id: uuid.UUID, request: Request,
         # DB's unique index (migration 0015).
         cands = list(await _candidates(conn, location_id))
 
-        for i, row in enumerate(reader, start=2):
+        for row in reader:
+            # reader.line_num, not enumerate(start=2): DictReader silently
+            # skips blank physical lines, so a plain counter drifts off the
+            # "row = physical line, header = 1" contract the moment a CSV
+            # has a blank line in it. line_num already counts every
+            # physical line the underlying csv.reader has consumed,
+            # blank ones included.
+            i = reader.line_num
             rows_processed += 1
             await conn.execute("SAVEPOINT import_row")
             try:
@@ -94,11 +104,14 @@ async def _import_row(conn, location_id, row, fieldmap, cands):
     unit = (row.get(fieldmap["unit"]) or "").strip().lower()
     if not item:
         raise ValueError("missing item name")
+    qty_raw = (row.get(fieldmap["qty"]) or "").strip()
+    total_raw = (row.get(fieldmap["total"]) or "").strip()
     try:
-        qty = Decimal((row.get(fieldmap["qty"]) or "").strip())
-        total_price = Decimal((row.get(fieldmap["total"]) or "").strip())
+        qty = Decimal(qty_raw)
+        total_price = Decimal(total_raw)
     except InvalidOperation as e:
-        raise ValueError(f"invalid qty or total: {e}") from e
+        raise ValueError(
+            f"invalid qty or total: {qty_raw!r}/{total_raw!r}") from e
 
     is_new = False
     hit = match_ingredient(item, cands)
