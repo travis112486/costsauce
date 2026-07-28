@@ -6,6 +6,7 @@ Frozen interface: .superpowers/sdd/2026-07-27-phase-1d-web-client/task-2-brief.m
 """
 from tests.factories import make_ingredient
 from tests.test_ingredients_routes import auth
+from api.routes import imports as imports_module
 
 
 CSV_TWO_ROWS = (
@@ -228,3 +229,54 @@ async def test_blank_line_preserves_physical_row_numbers(app_client, seeded_biz,
     cur = await raw_conn.execute(
         "SELECT count(*) FROM purchases WHERE location_id = %s", (s["acme_loc"],))
     assert (await cur.fetchone())[0] == 1
+
+
+# ---------------------------------------------------------------------
+# Final fix wave, Important-1: unbounded upload/body guard. A CSV over
+# MAX_IMPORT_BYTES, or a body whose data-row count exceeds MAX_IMPORT_ROWS,
+# 413s and ingests nothing -- reject the whole request rather than
+# partially importing rows up to the cap.
+# ---------------------------------------------------------------------
+async def test_oversized_csv_text_is_413_nothing_ingested(app_client, seeded_biz, raw_conn):
+    s = seeded_biz
+    padding = "x" * (imports_module.MAX_IMPORT_BYTES + 1)
+    csv_text = (
+        "item,vendor,date,qty,unit,total\n"
+        f"Chicken,{padding},2026-07-01,10,kg,55.10\n"
+    )
+    r = await app_client.post(
+        f"/locations/{s['acme_loc']}/purchases/import",
+        data={"csv_text": csv_text},
+        headers=auth(s["alice"]))
+    assert r.status_code == 413, r.text
+    assert str(imports_module.MAX_IMPORT_BYTES) in r.json()["detail"]
+
+    cur = await raw_conn.execute(
+        "SELECT count(*) FROM purchases WHERE location_id = %s", (s["acme_loc"],))
+    assert (await cur.fetchone())[0] == 0
+
+
+async def test_rows_over_cap_is_413_nothing_ingested(
+        app_client, seeded_biz, raw_conn, monkeypatch):
+    s = seeded_biz
+    monkeypatch.setattr(imports_module, "MAX_IMPORT_ROWS", 2)
+    csv_text = (
+        "item,vendor,date,qty,unit,total\n"
+        "A,V,2026-07-01,1,lb,1.00\n"
+        "B,V,2026-07-01,1,lb,1.00\n"
+        "C,V,2026-07-01,1,lb,1.00\n"
+    )
+    r = await app_client.post(
+        f"/locations/{s['acme_loc']}/purchases/import",
+        data={"csv_text": csv_text},
+        headers=auth(s["alice"]))
+    assert r.status_code == 413, r.text
+    assert "2" in r.json()["detail"]
+
+    cur = await raw_conn.execute(
+        "SELECT count(*) FROM purchases WHERE location_id = %s", (s["acme_loc"],))
+    assert (await cur.fetchone())[0] == 0
+    cur = await raw_conn.execute(
+        "SELECT count(*) FROM ingredients WHERE location_id = %s AND source = 'import'",
+        (s["acme_loc"],))
+    assert (await cur.fetchone())[0] == 0

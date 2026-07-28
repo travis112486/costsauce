@@ -16,6 +16,7 @@ import {
   pickDefaultMembership, money, pct, signedPct, todayLocalISO, centsFromString,
   barWidths, sparklinePoints, buildPurchasePayload,
   buildRecipePayload, previewCost, buildSettingsPayload, validateRecipeLines,
+  moneyFromCents,
 } from "./lib.mjs";
 import { fcStatus, suggestedPriceCents } from "/shared/kernel.js";
 
@@ -672,20 +673,6 @@ async function resolveIngredientId(name, location) {
     }
     throw err;
   }
-}
-
-// moneyFromCents(cents) -> "12.34" from an EXACT integer cent count (as
-// returned by shared/kernel.js's suggestedPriceCents, or by
-// lib.mjs::previewCost). Pure integer arithmetic (Math.floor/% on an
-// already-integer Number) -- never float division of the kind that would
-// re-introduce the B3 bug this view exists to close. Pairs with
-// money(moneyFromCents(cents)) for display.
-function moneyFromCents(cents) {
-  const neg = cents < 0;
-  const abs = Math.abs(cents);
-  const dollars = Math.floor(abs / 100);
-  const rem = abs % 100;
-  return (neg ? "-" : "") + dollars + "." + String(rem).padStart(2, "0");
 }
 
 // ---------------------------------------------------------------------

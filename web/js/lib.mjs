@@ -291,6 +291,20 @@ export function previewCost(lines, priceIndex) {
   return { cents: centsFromRat(sum), complete };
 }
 
+// moneyFromCents(cents) -> "12.34" from an EXACT integer cent count (as
+// returned by shared/kernel.js's suggestedPriceCents, or by this module's
+// own previewCost). Pure integer arithmetic (Math.floor/% on an
+// already-integer Number) -- never float division of the kind that would
+// re-introduce the B3 bug this module exists to close. Pairs with
+// money(moneyFromCents(cents)) for display.
+export function moneyFromCents(cents) {
+  const neg = cents < 0;
+  const abs = Math.abs(cents);
+  const dollars = Math.floor(abs / 100);
+  const rem = abs % 100;
+  return (neg ? "-" : "") + dollars + "." + String(rem).padStart(2, "0");
+}
+
 // buildSettingsPayload(form, current) -> the exact PATCH /locations/{loc}
 // body, or null when nothing changed. `form` carries the settings form's
 // current (string) field values; `current` is the location row the form

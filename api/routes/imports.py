@@ -28,6 +28,14 @@ router = APIRouter()
 
 REQUIRED_COLUMNS = ["item", "vendor", "date", "qty", "unit", "total"]
 
+# Unbounded upload/body guard: a multi-hundred-MB CSV (or a body with
+# millions of rows) would otherwise be read fully into memory and iterated
+# row-by-row inside one long-lived transaction. Both caps are enforced
+# server-side regardless of what, if anything, a reverse proxy in front of
+# this API also enforces (see docs/runbooks/phase-1d-deploy.md).
+MAX_IMPORT_BYTES = 1_000_000
+MAX_IMPORT_ROWS = 2000
+
 
 @router.post("/locations/{location_id}/purchases/import")
 async def import_purchases(location_id: uuid.UUID, request: Request,
@@ -35,11 +43,18 @@ async def import_purchases(location_id: uuid.UUID, request: Request,
                            csv_text: str | None = Form(None),
                            caller: CallerIdentity = Depends(require_caller)):
     if file is not None:
+        # Read one byte past the cap so an exactly-oversized file is still
+        # detected without ever buffering an unbounded upload into memory.
+        raw = await file.read(MAX_IMPORT_BYTES + 1)
+        if len(raw) > MAX_IMPORT_BYTES:
+            raise HTTPException(413, f"CSV larger than {MAX_IMPORT_BYTES} bytes")
         # utf-8-sig: Excel's "CSV UTF-8" export prepends a BOM. Plain "utf-8"
         # leaves it attached to the first header ("﻿item"), which then
         # fails the required-column check even though "item" is right there.
-        content = (await file.read()).decode("utf-8-sig", errors="ignore")
+        content = raw.decode("utf-8-sig", errors="ignore")
     elif csv_text:
+        if len(csv_text.encode()) > MAX_IMPORT_BYTES:
+            raise HTTPException(413, f"CSV larger than {MAX_IMPORT_BYTES} bytes")
         content = csv_text.lstrip("﻿")
     else:
         raise HTTPException(422, "provide a file or csv_text")
@@ -71,6 +86,12 @@ async def import_purchases(location_id: uuid.UUID, request: Request,
             # blank ones included.
             i = reader.line_num
             rows_processed += 1
+            if rows_processed > MAX_IMPORT_ROWS:
+                # 413 aborts the whole transaction (tenant_connection rolls
+                # back on any exception) -- reject the entire import rather
+                # than partially ingesting rows up to the cap.
+                raise HTTPException(
+                    413, f"CSV has more than {MAX_IMPORT_ROWS} rows")
             await conn.execute("SAVEPOINT import_row")
             try:
                 is_new, ingredient_id, ingredient_name = await _import_row(

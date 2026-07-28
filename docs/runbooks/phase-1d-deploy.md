@@ -58,6 +58,15 @@ below if you're only interested in the API/host side.
 - **No new npm/build dependency.** `web/` and `shared/kernel.js` are plain
   ES modules; `shared/kernel.js`'s own tests run under Node's built-in
   `node:test`, no bundler, no package.json dependency tree to audit.
+- **CSV import size caps.** `POST /locations/{id}/purchases/import`
+  enforces `MAX_IMPORT_BYTES = 1_000_000` (1MB) and `MAX_IMPORT_ROWS = 2000`
+  server-side (`api/routes/imports.py`), rejecting an oversized body or an
+  over-cap row count with `413` and ingesting nothing. These caps exist in
+  the application regardless of what sits in front of it — whoever puts a
+  reverse proxy (nginx, Caddy, an LB) in front of this API for go-live
+  should ALSO set its own client-max-body-size-style limit (e.g. nginx's
+  `client_max_body_size`) at or below 1MB, so an oversized upload is
+  rejected at the edge instead of spending a worker reading up to the cap.
 
 ---
 

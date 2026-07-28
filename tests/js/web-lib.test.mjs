@@ -12,7 +12,7 @@ import {
   money, pct, signedPct, todayLocalISO, centsFromString, pickDefaultMembership,
   barWidths, sparklinePoints, buildPurchasePayload,
   buildRecipePayload, ratFromString, previewCost, buildSettingsPayload,
-  validateRecipeLines,
+  validateRecipeLines, moneyFromCents,
 } from "../../web/js/lib.mjs";
 import { parseFragment, magicLinkBody, gotrueErrorDetail } from "../../web/js/auth.mjs";
 // The B3 pin below imports the JS kernel directly by filesystem path (not
@@ -520,6 +520,23 @@ test("B3 pin: previewCost feeds fcStatus correctly too (full pipeline, not just 
   const { fc, status } = fcStatus(plateCents, 1000, 3000); // menu $10.00, target 30%
   assert.equal(fc, "21.0");
   assert.equal(status, "ok");
+});
+
+// ---------------------------------------------------------------------
+// moneyFromCents -- exact integer cent count -> "12.34" decimal string.
+// Final fix wave, Minor-3: moved from app.js into lib.mjs (pure, DOM-free)
+// so it's directly testable under plain node:test.
+// ---------------------------------------------------------------------
+test("moneyFromCents: positive cents formats dollars.cents", () => {
+  assert.equal(moneyFromCents(531), "5.31");
+});
+
+test("moneyFromCents: negative cents keeps the sign in front", () => {
+  assert.equal(moneyFromCents(-50), "-0.50");
+});
+
+test("moneyFromCents: sub-10 cent remainder is zero-padded", () => {
+  assert.equal(moneyFromCents(105), "1.05");
 });
 
 // ---------------------------------------------------------------------

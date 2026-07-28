@@ -21,10 +21,19 @@ export function clearToken() {
 
 export class ApiError extends Error {
   constructor(status, detail) {
+    // FastAPI's own 422 validation errors ship `detail` as a LIST of
+    // {loc, msg, type} objects, not a string or a {message} object -- the
+    // two shapes this fallback already handled. Without this branch a
+    // validation failure's toast read the useless generic "HTTP 422"
+    // instead of the actual field-level message FastAPI already computed.
     const message =
       typeof detail === "string"
         ? detail
-        : (detail && detail.message) || `HTTP ${status}`;
+        : (detail && detail.message) ||
+          (Array.isArray(detail) && detail[0] && typeof detail[0].msg === "string"
+            ? detail[0].msg
+            : null) ||
+          `HTTP ${status}`;
     super(message);
     this.name = "ApiError";
     this.status = status;
