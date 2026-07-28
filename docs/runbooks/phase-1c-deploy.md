@@ -417,6 +417,11 @@ value, not for anything this runbook needs to change.
 
 ## 8. Smoke: `GET /sync` and `POST /sync`
 
+Phase 1d note: the API now also serves a migrated web SPA at `/app/`
+(`/shared/kernel.js` alongside it) — once a real host exists, run
+`docs/runbooks/phase-1d-deploy.md` §4's SPA acceptance smoke there too, not
+just the `/sync` smoke below.
+
 Run these against the deployed API (not raw SQL) with a real bearer token
 for a user who is a member of some organization — **use a throwaway test
 org/location you control, not the `00000000-0000-7000-8000-00000000cafe`
