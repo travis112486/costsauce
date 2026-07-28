@@ -180,7 +180,8 @@ def create_app() -> FastAPI:
     if shared_dir.is_dir():
         app.mount("/shared", StaticFiles(directory=shared_dir), name="shared")
 
-    # Mount /app static files with html=True for SPA routing.
+    # Mount /app static files with html=True to serve index.html at /app/.
+    # The SPA is tab-based (no deep links), so no catch-all routing is needed.
     if web_dir.is_dir():
         app.mount("/app", StaticFiles(directory=web_dir, html=True), name="web")
 

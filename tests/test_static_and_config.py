@@ -1,9 +1,36 @@
 """Tests for static file serving and /config bootstrap endpoint."""
+from httpx import AsyncClient, ASGITransport
 from tests.test_auth import mint
 
 
 def auth(user_id):
     return {"Authorization": f"Bearer {mint(sub=str(user_id))}"}
+
+
+async def test_config_with_env_vars_returns_values(monkeypatch, _roles_bootstrapped, db_url):
+    """GET /config with SUPABASE_* env vars set returns both values.
+
+    Proves request-time env reading by monkeypatching env vars before app
+    creation, building a fresh app instance, and verifying /config returns
+    the set values. Follows the conftest app_client pattern.
+    """
+    monkeypatch.setenv("JWT_SECRET", "test-jwt-secret")
+    monkeypatch.setenv("JWT_ISSUER", "https://khohfrfqzbieaiikqlsa.supabase.co/auth/v1")
+    monkeypatch.setenv("DATABASE_URL", db_url.replace("postgres:postgres", "app_user:app_pw"))
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_ANON_KEY", "test-anon-key-123")
+    monkeypatch.setenv("RETURN_INVITE_TOKEN_ENABLED", "1")
+
+    from api.main import create_app
+    app = create_app()
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.get("/config")
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["supabase_url"] == "https://example.supabase.co"
+    assert data["supabase_anon_key"] == "test-anon-key-123"
 
 
 async def test_config_endpoint_returns_nulls_when_env_unset(app_client):
