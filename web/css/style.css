@@ -339,6 +339,17 @@ textarea { min-height: 100px; font-family: monospace; }
   align-items: center;
 }
 
+.ri-ingredient-fixed {
+  display: flex;
+  align-items: center;
+  padding: 8px 10px;
+  background: #F5EFE2;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--charcoal);
+  font-size: 0.9rem;
+}
+
 .recipe-summary {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));

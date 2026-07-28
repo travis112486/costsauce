@@ -180,6 +180,44 @@ export function buildRecipePayload(editing, isCreate) {
   };
 }
 
+// validateRecipeLines(lines) -> {ok: true, lines: kept} | {ok: false, error}.
+// Guards the recipe editor submit path against silently tombstoning an
+// existing line whose quantity field was blanked out. The prior filter
+// (`items.filter(it => it.ingredient_id && qty !== "")`) dropped ANY line
+// with a blank qty, existing or new alike -- for an existing line that
+// means it simply vanishes from the payload, and the server (which diffs
+// by id) tombstones it as if the user had explicitly removed it, with no
+// error surfaced at all.
+//
+// The rule: a line that carries an `id` (an existing recipe_items row)
+// MUST have a non-blank qty -- a blank qty on an existing line is always
+// an error, never a silent drop. A line with no `id` (added this editing
+// session) whose ingredient AND qty are BOTH blank is a never-filled
+// "+ Add ingredient" row -- the one case that's silently skipped. Any
+// other id-less combination (e.g. an ingredient chosen but no qty typed
+// yet) is also an error, not a silent drop, since it's ambiguous whether
+// the user meant to abandon the row or just hasn't finished it.
+export function validateRecipeLines(lines) {
+  const kept = [];
+  const list = lines || [];
+  for (let i = 0; i < list.length; i++) {
+    const line = list[i];
+    const hasId = line.id !== null && line.id !== undefined;
+    const qtyBlank = line.qty_base_units === null || line.qty_base_units === undefined
+      || String(line.qty_base_units).trim() === "";
+    const ingredientBlank = !line.ingredient_id;
+
+    if (!hasId && ingredientBlank && qtyBlank) {
+      continue; // never-filled add-row -- silently skipped
+    }
+    if (qtyBlank) {
+      return { ok: false, error: `line ${i + 1} has no quantity — remove the line explicitly or enter a quantity` };
+    }
+    kept.push(line);
+  }
+  return { ok: true, lines: kept };
+}
+
 // ratFromString(s) -> {n: BigInt, d: BigInt}, the exact rational a decimal
 // string represents. Mirrors shared/kernel.js's internal parseDec,
 // deliberately duplicated rather than imported -- lib.mjs stays a

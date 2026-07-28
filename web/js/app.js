@@ -15,7 +15,7 @@ import { captureTokenFromFragment, requestMagicLink, reviewerLogin } from "./aut
 import {
   pickDefaultMembership, money, pct, signedPct, todayLocalISO, centsFromString,
   barWidths, sparklinePoints, buildPurchasePayload,
-  buildRecipePayload, previewCost, buildSettingsPayload,
+  buildRecipePayload, previewCost, buildSettingsPayload, validateRecipeLines,
 } from "./lib.mjs";
 import { fcStatus, suggestedPriceCents } from "/shared/kernel.js";
 
@@ -741,8 +741,15 @@ async function renderRecipesTab(location, editingRecipe) {
     </table></div>` : `<div class="empty-state"><h3>No recipes yet</h3><p>Build your first one below.</p></div>`;
 
   const editing = editingRecipe || null;
+  // `name`/`base_unit` are carried along for existing lines only, so
+  // drawRecipeItems can render them as fixed text without a second lookup
+  // (and it still works for a tombstoned ingredient, since the server's
+  // LEFT JOIN keeps returning its name/base_unit after a soft delete).
   recipeEditItems = editing
-    ? editing.items.map((it) => ({ id: it.id, ingredient_id: it.ingredient_id, qty_base_units: it.qty_base_units }))
+    ? editing.items.map((it) => ({
+        id: it.id, ingredient_id: it.ingredient_id, qty_base_units: it.qty_base_units,
+        name: it.name, base_unit: it.base_unit,
+      }))
     : [{ id: null, ingredient_id: ingredients[0] ? ingredients[0].id : "", qty_base_units: "1" }];
 
   content.innerHTML = `
@@ -803,34 +810,59 @@ async function renderRecipesTab(location, editingRecipe) {
 }
 
 // drawRecipeItems -- redraws the ingredient/qty rows from recipeEditItems
-// and rewires their listeners. A row whose ingredient_id isn't in the
-// live `ingredients` list (a tombstoned ingredient still on an existing
-// recipe line) gets a synthetic "unavailable" option so the <select>'s
-// actual selection still matches recipeEditItems -- it stays excluded from
-// priceIndex, so the preview correctly treats it as unresolvable.
+// and rewires their listeners.
+//
+// An EXISTING line (row.id set) renders its ingredient as fixed, escaped
+// text, not a <select>: the server's update-by-id only ever updates a
+// line's qty, so an edited ingredient_id on an existing line would be
+// silently reverted the moment the save round-trips and the editor
+// re-renders from the fresh server response -- repointing an ingredient
+// is deliberately not a line edit (that's the merge endpoint's job). To
+// change an existing line's ingredient, the user removes it and adds a
+// new line instead, which the payload semantics already handle correctly
+// (tombstone the old id, insert the new id-less line).
+//
+// A NEW line (row.id null/undefined) gets the live <select>. A row whose
+// ingredient_id isn't in the live `ingredients` list (a tombstoned
+// ingredient still on an existing recipe line) shows its carried-along
+// name/base_unit as fixed text too, or "Unavailable ingredient" if even
+// that's missing -- it stays excluded from priceIndex either way, so the
+// preview correctly treats it as unresolvable.
 function drawRecipeItems(ingredients, priceIndex) {
   const el = document.getElementById("recipe-items");
   if (!el) return;
   el.innerHTML = recipeEditItems.map((row) => {
-    const known = ingredients.some((i) => i.id === row.ingredient_id);
-    const unavailableOption = known ? "" :
-      `<option value="${escapeHtml(row.ingredient_id)}" selected>Unavailable ingredient</option>`;
-    return `
-      <div class="recipe-item-row">
+    const isExisting = row.id !== null && row.id !== undefined;
+    let ingredientCell;
+    if (isExisting) {
+      const label = row.name ? `${row.name} (${row.base_unit || ""})` : "Unavailable ingredient";
+      ingredientCell = `<span class="ri-ingredient-fixed">${escapeHtml(label)}</span>`;
+    } else {
+      const known = ingredients.some((i) => i.id === row.ingredient_id);
+      const unavailableOption = known ? "" :
+        `<option value="${escapeHtml(row.ingredient_id)}" selected>Unavailable ingredient</option>`;
+      ingredientCell = `
         <select class="ri-ingredient">
           ${unavailableOption}
           ${ingredients.map((i) => `<option value="${escapeHtml(i.id)}" ${i.id === row.ingredient_id ? "selected" : ""}>${escapeHtml(i.name)} (${escapeHtml(i.base_unit)})</option>`).join("")}
-        </select>
-        <input type="text" class="ri-qty" value="${escapeHtml(row.qty_base_units)}" inputmode="decimal" placeholder="qty">
+        </select>`;
+    }
+    return `
+      <div class="recipe-item-row">
+        ${ingredientCell}
+        <input type="text" class="ri-qty" value="${escapeHtml(row.qty_base_units)}" inputmode="decimal" placeholder="qty" required>
         <button type="button" class="btn btn-danger btn-sm ri-remove">✕</button>
       </div>`;
   }).join("");
 
   Array.from(el.querySelectorAll(".recipe-item-row")).forEach((rowEl, idx) => {
-    rowEl.querySelector(".ri-ingredient").addEventListener("change", (e) => {
-      recipeEditItems[idx].ingredient_id = e.target.value;
-      updateRecipePreview(priceIndex);
-    });
+    const ingredientSelect = rowEl.querySelector(".ri-ingredient");
+    if (ingredientSelect) {
+      ingredientSelect.addEventListener("change", (e) => {
+        recipeEditItems[idx].ingredient_id = e.target.value;
+        updateRecipePreview(priceIndex);
+      });
+    }
     rowEl.querySelector(".ri-qty").addEventListener("input", (e) => {
       recipeEditItems[idx].qty_base_units = e.target.value;
       updateRecipePreview(priceIndex);
@@ -859,7 +891,11 @@ function updateRecipePreview(priceIndex) {
   try {
     ({ cents: plateCents, complete } = previewCost(recipeEditItems, priceIndex));
   } catch (e) {
-    plateCents = null; // an unparsable qty mid-edit -- show dashes, don't crash
+    // an unparsable qty/price mid-edit -- show dashes, don't crash, and
+    // flag incomplete too (a thrown preview is exactly as unknown as an
+    // excluded line, and the banner should say so either way).
+    plateCents = null;
+    complete = false;
   }
 
   const menuPriceStr = document.getElementById("r-menu-price").value.trim();
@@ -896,12 +932,24 @@ function updateRecipePreview(priceIndex) {
 
 async function handleRecipeSubmit(e, location, editing) {
   e.preventDefault();
+
+  // validateRecipeLines is the belt-and-braces layer behind the .ri-qty
+  // `required` attribute: a blank qty on an EXISTING line must never be
+  // silently filtered out of the payload -- the server diffs by id, so a
+  // dropped line is indistinguishable from "the user removed it" and gets
+  // tombstoned with no error at all. Only a never-filled id-less add-row
+  // is silently skipped; anything else with a blank qty aborts the save.
+  const validation = validateRecipeLines(recipeEditItems);
+  if (!validation.ok) {
+    toast(validation.error, true);
+    return;
+  }
+
   const editingState = {
     name: document.getElementById("r-name").value.trim(),
     menu_price: document.getElementById("r-menu-price").value.trim(),
     target_fc_pct: document.getElementById("r-target").value.trim(),
-    items: recipeEditItems.filter(
-      (it) => it.ingredient_id && String(it.qty_base_units).trim() !== ""),
+    items: validation.lines,
   };
   if (editingState.items.length === 0) {
     toast("Add at least one ingredient.", true);

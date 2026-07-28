@@ -12,6 +12,7 @@ import {
   money, pct, signedPct, todayLocalISO, centsFromString, pickDefaultMembership,
   barWidths, sparklinePoints, buildPurchasePayload,
   buildRecipePayload, ratFromString, previewCost, buildSettingsPayload,
+  validateRecipeLines,
 } from "../../web/js/lib.mjs";
 import { parseFragment, magicLinkBody, gotrueErrorDetail } from "../../web/js/auth.mjs";
 // The B3 pin below imports the JS kernel directly by filesystem path (not
@@ -337,6 +338,65 @@ test("buildRecipePayload: scalars pass through as raw input strings, ingredient_
   assert.equal(payload.target_fc_pct, "30");
   assert.equal(payload.items[0].ingredient_id, ING_A);
   assert.equal(payload.items[0].qty_base_units, "2");
+});
+
+// ---------------------------------------------------------------------
+// validateRecipeLines -- guards handleRecipeSubmit against silently
+// tombstoning an existing line whose qty was blanked out.
+// ---------------------------------------------------------------------
+test("validateRecipeLines: a blank qty on an EXISTING (id-carrying) line is an error, not a silent drop", () => {
+  const lines = [
+    { id: ITEM_1, ingredient_id: ING_A, qty_base_units: "" },
+  ];
+  const result = validateRecipeLines(lines);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /line 1 has no quantity/);
+});
+
+test("validateRecipeLines: whitespace-only qty on an existing line is also blank", () => {
+  const lines = [{ id: ITEM_1, ingredient_id: ING_A, qty_base_units: "   " }];
+  const result = validateRecipeLines(lines);
+  assert.equal(result.ok, false);
+});
+
+test("validateRecipeLines: reports the 1-indexed position of the offending line", () => {
+  const lines = [
+    { id: ITEM_1, ingredient_id: ING_A, qty_base_units: "2.0000" },
+    { id: "018f1e2a-1111-7000-8000-0000000000a2", ingredient_id: ING_B, qty_base_units: "" },
+  ];
+  const result = validateRecipeLines(lines);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /line 2 has no quantity/);
+});
+
+test("validateRecipeLines: an id-less line with BOTH ingredient and qty blank is a never-filled add-row -- silently skipped", () => {
+  const lines = [
+    { id: ITEM_1, ingredient_id: ING_A, qty_base_units: "2.0000" },
+    { id: null, ingredient_id: "", qty_base_units: "" },
+  ];
+  const result = validateRecipeLines(lines);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.lines, [{ id: ITEM_1, ingredient_id: ING_A, qty_base_units: "2.0000" }]);
+});
+
+test("validateRecipeLines: an id-less line with an ingredient chosen but a blank qty is still an error (not silently skipped)", () => {
+  const lines = [{ id: null, ingredient_id: ING_A, qty_base_units: "" }];
+  const result = validateRecipeLines(lines);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /line 1 has no quantity/);
+});
+
+test("validateRecipeLines: all-valid lines pass through unchanged, in order", () => {
+  const lines = [
+    { id: ITEM_1, ingredient_id: ING_A, qty_base_units: "2.0000" },
+    { id: null, ingredient_id: ING_B, qty_base_units: "1.5000" },
+  ];
+  const result = validateRecipeLines(lines);
+  assert.deepEqual(result, { ok: true, lines });
+});
+
+test("validateRecipeLines: empty lines array -> ok with nothing kept", () => {
+  assert.deepEqual(validateRecipeLines([]), { ok: true, lines: [] });
 });
 
 // ---------------------------------------------------------------------
