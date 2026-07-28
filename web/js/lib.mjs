@@ -68,3 +68,70 @@ export function pickDefaultMembership(me) {
   if (memberships.length === 1) return memberships[0];
   return null;
 }
+
+// barWidths(movers) -> pixel widths (0-100), one per mover, proportional to
+// |Number(m.drift_pct)|. The mover with the largest absolute drift always
+// gets exactly 100; everything else is scaled relative to it. These are
+// literal pixel widths for a small fixed-scale bar (not a percentage of the
+// track's flexible width) -- app.js applies them directly as `width:${w}px`.
+// Sign is irrelevant to width (direction is rendered separately via
+// m.direction); an all-zero set never divides by zero.
+export function barWidths(movers) {
+  if (!movers || movers.length === 0) return [];
+  const abs = movers.map((m) => Math.abs(Number(m.drift_pct)));
+  const max = Math.max(...abs);
+  if (max === 0) return abs.map(() => 0);
+  return abs.map((a) => (a / max) * 100);
+}
+
+// sparklinePoints(purchasesAsc, w, h) -> [{x, y}, ...] plot coordinates for
+// the ingredient-detail price sparkline, one per purchase, oldest first.
+// Number(unit_price) happens ONLY in here -- callers pass the raw
+// {unit_price: "3.31", ...} purchase rows straight off the wire.
+//
+// - Empty input -> [].
+// - A single point can't be plotted against a range, so it centers in both
+//   axes instead of collapsing to a corner.
+// - Otherwise x walks left-to-right across [pad, w-pad] and y maps
+//   min..max price onto [h-pad, pad] (higher price -> higher up the
+//   canvas), matching the legacy product/static/js/app.js drawSparkline
+//   layout. A flat series (min === max) maps every y to the vertical
+//   center of that band rather than dividing by zero.
+export function sparklinePoints(purchasesAsc, w, h) {
+  if (!purchasesAsc || purchasesAsc.length === 0) return [];
+  const n = purchasesAsc.length;
+  if (n === 1) return [{ x: w / 2, y: h / 2 }];
+
+  const prices = purchasesAsc.map((p) => Number(p.unit_price));
+  const min = Math.min(...prices);
+  const max = Math.max(...prices);
+  const range = max - min || 1;
+  const pad = 16;
+
+  return prices.map((price, idx) => {
+    const x = pad + (idx / (n - 1)) * (w - pad * 2);
+    const y = h - pad - ((price - min) / range) * (h - pad * 2);
+    return { x, y };
+  });
+}
+
+// buildPurchasePayload(form) -> the exact POST /locations/{loc}/purchases
+// body. `form` carries raw string field values (straight off DOM inputs in
+// app.js, or a plain object in tests) -- every value is passed through
+// as-is, never parseFloat'd (the server's Decimal fields own precision).
+// qty_in_case is optional on the wire; an empty/absent value is omitted
+// entirely rather than sent as "".
+export function buildPurchasePayload(form) {
+  const payload = {
+    ingredient_id: form.ingredient_id,
+    purchased_on: form.purchased_on,
+    qty: form.qty,
+    unit: form.unit,
+    total_price: form.total_price,
+  };
+  const qtyInCase = form.qty_in_case;
+  if (qtyInCase !== undefined && qtyInCase !== null && String(qtyInCase).trim() !== "") {
+    payload.qty_in_case = qtyInCase;
+  }
+  return payload;
+}

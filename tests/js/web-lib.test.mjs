@@ -10,6 +10,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   money, pct, signedPct, todayLocalISO, centsFromString, pickDefaultMembership,
+  barWidths, sparklinePoints, buildPurchasePayload,
 } from "../../web/js/lib.mjs";
 import { parseFragment, magicLinkBody, gotrueErrorDetail } from "../../web/js/auth.mjs";
 
@@ -113,4 +114,130 @@ test("gotrueErrorDetail prefers msg, then error_description, then error", () => 
 test("gotrueErrorDetail falls back to a readable string naming the status, never a raw object", () => {
   assert.equal(gotrueErrorDetail({}, 400), "magic link request failed (HTTP 400)");
   assert.equal(gotrueErrorDetail(null, 500), "magic link request failed (HTTP 500)");
+});
+
+// ---------------------------------------------------------------------
+// barWidths -- dashboard "top movers" bar chart, pixel widths (max 100)
+// proportional to |Number(drift_pct)|.
+// ---------------------------------------------------------------------
+test("barWidths: empty movers list -> empty array", () => {
+  assert.deepEqual(barWidths([]), []);
+});
+
+test("barWidths: a single element always gets the full 100 width", () => {
+  assert.deepEqual(barWidths([{ drift_pct: "5.0" }]), [100]);
+  assert.deepEqual(barWidths([{ drift_pct: "-37.25" }]), [100]);
+});
+
+test("barWidths: widths are proportional to the largest |drift_pct|", () => {
+  const movers = [
+    { drift_pct: "10.0" },
+    { drift_pct: "5.0" },
+    { drift_pct: "2.5" },
+  ];
+  assert.deepEqual(barWidths(movers), [100, 50, 25]);
+});
+
+test("barWidths: negative drift uses its absolute value, sign doesn't affect width", () => {
+  const movers = [{ drift_pct: "-20.0" }, { drift_pct: "10.0" }];
+  assert.deepEqual(barWidths(movers), [100, 50]);
+});
+
+test("barWidths: all-zero drift never divides by zero", () => {
+  assert.deepEqual(barWidths([{ drift_pct: "0.0" }, { drift_pct: "0.0" }]), [0, 0]);
+});
+
+// ---------------------------------------------------------------------
+// sparklinePoints -- ingredient detail price-history chart coordinates.
+// Number(unit_price) happens ONLY inside this helper.
+// ---------------------------------------------------------------------
+test("sparklinePoints: empty purchase list -> empty array", () => {
+  assert.deepEqual(sparklinePoints([], 300, 140), []);
+});
+
+test("sparklinePoints: a single point centers in both axes", () => {
+  assert.deepEqual(sparklinePoints([{ unit_price: "3.31" }], 300, 140), [
+    { x: 150, y: 70 },
+  ]);
+});
+
+test("sparklinePoints: known 3-point ascending series -> exact coords", () => {
+  const purchasesAsc = [
+    { unit_price: "1.00" },
+    { unit_price: "2.00" },
+    { unit_price: "3.00" },
+  ];
+  assert.deepEqual(sparklinePoints(purchasesAsc, 300, 140), [
+    { x: 16, y: 124 },
+    { x: 150, y: 70 },
+    { x: 284, y: 16 },
+  ]);
+});
+
+test("sparklinePoints: flat series (all equal prices) never divides by zero", () => {
+  const purchasesAsc = [
+    { unit_price: "4.00" },
+    { unit_price: "4.00" },
+    { unit_price: "4.00" },
+  ];
+  assert.deepEqual(sparklinePoints(purchasesAsc, 300, 140), [
+    { x: 16, y: 124 },
+    { x: 150, y: 124 },
+    { x: 284, y: 124 },
+  ]);
+});
+
+// ---------------------------------------------------------------------
+// buildPurchasePayload -- POST /locations/{loc}/purchases body. Strings
+// stay strings, no parseFloat, empty qty_in_case is omitted entirely.
+// ---------------------------------------------------------------------
+test("buildPurchasePayload: full form -> exact payload, values passed through as strings", () => {
+  const form = {
+    ingredient_id: "018f1e2a-1111-7000-8000-000000000001",
+    purchased_on: "2026-07-27",
+    qty: "12.5",
+    unit: "lb",
+    qty_in_case: "24",
+    total_price: "45.00",
+  };
+  assert.deepEqual(buildPurchasePayload(form), {
+    ingredient_id: "018f1e2a-1111-7000-8000-000000000001",
+    purchased_on: "2026-07-27",
+    qty: "12.5",
+    unit: "lb",
+    qty_in_case: "24",
+    total_price: "45.00",
+  });
+});
+
+test("buildPurchasePayload: empty qty_in_case is stripped, not sent as \"\"", () => {
+  const form = {
+    ingredient_id: "018f1e2a-1111-7000-8000-000000000001",
+    purchased_on: "2026-07-27",
+    qty: "3",
+    unit: "each",
+    qty_in_case: "",
+    total_price: "9.99",
+  };
+  const payload = buildPurchasePayload(form);
+  assert.deepEqual(payload, {
+    ingredient_id: "018f1e2a-1111-7000-8000-000000000001",
+    purchased_on: "2026-07-27",
+    qty: "3",
+    unit: "each",
+    total_price: "9.99",
+  });
+  assert.equal("qty_in_case" in payload, false);
+});
+
+test("buildPurchasePayload: missing qty_in_case field entirely is also omitted", () => {
+  const form = {
+    ingredient_id: "018f1e2a-1111-7000-8000-000000000001",
+    purchased_on: "2026-07-27",
+    qty: "3",
+    unit: "each",
+    total_price: "9.99",
+  };
+  const payload = buildPurchasePayload(form);
+  assert.equal("qty_in_case" in payload, false);
 });
