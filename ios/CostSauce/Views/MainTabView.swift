@@ -1,11 +1,12 @@
 // The CostSauce main tab shell — Dashboard / Ingredients / Add / Settings.
-// Each tab's content is a placeholder standing in for Tasks 10-13's real
-// views; every tab carries the sync status chip in its toolbar (§13). The
-// Settings tab badges `pendingCount`, the chip routes to a re-auth sheet
-// or a pending-queue placeholder depending on `SyncState`, and an
-// org-deleted sync state auto-presents a full-screen placeholder — all
-// three are real screens/flows only from Task 14 onward; see this task's
-// report for the hand-off notes.
+// Dashboard is Task 10's real view; Ingredients/Add/Settings' content is
+// still a placeholder standing in for Tasks 11-13's real views. Every tab
+// carries the sync status chip in its toolbar (§13). The Settings tab
+// badges `pendingCount`, the chip routes to a re-auth sheet or a
+// pending-queue placeholder depending on `SyncState`, and an org-deleted
+// sync state auto-presents a full-screen placeholder — all three are real
+// screens/flows only from Task 14 onward; see this task's report for the
+// hand-off notes.
 
 import SwiftUI
 import CostSauceKit
@@ -18,9 +19,7 @@ struct MainTabView: View {
         TabView {
             Tab("Dashboard", systemImage: "chart.bar") {
                 TabRootView(title: "Dashboard", appModel: appModel, reauthPresented: $reauthPresented) {
-                    ContentUnavailableView(
-                        "Dashboard", systemImage: "chart.bar",
-                        description: Text("Arrives in a later task."))
+                    DashboardView(appModel: appModel)
                 }
             }
             Tab("Ingredients", systemImage: "carrot") {
