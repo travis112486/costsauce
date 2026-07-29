@@ -160,6 +160,30 @@ import Foundation
         #expect(try store.liveIngredients().isEmpty)
     }
 
+    // MARK: - unitChoices
+
+    @Test func unitChoicesForEachTrackedBaseUnit() throws {
+        let store = try seededStore([])
+        let edits = LocalEdits(store: store, locationId: "loc-1")
+
+        #expect(edits.unitChoices(baseUnit: "each") == ["each", "case"])
+    }
+
+    @Test func unitChoicesForWeightTrackedBaseUnit() throws {
+        let store = try seededStore([])
+        let edits = LocalEdits(store: store, locationId: "loc-1")
+
+        // Every weight `base_unit` (lb/oz/kg/g) offers the same full weight
+        // vocabulary plus "case" -- a purchase's `unit` need not match the
+        // ingredient's own tracked `base_unit` (`Kernel.normalizePurchase`'s
+        // cross-unit conversion handles e.g. buying oz against an lb-tracked
+        // ingredient).
+        #expect(edits.unitChoices(baseUnit: "lb") == ["lb", "oz", "kg", "g", "case"])
+        #expect(edits.unitChoices(baseUnit: "oz") == ["lb", "oz", "kg", "g", "case"])
+        #expect(edits.unitChoices(baseUnit: "kg") == ["lb", "oz", "kg", "g", "case"])
+        #expect(edits.unitChoices(baseUnit: "g") == ["lb", "oz", "kg", "g", "case"])
+    }
+
     // MARK: - tombstonePurchase
 
     @Test func tombstonePurchaseOpCarriesOnlyDeletedAt() throws {

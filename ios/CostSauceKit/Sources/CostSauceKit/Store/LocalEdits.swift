@@ -112,6 +112,19 @@ public struct LocalEdits {
         return rowId
     }
 
+    /// The kernel's accepted unit vocabulary for a purchase's `unit` field,
+    /// scoped to the given ingredient's `base_unit` -- backs
+    /// `PurchaseEntryView`'s unit `Picker`. An each-tracked ingredient only
+    /// ever accepts "each" or "case" (`Kernel.normalizePurchase` throws
+    /// "tracked 'each' -- use unit 'each' or 'case'" on anything else); a
+    /// weight-tracked ingredient (lb/oz/kg/g) accepts any of the four
+    /// weight units plus "case" regardless of which one it's tracked in --
+    /// `Kernel.normalizePurchase`'s `weightToLb` table converts across
+    /// them, e.g. buying oz against an lb-tracked ingredient.
+    public func unitChoices(baseUnit: String) -> [String] {
+        baseUnit == "each" ? ["each", "case"] : ["lb", "oz", "kg", "g", "case"]
+    }
+
     /// A plain tombstone update -- fields are exactly `{deleted_at}`, a subset
     /// of `UPDATE_FIELDS.purchases`.
     public func tombstonePurchase(id: String, now: Date = Date()) throws {
