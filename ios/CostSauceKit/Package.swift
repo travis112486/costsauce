@@ -25,7 +25,10 @@ let package = Package(
         ),
         .testTarget(
             name: "CostSauceKitTests",
-            dependencies: ["CostSauceKit"]
+            dependencies: [
+                "CostSauceKit",
+                .product(name: "GRDB", package: "GRDB.swift"),
+            ]
         ),
     ]
 )
