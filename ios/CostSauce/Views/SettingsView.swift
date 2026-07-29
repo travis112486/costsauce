@@ -19,19 +19,16 @@
 // fails, so a real owner briefly offline still sees whatever the last
 // bootstrap/refresh happened to cache rather than nothing at all.
 //
-// Identity/sign-out/switch-and-erase flows are Task 14's own screens
-// (`BlockedStateViews`, per that task's brief) -- signing out here would
-// flip `SessionController.state` without ever flipping `AppModel.phase`
-// (nothing observes that transition yet) or clearing the in-memory
-// `TokenBox`, leaving the app in a signed-out-but-still-showing-MainTabView
-// limbo. The confirm dialog's wording/logic is real (frozen §13 text); its
-// destructive action routes to a placeholder, same idiom `MainTabView`
-// already uses for `PendingQueuePlaceholderView`/`OrgDeletedPlaceholderView`.
-// Export organization data is likewise deferred to a placeholder here (Task
-// 14's own org-deleted recovery screen owns the export affordance this
-// project actually ships with) even though `ApiClient.exportOrg` already
-// exists and is already tested -- see this task's report for the full
-// reasoning.
+// Sign Out calls the new `AppModel.signOut()` -- see that method's own doc
+// comment in `AppModel.swift` for why a bare `SessionController.signOut()`
+// here would have left the app in a signed-out-but-still-showing-
+// MainTabView limbo (nothing observes `SessionController.state` to route
+// `AppModel.phase` back to `.login`). Export Organization Data is Task 13's
+// own affordance (distinct from Task 14's "Export pending changes" on the
+// identity-mismatch/org-deleted recovery screens, which export the LOCAL
+// pending-op queue, not this org-wide server-side ZIP) -- `ApiClient.
+// exportOrg` (Task 7, already tested) is a stateless GET with no
+// session/identity side effects, so it's wired for real here.
 
 import SwiftUI
 import CostSauceKit
@@ -47,8 +44,10 @@ struct SettingsView: View {
     @State private var membersCount: Int?
 
     @State private var signOutConfirmPresented = false
-    @State private var signOutPlaceholderPresented = false
-    @State private var exportPlaceholderPresented = false
+
+    @State private var exportBusy = false
+    @State private var exportError: String?
+    @State private var exportFileURL: URL?
 
     var body: some View {
         Form {
@@ -62,12 +61,6 @@ struct SettingsView: View {
         }
         .task {
             await loadAccountAndPlan()
-        }
-        .sheet(isPresented: $signOutPlaceholderPresented) {
-            SignOutPlaceholderView()
-        }
-        .sheet(isPresented: $exportPlaceholderPresented) {
-            ExportPlaceholderView()
         }
     }
 
@@ -152,9 +145,7 @@ struct SettingsView: View {
                 signOutConfirmPresented = true
             }
             if resolvedMembership?.role == "owner" {
-                Button("Export Organization Data") {
-                    exportPlaceholderPresented = true
-                }
+                exportRow
             }
             // Deletion initiation is deliberately absent here (Global
             // Constraints -- Phase 5 prep): no delete-account/delete-org row.
@@ -163,7 +154,7 @@ struct SettingsView: View {
             "Sign Out?", isPresented: $signOutConfirmPresented, titleVisibility: .visible
         ) {
             Button("Sign Out", role: .destructive) {
-                signOutPlaceholderPresented = true
+                appModel.signOut()
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -178,6 +169,53 @@ struct SettingsView: View {
             return "You can sign back in anytime — your local data stays on this device."
         }
         return "\(appModel.pendingCount) changes haven't synced. They'll stay on this device and sync when you sign back in."
+    }
+
+    /// Owner-only. `exportFileURL` set means a fetch already landed --
+    /// swaps the fetch button for the `ShareLink` itself rather than
+    /// re-fetching on every tap. `ShareLink(item: URL)` over a LOCAL file
+    /// URL shares the file's actual bytes (not just a web link), and the
+    /// share sheet's suggested filename comes from the URL's own last
+    /// path component -- exactly why `exportOrganizationData()` writes to
+    /// a fixed `costsauce-export.zip` temp path rather than handing
+    /// `ShareLink` the raw `Data` (which would need its own `Transferable`
+    /// wrapper to carry a filename at all).
+    @ViewBuilder
+    private var exportRow: some View {
+        if let exportFileURL {
+            ShareLink(item: exportFileURL) {
+                Label("Share Organization Export", systemImage: "square.and.arrow.up")
+            }
+        } else {
+            Button("Export Organization Data") {
+                Task { await exportOrganizationData() }
+            }
+            .disabled(exportBusy)
+        }
+        if exportBusy {
+            ProgressView()
+        }
+        if let exportError {
+            Text(exportError).foregroundStyle(.red)
+        }
+    }
+
+    private func exportOrganizationData() async {
+        guard let orgId = appModel.boundOrgId else { return }
+        exportBusy = true
+        exportError = nil
+        defer { exportBusy = false }
+        do {
+            let data = try await appModel.api.exportOrg(orgId: orgId)
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("costsauce-export.zip")
+            try data.write(to: url, options: .atomic)
+            exportFileURL = url
+        } catch let error as ApiError {
+            exportError = error.message
+        } catch {
+            exportError = error.localizedDescription
+        }
     }
 
     // MARK: - Debug
@@ -352,23 +390,5 @@ private struct LocationSettingsSection: View {
         } catch {
             errorMessage = "You're offline — settings need a connection."
         }
-    }
-}
-
-// MARK: - placeholders (Task 14 territory -- see file header)
-
-private struct SignOutPlaceholderView: View {
-    var body: some View {
-        ContentUnavailableView(
-            "Sign Out", systemImage: "rectangle.portrait.and.arrow.right",
-            description: Text("The full sign-out flow arrives in a later task."))
-    }
-}
-
-private struct ExportPlaceholderView: View {
-    var body: some View {
-        ContentUnavailableView(
-            "Export Organization Data", systemImage: "square.and.arrow.up",
-            description: Text("Exporting costsauce-export.zip arrives in a later task."))
     }
 }

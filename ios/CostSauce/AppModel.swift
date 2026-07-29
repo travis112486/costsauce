@@ -228,6 +228,52 @@ final class AppModel {
         }
     }
 
+    // MARK: - sign out
+
+    /// Task 13's ordinary, everyday sign-out (distinct from Task 14's
+    /// identity-mismatch/org-deleted recovery flows, which additionally
+    /// offer export/switch-and-erase over a store this method never
+    /// touches). Per §13, sign-out NEVER wipes the local store — only the
+    /// in-memory Kit objects wired to THIS session are torn down (the sync
+    /// engine/store/edits, its state-observation task, the debounced-sync
+    /// task, and the in-memory token mirror); the sqlite file on disk is
+    /// left completely untouched, so a later sign-in as the SAME user
+    /// resumes it via `tryFastPathToMain` exactly as if the app had just
+    /// relaunched.
+    ///
+    /// `phase` is routed back to `.login` explicitly here — nothing else in
+    /// this file observes `SessionController.state` to do that
+    /// (`RootView` in `CostSauceApp.swift` switches on `phase`, not
+    /// `session.state`), which is exactly the gap that made calling
+    /// `session.signOut()` alone unsafe (it would leave `MainTabView`
+    /// rendering over a signed-out session).
+    ///
+    /// `tokenBox.set(nil)` runs BEFORE `session.signOut()`: this method has
+    /// no handle to cancel a sync already in flight (every
+    /// `Task { await syncEngine?.syncNow() }` call site elsewhere in this
+    /// file is fire-and-forget, not stored), so the one thing it CAN do is
+    /// make sure that straggler's next request carries no bearer token —
+    /// it 401s closed instead of finishing a flush under a session that's
+    /// about to report itself signed out.
+    func signOut() {
+        syncDebounceTask?.cancel()
+        syncDebounceTask = nil
+        syncStateTask?.cancel()
+        syncStateTask = nil
+        tokenBox.set(nil)
+        syncEngine = nil
+        store = nil
+        edits = nil
+        boundOrgId = nil
+        boundLocationId = nil
+        currentLocation = nil
+        membership = nil
+        pendingCount = 0
+        syncState = .idle
+        session.signOut()
+        phase = .login
+    }
+
     // MARK: - bootstrap
 
     func runBootstrap() async {
