@@ -4,10 +4,11 @@
 // entry with local fuzzy pick); Settings is Task 13's real view (location
 // settings, plan surface, members, account). Every tab carries the sync
 // status chip in its toolbar (§13). The Settings tab badges `pendingCount`,
-// the chip routes to a re-auth sheet or a pending-queue placeholder
-// depending on `SyncState`, and an org-deleted sync state auto-presents a
-// full-screen placeholder — all three are real screens/flows only from
-// Task 14 onward; see this task's report for the hand-off notes.
+// the chip routes to a re-auth sheet (`ReauthSheetView`) or the pending
+// queue (`PendingQueueView`) depending on `SyncState`, and an org-deleted
+// sync state auto-presents a full-screen recovery view (`OrgDeletedView`)
+// — all three are Task 14's real screens, in `BlockedStateViews.swift`/
+// `PendingQueueView.swift` (Task 9's placeholders stood in for them here).
 
 import SwiftUI
 import CostSauceKit
@@ -41,16 +42,18 @@ struct MainTabView: View {
             .badge(appModel.pendingCount > 0 ? appModel.pendingCount : 0)
         }
         .sheet(isPresented: $reauthPresented) {
-            ReauthSheet(appModel: appModel, isPresented: $reauthPresented)
+            ReauthSheetView(appModel: appModel, isPresented: $reauthPresented)
         }
         .fullScreenCover(isPresented: orgDeletedBinding) {
-            OrgDeletedPlaceholderView()
+            OrgDeletedView(appModel: appModel)
         }
     }
 
-    /// `.blocked(.orgDeleted)` auto-presents (Task 14 builds the real
-    /// screen with export/erase actions) — no dismiss action is wired
-    /// here on purpose, matching the placeholder's "no actions yet" scope.
+    /// `.blocked(.orgDeleted)` auto-presents `OrgDeletedView` — no dismiss
+    /// action is wired here; that view's own actions (export/erase) are
+    /// what get the user out of this state (erasing routes `phase` back
+    /// to `.login` via `AppModel.eraseDeviceAndSignOut`, which dismisses
+    /// this cover as a side effect of `MainTabView` no longer rendering).
     private var orgDeletedBinding: Binding<Bool> {
         Binding(
             get: { appModel.syncState == .blocked(.orgDeleted) },
@@ -60,9 +63,9 @@ struct MainTabView: View {
 }
 
 /// One tab's own `NavigationStack` + navigation title + sync chip
-/// toolbar + the chip's non-auth tap destination (a placeholder standing
-/// in for Task 14's `PendingQueueView`). Each tab gets its own instance,
-/// so each keeps independent push-navigation state.
+/// toolbar + the chip's non-auth tap destination (Task 14's real
+/// `PendingQueueView`). Each tab gets its own instance, so each keeps
+/// independent push-navigation state.
 private struct TabRootView<Content: View>: View {
     let title: String
     let appModel: AppModel
@@ -89,53 +92,8 @@ private struct TabRootView<Content: View>: View {
                     }
                 }
                 .navigationDestination(isPresented: $pendingQueuePresented) {
-                    PendingQueuePlaceholderView()
+                    PendingQueueView(appModel: appModel)
                 }
         }
-    }
-}
-
-private struct PendingQueuePlaceholderView: View {
-    var body: some View {
-        ContentUnavailableView(
-            "Pending Changes",
-            systemImage: "tray",
-            description: Text("The full pending-changes queue arrives in a later task.")
-        )
-    }
-}
-
-/// `.blocked(.authRequired)` (or `SessionController.needsReauth`, the same
-/// underlying signal) reuses `LoginView`'s form. This task's version adopts
-/// the new session and re-syncs; Task 14 additionally compares the new
-/// session's userId against the bound store's identity and routes to an
-/// identity-mismatch screen on a mismatch.
-private struct ReauthSheet: View {
-    let appModel: AppModel
-    @Binding var isPresented: Bool
-
-    var body: some View {
-        NavigationStack {
-            LoginView(appModel: appModel) { session in
-                appModel.completeReauth(session: session)
-                isPresented = false
-            }
-            .navigationTitle("Sign In Again")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { isPresented = false }
-                }
-            }
-        }
-    }
-}
-
-private struct OrgDeletedPlaceholderView: View {
-    var body: some View {
-        ContentUnavailableView(
-            "Organization Deleted",
-            systemImage: "trash",
-            description: Text("This organization is scheduled for deletion. Recovery and export options arrive in a later task.")
-        )
     }
 }

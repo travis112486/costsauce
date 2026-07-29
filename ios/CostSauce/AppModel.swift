@@ -55,6 +55,27 @@ final class AppModel {
     /// suggested price is safe to show yet.
     private(set) var suppressSuggestions: Bool = true
 
+    /// §13 identity-mismatch recovery (Task 14): populated exactly when
+    /// `phase` flips to `.identityMismatch`, by BOTH throw sites that route
+    /// there (`bindAndEnterMain`'s fresh-bootstrap path and
+    /// `completeReauth`'s re-auth path — see each method's doc comment).
+    /// `mismatchedStore` is the store ALREADY on this device that belongs
+    /// to a DIFFERENT identity than whichever session just authenticated —
+    /// `IdentityMismatchView`'s "Export pending changes" reads from THIS,
+    /// never from `store` (which is `nil` on the `bindAndEnterMain` path,
+    /// since `attachStore` never ran there). `mismatchedUserId` is that
+    /// store's owning `user_id`, captured before any wipe — the erase path
+    /// needs it to clean up every `store-<uid>-*.sqlite` file for that
+    /// identity, not just the one file that happened to trigger the
+    /// mismatch (Task 9 review note). `mismatchedSession` is the
+    /// just-authenticated session `completeReauth` deliberately did NOT
+    /// adopt (see that method's doc comment) — nil on the
+    /// `bindAndEnterMain` path, where the new session is already live in
+    /// `session.state` and there's nothing left to adopt.
+    private(set) var mismatchedStore: LocalStore?
+    private(set) var mismatchedUserId: String?
+    private(set) var mismatchedSession: Session?
+
     // MARK: - private wiring
 
     private let keychain: KeychainStore
@@ -160,6 +181,29 @@ final class AppModel {
         return directory.appendingPathComponent(match).path
     }
 
+    /// §13 erase paths (`switchAccountAndErase`/`eraseDeviceAndSignOut`):
+    /// deletes EVERY `store-<userId>-*.sqlite` file for `userId`, not just
+    /// one — `findExistingStorePath`'s `entries.first(where:)` above has no
+    /// defined ordering, so if this identity ever ends up with more than
+    /// one store file on disk (e.g. a prior session bound org A, a later
+    /// one bound org B, and both files survived a plain sign-out), a
+    /// future fast-path lookup for this same `userId` could pick either
+    /// one ambiguously (Task 9 review note). Best-effort (`try?`): a
+    /// failed delete here still leaves `LocalStore.wipe()` having already
+    /// cleared every row INCLUDING `meta`, so a stray leftover file poses
+    /// no identity/data-mixing risk even if this loop can't remove it —
+    /// only disk hygiene is at stake, never correctness.
+    private static func removeStoreFiles(userId: String) {
+        let directory = applicationSupportDirectory()
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else {
+            return
+        }
+        let prefix = "store-\(userId)-"
+        for entry in entries where entry.hasPrefix(prefix) && entry.hasSuffix(".sqlite") {
+            try? FileManager.default.removeItem(at: directory.appendingPathComponent(entry))
+        }
+    }
+
     // MARK: - config / GoTrue
 
     /// `/config`'s null `supabase_url` means the reviewer-only sign-in path
@@ -207,17 +251,23 @@ final class AppModel {
     /// Mirrors `bindAndEnterMain`'s handling of the identical
     /// `StoreError.identityMismatch` condition: on a mismatch, this method
     /// does not adopt the new session or touch `tokenBox`/`syncEngine` at
-    /// all — it only flips `phase` to the same `.identityMismatch`
-    /// placeholder destination (Task 14 owns the real screen — export /
-    /// typed-ERASE switch / cancel — and whatever re-adoption of this
-    /// session that flow ends up needing). Not adopting the session here
-    /// also matters beyond just this one call: an adopted-but-mismatched
-    /// session would still be sitting in `tokenBox`, available to any OTHER
-    /// automatic sync trigger (`refreshOnlineData` on `scenePhase == .active`,
-    /// a future `syncSoon()` call) to flush the same wrong-identity queue
-    /// behind this guard's back.
+    /// all — it only captures the mismatch context Task 14's real screen
+    /// needs (`mismatchedStore`/`mismatchedUserId`/`mismatchedSession`, see
+    /// their doc comment above) and flips `phase` to `.identityMismatch`.
+    /// Not adopting the session here also matters beyond just this one
+    /// call: an adopted-but-mismatched session would still be sitting in
+    /// `tokenBox`, available to any OTHER automatic sync trigger
+    /// (`refreshOnlineData` on `scenePhase == .active`, a future
+    /// `syncSoon()` call) to flush the same wrong-identity queue behind
+    /// this guard's back. `newSession` is retained in `mismatchedSession`
+    /// instead — `IdentityMismatchView`'s "switch and erase" action is the
+    /// only path that ever adopts it (`switchAccountAndErase`), and only
+    /// after the OLD identity's store is fully erased.
     func completeReauth(session newSession: Session) {
-        if let store, let boundUserId = (try? store.meta())?.user_id, boundUserId != newSession.userId {
+        if let store, let meta = try? store.meta(), meta.user_id != newSession.userId {
+            mismatchedStore = store
+            mismatchedUserId = meta.user_id
+            mismatchedSession = newSession
             phase = .identityMismatch
             return
         }
@@ -255,6 +305,12 @@ final class AppModel {
     /// make sure that straggler's next request carries no bearer token —
     /// it 401s closed instead of finishing a flush under a session that's
     /// about to report itself signed out.
+    ///
+    /// Also clears any `.identityMismatch` context (Task 14): both
+    /// `IdentityMismatchView`'s "Cancel" and `eraseDeviceAndSignOut`'s
+    /// org-deleted erase route through this method, and a stale
+    /// `mismatchedStore`/`mismatchedSession` left over from a PRIOR
+    /// mismatch must never leak into whatever this device does next.
     func signOut() {
         syncDebounceTask?.cancel()
         syncDebounceTask = nil
@@ -272,6 +328,109 @@ final class AppModel {
         syncState = .idle
         session.signOut()
         phase = .login
+        mismatchedStore = nil
+        mismatchedUserId = nil
+        mismatchedSession = nil
+    }
+
+    // MARK: - §13 identity-mismatch / org-deleted recovery (Task 14)
+
+    /// `IdentityMismatchView`'s "Switch account and erase," after the user
+    /// typed "ERASE" to confirm. Order matters twice over here:
+    ///
+    /// 1. `mismatchedUserId` (captured at the moment the mismatch was
+    ///    detected, see `completeReauth`/`bindAndEnterMain`) is read into a
+    ///    local BEFORE `wipe()` runs, since `wipe()` deletes the store's
+    ///    `meta` row along with everything else — reading it after wiping
+    ///    would find nothing.
+    /// 2. Every strong reference to `mismatchedStore` (both this
+    ///    property AND, on `completeReauth`'s path, `store` itself — the
+    ///    two are the SAME object there) is dropped BEFORE
+    ///    `removeStoreFiles` unlinks its file from disk, so GRDB's
+    ///    `DatabaseQueue` has already closed the sqlite connection by the
+    ///    time the file disappears out from under it, rather than
+    ///    unlinking a file a live connection still has open. This is why
+    ///    the code below never binds `mismatchedStore` to a local `let` —
+    ///    a `guard let mismatchedStore` would keep its OWN strong
+    ///    reference alive for the rest of the function's scope regardless
+    ///    of `self.mismatchedStore = nil` further down, silently
+    ///    reintroducing the exact race this ordering exists to avoid.
+    ///    Every access below goes through `self.mismatchedStore` via
+    ///    optional chaining instead, so nilling the property really is
+    ///    the last strong reference dropped.
+    ///
+    /// Deletes every store file for the OLD identity (`removeStoreFiles`,
+    /// Task 9 review note — not just `wipe()`'s row-level clear — see this
+    /// task's report for why both), tears down whatever Kit objects this
+    /// session had attached (mirrors `signOut()`'s teardown, minus
+    /// `session.signOut()` itself — this is a SWITCH, not a sign-out),
+    /// then adopts the previously-parked new session (only non-nil on the
+    /// `completeReauth` path — `bindAndEnterMain`'s path already has its
+    /// session live) and restarts bootstrap from `.bootstrap` so a
+    /// brand-new store gets created and bound under the new identity,
+    /// exactly like a first-time sign-in.
+    func switchAccountAndErase() {
+        guard mismatchedStore != nil else { return }
+        try? mismatchedStore?.wipe()
+        let oldUserId = mismatchedUserId
+        let sessionToAdopt = mismatchedSession
+
+        syncDebounceTask?.cancel()
+        syncDebounceTask = nil
+        syncStateTask?.cancel()
+        syncStateTask = nil
+        syncEngine = nil
+        store = nil
+        edits = nil
+        boundOrgId = nil
+        boundLocationId = nil
+        currentLocation = nil
+        membership = nil
+        pendingCount = 0
+        syncState = .idle
+        self.mismatchedStore = nil
+        self.mismatchedUserId = nil
+        self.mismatchedSession = nil
+
+        if let oldUserId {
+            Self.removeStoreFiles(userId: oldUserId)
+        }
+        if let sessionToAdopt {
+            session.adopt(sessionToAdopt)
+            tokenBox.set(sessionToAdopt.accessToken)
+        }
+        phase = .bootstrap
+    }
+
+    /// `OrgDeletedView`'s "Erase this device's copy" (§6.2), after the
+    /// user confirmed. The wipe IS the queue discard (§13) — no pending op
+    /// survives this, matching `LocalStore.wipe()`'s existing "deletes all
+    /// rows including meta" contract — and it's user-confirmed, never
+    /// silent. `oldUserId` is read BEFORE `wipe()` for the same reason
+    /// `switchAccountAndErase` reads `mismatchedUserId` first: `wipe()`
+    /// clears `meta` along with everything else. `removeStoreFiles` runs
+    /// AFTER `signOut()`, not before: `signOut()` is what drops the last
+    /// strong reference to `store` (nils it as part of its own teardown),
+    /// so the sqlite connection is closed before its file gets unlinked —
+    /// unlike `switchAccountAndErase`, there's no OTHER identity's file to
+    /// worry about colliding with in the meantime (this device is signing
+    /// out entirely here, not switching to a second identity mid-session),
+    /// so `removeStoreFiles` is a completeness/hygiene match for "erase,"
+    /// not a correctness requirement the way it is for the identity-switch
+    /// path (a leftover wiped-but-present file at this exact path would
+    /// just get reused, harmlessly, by a later `bind()` for the SAME
+    /// identity — see this task's report). Otherwise identical to
+    /// `signOut()`, which already wipes the Keychain (via
+    /// `session.signOut()`) and routes `phase` back to `.login` — see that
+    /// method's doc comment for why a bare `SessionController.signOut()`
+    /// alone isn't enough.
+    func eraseDeviceAndSignOut() {
+        let oldUserId = (try? store?.meta())?.user_id
+        try? store?.wipe()
+        signOut()
+        if let oldUserId {
+            Self.removeStoreFiles(userId: oldUserId)
+        }
     }
 
     // MARK: - bootstrap
@@ -328,9 +487,23 @@ final class AppModel {
 
     /// `store.bind` throwing `identityMismatch` means this device already
     /// holds a different (user, org) than the one this session just
-    /// resolved to — routed to `.identityMismatch` (Task 14 builds the real
-    /// screen; see this task's report for the placeholder standing in for
-    /// it here).
+    /// resolved to — routed to `.identityMismatch` (Task 14's real
+    /// screen). The `do` block's own `newStore` isn't reachable from the
+    /// `catch` below (Swift scopes a `do`'s `let`s to that block), so the
+    /// catch reopens a second `LocalStore` handle at the identical path —
+    /// safe, since `bind`'s failure rolled back only the write transaction
+    /// it opened, not the file itself, and this app never has two
+    /// `LocalStore`s live over the same path at once (the first one falls
+    /// out of scope, unretained, the moment `catch` runs). Captured as
+    /// `mismatchedStore` (plus its owning `mismatchedUserId`, read via
+    /// `meta()` before anything ever wipes it) so `IdentityMismatchView`
+    /// has something to export/erase. This session is ALREADY adopted by
+    /// the time this runs (`completeInitialSignIn` adopts before
+    /// `phase = .bootstrap` ever gets here), so unlike `completeReauth`'s
+    /// identical branch, there's no separate "new session" left to park in
+    /// `mismatchedSession` — `switchAccountAndErase` only needs to erase
+    /// the old store and let `session.state`'s already-active session
+    /// carry bootstrap forward.
     private func bindAndEnterMain(userId: String, orgId: String, location: LocationOut) {
         do {
             let newStore = try LocalStore(path: Self.storePath(userId: userId, orgId: orgId))
@@ -342,6 +515,10 @@ final class AppModel {
                 await self?.syncEngine?.syncNow()
             }
         } catch let storeError as StoreError where storeError.kind == .identityMismatch {
+            let newStore = try? LocalStore(path: Self.storePath(userId: userId, orgId: orgId))
+            mismatchedStore = newStore
+            mismatchedUserId = (try? newStore?.meta())?.user_id
+            mismatchedSession = nil
             phase = .identityMismatch
         } catch {
             bootstrapError = error.localizedDescription

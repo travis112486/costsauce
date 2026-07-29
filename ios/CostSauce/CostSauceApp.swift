@@ -34,7 +34,7 @@ private struct RootView: View {
             case .main:
                 MainTabView(appModel: appModel)
             case .identityMismatch:
-                IdentityMismatchPlaceholderView()
+                IdentityMismatchView(appModel: appModel)
             }
         }
         .onChange(of: scenePhase) { _, newPhase in
@@ -42,19 +42,5 @@ private struct RootView: View {
                 Task { await appModel.refreshOnlineData() }
             }
         }
-    }
-}
-
-/// `store.bind` throwing `identityMismatch` routes here. Task 14 builds
-/// the real screen (export pending changes / switch-and-erase / cancel);
-/// this is a deliberately minimal, action-less placeholder standing in
-/// for it (see task-9-report.md's hand-off notes).
-private struct IdentityMismatchPlaceholderView: View {
-    var body: some View {
-        ContentUnavailableView(
-            "Different Account Signed In",
-            systemImage: "person.crop.circle.badge.exclamationmark",
-            description: Text("This device holds unsynced changes for a different account. Recovery options arrive in a later task.")
-        )
     }
 }
