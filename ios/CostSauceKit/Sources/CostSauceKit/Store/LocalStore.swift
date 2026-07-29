@@ -292,6 +292,19 @@ public final class LocalStore: Sendable {
         }
     }
 
+    /// Every ingredient, including tombstoned ones -- (name, id) order,
+    /// same as `liveIngredients` but without the `deleted_at` filter.
+    /// `Costing.costRecipes` (Task 6) needs this UNFILTERED set to give a
+    /// recipe line whose ingredient was later tombstoned its real
+    /// `name`/`base_unit` (LEFT-JOIN parity with api/services/costing.py:
+    /// 56-62), which `liveIngredients` alone can never supply -- a
+    /// tombstoned ingredient is invisible to it by construction.
+    public func allIngredients() throws -> [LocalIngredient] {
+        try dbQueue.read { db in
+            try LocalIngredient.fetchAll(db, sql: "SELECT * FROM ingredients ORDER BY name, id")
+        }
+    }
+
     /// The `_candidates` order (api/routes/ingredients.py) — created_at, id.
     public func liveIngredientsByCreation() throws -> [LocalIngredient] {
         try dbQueue.read { db in

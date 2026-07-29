@@ -214,6 +214,31 @@ import GRDB
         #expect(tombstoned.deleted_at == "2026-07-29T11:00:00.000000Z")
     }
 
+    /// `allIngredients` (Task 6's `Costing`/`DashboardModel` need the
+    /// tombstoned rows too, for LEFT-JOIN name/base_unit parity on recipe
+    /// lines whose ingredient was later removed) includes what
+    /// `liveIngredients` excludes, in the same (name, id) order.
+    @Test func allIngredientsIncludesTombstonedRowsInNameIdOrder() throws {
+        let store = try LocalStore.inMemory()
+        try store.bind(userId: "user-1", orgId: "org-1", locationId: "loc-1")
+
+        try store.applyPullPage([
+            Self.ingredientChange(id: "ing-1", name: "Flour", serverSeq: 1),
+            Self.ingredientChange(id: "ing-2", name: "Eggs", serverSeq: 2),
+        ], cursor: 2)
+        try store.applyPullPage([
+            Self.ingredientChange(
+                id: "ing-1", name: "Flour", serverSeq: 3,
+                deletedAt: "2026-07-29 11:00:00+00"),
+        ], cursor: 3)
+
+        #expect(try store.liveIngredients().map(\.id) == ["ing-2"])
+        #expect(try store.allIngredients().map(\.id) == ["ing-2", "ing-1"])   // (name, id): Eggs, Flour
+
+        let tombstoned = try #require(try store.allIngredients().first { $0.id == "ing-1" })
+        #expect(tombstoned.deleted_at == "2026-07-29T11:00:00.000000Z")
+    }
+
     // MARK: - rebase
 
     @Test func rebaseReappliesQueuedOpOverPullOverwrite() throws {

@@ -6,12 +6,12 @@ import Foundation
 
     private static let ts = "2026-07-29T10:00:00.000000Z"
 
-    private static func ingredient(id: String, name: String) -> LocalIngredient {
+    private static func ingredient(id: String, name: String, deletedAt: String? = nil) -> LocalIngredient {
         LocalIngredient(
             id: id, location_id: "loc-1", name: name, base_unit: "lb",
             vendor: nil, category: nil, source: nil,
             client_mutated_at: ts, server_seq: 1, updated_at: ts,
-            deleted_at: nil, created_at: ts)
+            deleted_at: deletedAt, created_at: ts)
     }
 
     private static func recipe(id: String, name: String, menuPrice: String = "10.00", targetFcPct: String = "30.00") -> LocalRecipe {
@@ -74,6 +74,66 @@ import Foundation
         let mover = try #require(model.topMovers.first)
         #expect(mover.driftPct == "0.0")
         #expect(mover.direction == "down")
+    }
+
+    // MARK: - movers: tombstoned ingredients excluded (dashboard.py:26-27 parity)
+
+    @Test func tombstonedIngredientExcludedFromMoversEvenWithDriftWorthyHistory() throws {
+        // Same +50.0% drift-worthy history as `tieSortByNameThenIngredientId`
+        // below -- proves exclusion is driven by liveness, not by a missing
+        // drift entry.
+        let ingredients = [
+            Self.ingredient(id: "ing-gone", name: "Tombstoned", deletedAt: Self.ts),
+        ]
+        let purchases = [
+            Self.purchase(id: "pu-latest", ingredientId: "ing-gone", purchasedOn: "2026-07-29", totalPrice: "3.00"),
+            Self.purchase(id: "pu-b1", ingredientId: "ing-gone", purchasedOn: "2026-07-20", totalPrice: "2.00"),
+            Self.purchase(id: "pu-b2", ingredientId: "ing-gone", purchasedOn: "2026-07-10", totalPrice: "2.00"),
+            Self.purchase(id: "pu-b3", ingredientId: "ing-gone", purchasedOn: "2026-06-30", totalPrice: "2.00"),
+        ]
+        let model = try DashboardModel.build(
+            ingredients: ingredients, purchases: purchases, recipes: [], items: [],
+            driftThresholdPct: "0.00")
+
+        #expect(model.topMovers.isEmpty)
+        #expect(model.alerts.isEmpty)
+    }
+
+    // MARK: - menuItems: tombstoned ingredient keeps its real name (LEFT-JOIN parity)
+
+    @Test func menuItemForTombstonedIngredientKeepsRealNameAndBaseUnitButIsIncomplete() throws {
+        // `ingredients` is the UNFILTERED (LocalStore.allIngredients()) set
+        // build's contract now requires: it must include the tombstoned
+        // row for costRecipes to resolve its name/base_unit, while the
+        // movers loop filters it out internally (covered above).
+        let ingredients = [
+            Self.ingredient(id: "ing-live", name: "Live One"),
+            Self.ingredient(id: "ing-gone", name: "Discontinued Ingredient", deletedAt: Self.ts),
+        ]
+        let purchases = [
+            Self.purchase(id: "pu-live", ingredientId: "ing-live", purchasedOn: "2026-07-29", totalPrice: "3.00"),
+            Self.purchase(id: "pu-gone", ingredientId: "ing-gone", purchasedOn: "2026-07-29", totalPrice: "9.00"),
+        ]
+        let recipes = [Self.recipe(id: "rec-1", name: "Broken Recipe")]
+        let items = [
+            Self.item(id: "item-live", recipeId: "rec-1", ingredientId: "ing-live"),
+            Self.item(id: "item-gone", recipeId: "rec-1", ingredientId: "ing-gone"),
+        ]
+
+        let model = try DashboardModel.build(
+            ingredients: ingredients, purchases: purchases, recipes: recipes, items: items,
+            driftThresholdPct: "10.00")
+
+        let recipe = try #require(model.menuItems.first)
+        #expect(recipe.complete == false)
+
+        let brokenItem = try #require(recipe.items.first { $0.ingredientId == "ing-gone" })
+        #expect(brokenItem.isResolvable == false)
+        #expect(brokenItem.name == "Discontinued Ingredient")
+        #expect(brokenItem.baseUnit == "lb")
+
+        // And the tombstoned ingredient still doesn't leak into movers.
+        #expect(model.topMovers.allSatisfy { $0.ingredientId != "ing-gone" })
     }
 
     // MARK: - movers: sort tie-break

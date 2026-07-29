@@ -75,6 +75,18 @@ public struct DashboardModel {
     /// Exact mirror of api/routes/dashboard.py's `dashboard` handler (the
     /// in-memory assembly half -- SQL fetching is the caller's job, same
     /// split as `Costing`).
+    ///
+    /// `ingredients` is the UNFILTERED set -- every ingredient at the
+    /// location INCLUDING tombstoned ones (`LocalStore.allIngredients()`,
+    /// not `liveIngredients()`). Two different consumers inside this
+    /// function need two different views of that one set, so it can't be
+    /// pre-filtered by the caller: `Costing.costRecipes` needs tombstoned
+    /// rows present for LEFT-JOIN name/base_unit parity on a recipe line
+    /// whose ingredient was later removed (costing.py:56-62), while the
+    /// movers loop below filters to live ingredients ITSELF, matching
+    /// dashboard.py:26-27's own `WHERE deleted_at IS NULL` ingredients
+    /// query -- a tombstoned ingredient must never appear as a mover/alert
+    /// even if its purchase history is still drift-worthy.
     public static func build(
         ingredients: [LocalIngredient], purchases: [LocalPurchase],
         recipes: [LocalRecipe], items: [LocalRecipeItem],
@@ -85,10 +97,12 @@ public struct DashboardModel {
             recipes: recipes, items: items, ingredients: ingredients, drift: drift)
 
         // "movers from ingredients in (name, id) order, skipping drift-nil
-        // or driftPct-nil entries" (dashboard.py:32-41).
-        let orderedIngredients = ingredients.sorted { a, b in
-            a.name != b.name ? a.name < b.name : a.id < b.id
-        }
+        // or driftPct-nil entries" (dashboard.py:32-41) -- dashboard.py:
+        // 26-27's own ingredients query is `WHERE deleted_at IS NULL`, so
+        // filter to live ingredients here before ordering/scanning.
+        let orderedIngredients = ingredients
+            .filter { $0.deleted_at == nil }
+            .sorted { a, b in a.name != b.name ? a.name < b.name : a.id < b.id }
         var movers: [Mover] = []
         for ingredient in orderedIngredients {
             guard let d = drift[ingredient.id], let driftPct = d.driftPct else { continue }
