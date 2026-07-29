@@ -11,6 +11,7 @@ struct GoldenFile: Decodable {
     let unitPrice: [UnitPriceCase]
     let suggestedPriceCents: [SuggestedPriceCentsCase]
     let fcStatus: [FcStatusCase]
+    let drift: [DriftCase]
 
     enum CodingKeys: String, CodingKey {
         case version
@@ -18,6 +19,7 @@ struct GoldenFile: Decodable {
         case unitPrice = "unit_price"
         case suggestedPriceCents = "suggested_price_cents"
         case fcStatus = "fc_status"
+        case drift
     }
 }
 
@@ -81,6 +83,46 @@ struct FcStatusCase: Decodable {
         case expectFc = "expect_fc"
         case expectStatus = "expect_status"
     }
+}
+
+struct DriftRow: Decodable {
+    let purchasedOn: String
+    let recordedAt: String
+    let id: String
+    let unitPrice: String
+    let deleted: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case purchasedOn = "purchased_on"
+        case recordedAt = "recorded_at"
+        case id
+        case unitPrice = "unit_price"
+        case deleted
+    }
+}
+
+struct DriftExpect: Decodable {
+    let latestPrice: String
+    let latestOn: String
+    let windowStart: String
+    let baselineN: Int
+    let trailingAvg: String?
+    let driftPct: String?
+
+    enum CodingKeys: String, CodingKey {
+        case latestPrice = "latest_price"
+        case latestOn = "latest_on"
+        case windowStart = "window_start"
+        case baselineN = "baseline_n"
+        case trailingAvg = "trailing_avg"
+        case driftPct = "drift_pct"
+    }
+}
+
+struct DriftCase: Decodable {
+    let name: String
+    let rows: [DriftRow]
+    let expect: DriftExpect?
 }
 
 /// Resolves and decodes `shared/golden-vectors.json` from this file's own
