@@ -1,10 +1,11 @@
 // The CostSauce main tab shell — Dashboard / Ingredients / Add / Settings.
-// Dashboard is Task 10's real view; Ingredients/Add/Settings' content is
-// still a placeholder standing in for Tasks 11-13's real views. Every tab
-// carries the sync status chip in its toolbar (§13). The Settings tab
-// badges `pendingCount`, the chip routes to a re-auth sheet or a
-// pending-queue placeholder depending on `SyncState`, and an org-deleted
-// sync state auto-presents a full-screen placeholder — all three are real
+// Dashboard is Task 10's real view; Ingredients is Task 11's real view
+// (list + push-navigated detail); Add/Settings' content is still a
+// placeholder standing in for Tasks 12-13's real views. Every tab carries
+// the sync status chip in its toolbar (§13). The Settings tab badges
+// `pendingCount`, the chip routes to a re-auth sheet or a pending-queue
+// placeholder depending on `SyncState`, and an org-deleted sync state
+// auto-presents a full-screen placeholder — all three are real
 // screens/flows only from Task 14 onward; see this task's report for the
 // hand-off notes.
 
@@ -24,9 +25,7 @@ struct MainTabView: View {
             }
             Tab("Ingredients", systemImage: "carrot") {
                 TabRootView(title: "Ingredients", appModel: appModel, reauthPresented: $reauthPresented) {
-                    ContentUnavailableView(
-                        "Ingredients", systemImage: "carrot",
-                        description: Text("Arrives in a later task."))
+                    IngredientsListView(appModel: appModel)
                 }
             }
             Tab("Add", systemImage: "plus.circle") {
