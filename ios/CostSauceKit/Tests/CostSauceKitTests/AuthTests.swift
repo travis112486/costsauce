@@ -96,6 +96,41 @@ struct AuthTests {
         #expect(error?.message == "otp_expired")
     }
 
+    /// The OAuth2-style field GoTrue's refresh-grant errors use (no
+    /// `msg`/`error_description` at all) -- web/js/auth.mjs's
+    /// `gotrueErrorDetail` still has an `error` branch below `msg`/
+    /// `error_description`, which is exactly what makes this body
+    /// resolvable instead of falling to the "HTTP <status>" fallback.
+    @Test func gotrueErrorOnlyBodySurfacesAsMessage() async throws {
+        let client = GoTrueClient(supabaseURL: supabaseURL, anonKey: "anon-key", session: StubTransport.makeSession())
+        let error = await expectApiError {
+            _ = try await StubTransport.withStub({ _, _ in
+                StubTransport.json(400, ["error": "invalid_grant"])
+            }) {
+                try await client.refresh(refreshToken: "stale-refresh")
+            }
+        }
+        #expect(error?.status == 400)
+        #expect(error?.detail == .text("invalid_grant"))
+        #expect(error?.message == "invalid_grant")
+    }
+
+    /// `msg` wins over `error_description` when both are present --
+    /// web/js/auth.mjs's `gotrueErrorDetail` precedence, checked first.
+    @Test func gotrueMsgTakesPrecedenceOverErrorDescription() async throws {
+        let client = GoTrueClient(supabaseURL: supabaseURL, anonKey: "anon-key", session: StubTransport.makeSession())
+        let error = await expectApiError {
+            _ = try await StubTransport.withStub({ _, _ in
+                StubTransport.json(400, ["msg": "A", "error_description": "B"])
+            }) {
+                try await client.verifyOtp(email: "alice@example.test", code: "000000")
+            }
+        }
+        #expect(error?.status == 400)
+        #expect(error?.detail == .text("A"))
+        #expect(error?.message == "A")
+    }
+
     @Test func refreshRoundTripReplacesBothTokens() async throws {
         let client = GoTrueClient(supabaseURL: supabaseURL, anonKey: "anon-key", session: StubTransport.makeSession())
         let capturedRequest = Captured<URLRequest?>(nil)

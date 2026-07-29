@@ -90,16 +90,23 @@ public final class GoTrueClient: Sendable {
     }
 
     /// GoTrue error bodies aren't consistent across endpoints/versions;
-    /// tried in this order per the task brief: `error_description`,
-    /// `msg`, `message`. Always resolves to a usable string, never the raw
-    /// response object (web/js/auth.mjs's `gotrueErrorDetail` parity).
+    /// tried in this order, matching web/js/auth.mjs's `gotrueErrorDetail`
+    /// EXACTLY (that file is the authoritative reference — a prior draft
+    /// of this method followed the task brief's literal field list
+    /// instead, `error_description → msg → message`, which was an
+    /// authoring error in the brief, not an intentional iOS divergence):
+    /// `msg`, then `error_description`, then `error` (the OAuth2-style
+    /// field GoTrue's refresh-grant errors use, e.g.
+    /// `{"error": "invalid_grant"}`). There is no `message` field in the
+    /// web reference; always resolves to a usable string, never the raw
+    /// response object.
     private static func gotrueErrorDetail(_ data: Data, _ status: Int) -> String {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return "HTTP \(status)"
         }
-        if let s = object["error_description"] as? String { return s }
         if let s = object["msg"] as? String { return s }
-        if let s = object["message"] as? String { return s }
+        if let s = object["error_description"] as? String { return s }
+        if let s = object["error"] as? String { return s }
         return "HTTP \(status)"
     }
 
