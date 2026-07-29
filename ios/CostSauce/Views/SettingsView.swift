@@ -75,9 +75,10 @@ struct SettingsView: View {
             // `currentLocation` only ever comes from an explicit
             // `/locations` fetch (same gap `DashboardView`'s own
             // `currentLocation == nil` branch documents). Rare in
-            // practice (populated at bind time on both bootstrap paths),
-            // but possible right after a fresh fast-path launch before
-            // `refreshOnlineData()` has landed.
+            // practice (populated at bind time on both bootstrap paths, and
+            // seeded from a persisted snapshot on a fast-path launch) --
+            // only reachable offline on a device that has never once
+            // landed a `/locations` fetch to save a snapshot from.
             Section("Location") {
                 HStack {
                     ProgressView()

@@ -42,14 +42,18 @@ struct DashboardView: View {
             // drift threshold this whole build depends on only ever comes
             // from an explicit `/locations` fetch (`AppModel.currentLocation`,
             // populated at bind time and refreshed on every
-            // `refreshOnlineData()` call). Offline right after a fresh
-            // launch that took the already-bound-device fast path
-            // (`AppModel.tryFastPathToMain`), that fetch hasn't necessarily
-            // landed yet, so there's nothing to build with — once it does
-            // land, `currentLocation` flips non-nil and `RefreshKey` below
+            // `refreshOnlineData()` call). A fresh launch that took the
+            // already-bound-device fast path (`AppModel.tryFastPathToMain`)
+            // seeds `currentLocation` from a persisted snapshot of the last
+            // successful fetch instead of waiting on a new one, so this
+            // branch is only reachable offline on a device that has never
+            // once landed that fetch (e.g. it bound before that snapshot
+            // existed). Once a fetch does land, `currentLocation` flips
+            // non-nil (and saves a fresh snapshot) and `RefreshKey` below
             // reruns `load()`. Any time after that first landing, this
             // branch is never hit again even offline: `currentLocation`
-            // keeps whatever it last successfully fetched.
+            // keeps whatever it last successfully fetched, restored from
+            // that snapshot across a relaunch.
             ProgressView("Loading your location…")
         } else if dashboard == nil {
             ProgressView()

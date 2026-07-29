@@ -208,6 +208,66 @@ final class AppModel {
         try? FileManager.default.removeItem(atPath: Self.storePath(userId: userId, orgId: orgId))
     }
 
+    // MARK: - location snapshot (offline cold start)
+
+    /// `tryFastPathToMain` enters `.main` without ever calling `/locations`
+    /// (that only happens later, via `refreshOnlineData`) — so a relaunch
+    /// that starts offline, which iOS routinely forces by evicting
+    /// backgrounded apps, would otherwise leave `currentLocation` nil, and
+    /// with it Dashboard/Settings' location form stuck on "Loading your
+    /// location…", for the whole offline session even though nothing about
+    /// the last-known location has actually changed. This persists exactly
+    /// `LocationOut` (already `Codable` — Dashboard/Settings read all four
+    /// of its fields, so there's nothing to trim) to `UserDefaults` so
+    /// `tryFastPathToMain` can seed `currentLocation` from the last
+    /// successful fetch instead of leaving it nil until a new one lands.
+    /// `targetFcPct`/`driftThresholdPct` round-trip as the STRINGS they
+    /// already are (Global Constraints) — plain `Codable` synthesis never
+    /// touches Double/Float/Decimal.
+    ///
+    /// Keyed by all three of `(userId, orgId, locationId)`, not
+    /// `locationId` alone — the same identity-binding concern
+    /// `storePath`/`removeStoreFile` above already guard against applies
+    /// here too: a location id is shared by every member of its org, so a
+    /// `locationId`-only key would let one member's device read whichever
+    /// OTHER member of that same org most recently saved a snapshot for it.
+    private static func locationSnapshotKey(userId: String, orgId: String, locationId: String) -> String {
+        "locationSnapshot-\(userId)-\(orgId)-\(locationId)"
+    }
+
+    /// Called everywhere a fresh `locations()` fetch (or a Settings save's
+    /// PATCH response) sets `currentLocation` — `bindAndEnterMain`,
+    /// `refreshOnlineData`, `applyLocationUpdate`. A later successful fetch
+    /// always overwrites this the same way it overwrites `currentLocation`
+    /// itself, so the snapshot never lags more than one fetch behind.
+    private static func saveLocationSnapshot(_ location: LocationOut, userId: String, orgId: String) {
+        guard let data = try? JSONEncoder().encode(location) else { return }
+        UserDefaults.standard.set(
+            data, forKey: locationSnapshotKey(userId: userId, orgId: orgId, locationId: location.id))
+    }
+
+    private static func loadLocationSnapshot(userId: String, orgId: String, locationId: String) -> LocationOut? {
+        guard
+            let data = UserDefaults.standard.data(
+                forKey: locationSnapshotKey(userId: userId, orgId: orgId, locationId: locationId))
+        else { return nil }
+        return try? JSONDecoder().decode(LocationOut.self, from: data)
+    }
+
+    /// §13 erase paths only (`switchAccountAndErase`/`eraseDeviceAndSignOut`)
+    /// — mirrors `removeStoreFile`'s scope exactly: the ONE snapshot the
+    /// erased identity owns, never a broader sweep. Ordinary `signOut()`
+    /// deliberately does NOT call this: §13 sign-out never wipes local data,
+    /// and this snapshot is exactly that kind of data — it sits beside the
+    /// same sqlite file that already survives sign-out untouched, so a later
+    /// sign-in as the SAME user resumes via `tryFastPathToMain` exactly as
+    /// if the app had just relaunched (that method's own doc comment), with
+    /// a still-correct location snapshot ready to seed it immediately.
+    private static func clearLocationSnapshot(userId: String, orgId: String, locationId: String) {
+        UserDefaults.standard.removeObject(
+            forKey: locationSnapshotKey(userId: userId, orgId: orgId, locationId: locationId))
+    }
+
     // MARK: - config / GoTrue
 
     /// `/config`'s null `supabase_url` means the reviewer-only sign-in path
@@ -293,7 +353,15 @@ final class AppModel {
     /// task, and the in-memory token mirror); the sqlite file on disk is
     /// left completely untouched, so a later sign-in as the SAME user
     /// resumes it via `tryFastPathToMain` exactly as if the app had just
-    /// relaunched.
+    /// relaunched. `currentLocation = nil` below is that same in-memory-only
+    /// teardown — deliberately does NOT call `clearLocationSnapshot`: the
+    /// persisted snapshot sits beside the sqlite file under the exact same
+    /// "local data survives sign-out" rule, and leaving it in place is what
+    /// lets that same later sign-in seed `currentLocation` immediately
+    /// rather than spinning again. Only the §13 erase paths
+    /// (`switchAccountAndErase`/`eraseDeviceAndSignOut`) ever call
+    /// `clearLocationSnapshot`, matching exactly where they call
+    /// `removeStoreFile`.
     ///
     /// `phase` is routed back to `.login` explicitly here — nothing else in
     /// this file observes `SessionController.state` to do that
@@ -400,6 +468,8 @@ final class AppModel {
 
         if let oldMeta {
             Self.removeStoreFile(userId: oldMeta.user_id, orgId: oldMeta.org_id)
+            Self.clearLocationSnapshot(
+                userId: oldMeta.user_id, orgId: oldMeta.org_id, locationId: oldMeta.location_id)
         }
         if let sessionToAdopt {
             session.adopt(sessionToAdopt)
@@ -441,6 +511,8 @@ final class AppModel {
         signOut()
         if let oldMeta {
             Self.removeStoreFile(userId: oldMeta.user_id, orgId: oldMeta.org_id)
+            Self.clearLocationSnapshot(
+                userId: oldMeta.user_id, orgId: oldMeta.org_id, locationId: oldMeta.location_id)
         }
     }
 
@@ -524,6 +596,7 @@ final class AppModel {
             try newStore.bind(userId: userId, orgId: orgId, locationId: location.id)
             attachStore(newStore, orgId: orgId, locationId: location.id)
             currentLocation = location
+            Self.saveLocationSnapshot(location, userId: userId, orgId: orgId)
             phase = .main
             Task { [weak self] in
                 await self?.syncEngine?.syncNow()
@@ -541,6 +614,15 @@ final class AppModel {
 
     /// On later launches, a local store already bound to this session's
     /// `userId` skips the membership/location picker flow entirely.
+    /// `currentLocation` is seeded from whatever `saveLocationSnapshot` last
+    /// persisted for this exact `(userId, orgId, locationId)` — nil if
+    /// nothing was ever saved (e.g. a device bound before this snapshot
+    /// existed, taking this fast path offline for the very first time) —
+    /// which is exactly `DashboardView`/`SettingsView`'s existing
+    /// `currentLocation == nil` spinner case, not a new failure mode this
+    /// introduces. `refreshOnlineData()` below still runs and overwrites
+    /// both the in-memory value and the snapshot the moment a real fetch
+    /// lands.
     private func tryFastPathToMain() async -> Bool {
         guard case .active(let authSession) = session.state else { return false }
         guard let existingPath = Self.findExistingStorePath(userId: authSession.userId) else { return false }
@@ -548,6 +630,8 @@ final class AppModel {
         guard let meta = try? existingStore.meta(), meta.user_id == authSession.userId else { return false }
 
         attachStore(existingStore, orgId: meta.org_id, locationId: meta.location_id)
+        currentLocation = Self.loadLocationSnapshot(
+            userId: meta.user_id, orgId: meta.org_id, locationId: meta.location_id)
         phase = .main
         Task { [weak self] in
             await self?.refreshOnlineData()
@@ -620,7 +704,7 @@ final class AppModel {
     /// a sync, and re-fetch `locations()` so `currentLocation` (locations
     /// don't sync through the pull loop) stays current while online.
     func refreshOnlineData() async {
-        guard case .active = session.state else { return }
+        guard case .active(let authSession) = session.state else { return }
         await session.refreshIfNeeded(gotrue: gotrue)
         tokenBox.set(currentAccessToken)
         await syncEngine?.syncNow()
@@ -628,6 +712,7 @@ final class AppModel {
         guard let locations = try? await api.locations(orgId: boundOrgId) else { return }
         if let match = locations.first(where: { $0.id == boundLocationId }) {
             currentLocation = match
+            Self.saveLocationSnapshot(match, userId: authSession.userId, orgId: boundOrgId)
         }
     }
 
@@ -639,11 +724,21 @@ final class AppModel {
     /// poll.
     func applyLocationUpdate(_ location: LocationOut) {
         currentLocation = location
+        if let currentUserId, let boundOrgId {
+            Self.saveLocationSnapshot(location, userId: currentUserId, orgId: boundOrgId)
+        }
     }
 
     private var currentAccessToken: String? {
         if case .active(let activeSession) = session.state {
             return activeSession.accessToken
+        }
+        return nil
+    }
+
+    private var currentUserId: String? {
+        if case .active(let activeSession) = session.state {
+            return activeSession.userId
         }
         return nil
     }
