@@ -414,9 +414,20 @@ private struct CreateIngredientSheet: View {
                 name: name, baseUnit: baseUnit,
                 vendor: trimmedVendor.isEmpty ? nil : trimmedVendor,
                 category: trimmedCategory.isEmpty ? nil : trimmedCategory)
+            // A genuine local write -- mints a queued insert op, same as
+            // every other `LocalEdits` mutation call site (`save()`'s own
+            // `createPurchase` path above, `IngredientsListView`'s
+            // tombstone path) -- so it gets the same "schedule a sync right
+            // after the edit" treatment.
+            appModel.syncSoon()
             onCreated(id, name)
         } catch let error as LocalEdits.EditError {
             if case .duplicate(let existingId, let existingName) = error {
+                // No `syncSoon()` here on purpose: `createIngredient` throws
+                // `.duplicate` BEFORE it ever calls `store.enqueue` (see its
+                // own doc comment / implementation), so adopting the
+                // existing id mints no op and changes nothing that needs
+                // pushing -- this is a pure local read, not a write.
                 onCreated(existingId, existingName)
             }
             // `.inUse` is never thrown by `createIngredient` (only by
