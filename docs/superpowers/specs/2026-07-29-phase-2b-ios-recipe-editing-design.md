@@ -224,9 +224,13 @@ from 2a, and it applies to the editor's preview too.
 coalescing; every §9 rejection; and — the critical one — **deleting a recipe enqueues one tombstone per
 live line**.
 
-**Parity tests:** the draft preview is pinned against `shared/golden-vectors.json`, so the phone's plate
-cost agrees with both the web preview and the server's costing, the same discipline that kept the 2a
-kernel honest.
+**Parity tests.** `shared/golden-vectors.json` pins the kernel primitives (`normalize_purchase`,
+`unit_price`, `fc_status`, `suggested_price_cents`, `drift`) but has **no recipe-level plate-cost class**,
+so the draft preview is pinned **transitively**: for the same lines it must produce a plate cost identical
+to `Costing.costRecipes`, which is itself the reviewed mirror of `api/services/costing.py:46-104` and
+rests on those pinned primitives. This keeps the phone in agreement with the server and the web preview
+without adding a vector class or touching `shared/`. The equivalence is asserted over the existing costing
+test cases, including the round-then-sum case where the two orders of operations differ by a cent.
 
 **Sync tests** against 2a's `FakeSyncServer`: create-with-lines applies in table order in one batch; the
 same-ingredient collision produces stale-and-adopt; a quantity edit against a server-tombstoned line
