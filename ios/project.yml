@@ -1,0 +1,34 @@
+name: CostSauce
+options:
+  bundleIdPrefix: com.costsauce
+  deploymentTarget:
+    iOS: "26.0"
+packages:
+  CostSauceKit:
+    path: CostSauceKit
+targets:
+  CostSauce:
+    type: application
+    platform: iOS
+    sources:
+      - CostSauce
+    dependencies:
+      - package: CostSauceKit
+    settings:
+      GENERATE_INFOPLIST_FILE: YES
+      CODE_SIGNING_ALLOWED: "NO"
+  CostSauceUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - CostSauceUITests
+    dependencies:
+      - target: CostSauce
+schemes:
+  CostSauce:
+    build:
+      targets:
+        CostSauce: all
+    test:
+      targets:
+        - CostSauceUITests
