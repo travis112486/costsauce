@@ -350,10 +350,31 @@ public final class LocalStore: Sendable {
         }
     }
 
+    /// Unlike `liveRecipes`, this is NOT filtered by `deleted_at`: a
+    /// tombstoned row must still be queryable by id (mirrors `ingredient(id:)`).
+    public func recipe(id: String) throws -> LocalRecipe? {
+        try dbQueue.read { db in
+            try LocalRecipe.fetchOne(db, sql: "SELECT * FROM recipes WHERE id = ?", arguments: [id])
+        }
+    }
+
     public func liveRecipeItems() throws -> [LocalRecipeItem] {
         try dbQueue.read { db in
             try LocalRecipeItem.fetchAll(
                 db, sql: "SELECT * FROM recipe_items WHERE deleted_at IS NULL ORDER BY id")
+        }
+    }
+
+    /// Overload of `liveRecipeItems()` scoped to one recipe -- `liveRecipeItems()`
+    /// itself stays unfiltered-by-recipe (DashboardModel consumes it that way).
+    public func liveRecipeItems(recipeId: String) throws -> [LocalRecipeItem] {
+        try dbQueue.read { db in
+            try LocalRecipeItem.fetchAll(
+                db, sql: """
+                    SELECT * FROM recipe_items WHERE recipe_id = ? AND deleted_at IS NULL
+                    ORDER BY id
+                    """,
+                arguments: [recipeId])
         }
     }
 

@@ -28,6 +28,7 @@ public struct LocalEdits {
     public enum EditError: Error, Equatable {
         case duplicate(existingId: String, name: String)
         case inUse(count: Int)
+        case lastLine
     }
 
     /// Mirrors `POST /locations/{id}/ingredients` (api/routes/ingredients.py:69-97).
@@ -151,6 +152,135 @@ public struct LocalEdits {
         let mutatedAt = Kernel.canonicalTimestamp(now)
         try store.enqueue(PendingOp(
             op_id: opId, table: "ingredients", row_id: id, location_id: locationId,
+            client_mutated_at: mutatedAt, kind: .update,
+            fields: ["deleted_at": mutatedAt],
+            state: .queued, reason: nil, created_at: mutatedAt))
+    }
+
+    /// Mirrors `PATCH /recipes/{id}`. `UPDATE_FIELDS.recipes` is `{name,
+    /// menu_price, target_fc_pct, deleted_at}`; each parameter `nil` means
+    /// "unchanged" -- simply omitted from `fields`, never sent as an explicit
+    /// null (these three columns are never nullable). If every parameter is
+    /// `nil` (or every non-nil value is already what the row holds -- this
+    /// method doesn't diff against the current row, only against "was a
+    /// value supplied at all"), `fields` stays empty and nothing is
+    /// enqueued: a no-change Save must not mint an op. `menu_price`/
+    /// `target_fc_pct` must parse as a positive `Rational` (schema CHECKs:
+    /// `numeric(10,2) > 0`, `numeric(5,2) > 0`).
+    public func updateRecipeFields(
+        id: String, name: String?, menuPrice: String?, targetFcPct: String?, now: Date = Date()
+    ) throws {
+        var fields: [String: String?] = [:]
+        if let name {
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                throw KernelError("name must not be empty")
+            }
+            fields["name"] = trimmed
+        }
+        if let menuPrice {
+            guard try Rational.parseDec(menuPrice).isPositive else {
+                throw KernelError("menu_price must be greater than zero")
+            }
+            fields["menu_price"] = menuPrice
+        }
+        if let targetFcPct {
+            guard try Rational.parseDec(targetFcPct).isPositive else {
+                throw KernelError("target_fc_pct must be greater than zero")
+            }
+            fields["target_fc_pct"] = targetFcPct
+        }
+        guard !fields.isEmpty else { return }
+
+        let opId = UUIDv7.generate(now: now)
+        let mutatedAt = Kernel.canonicalTimestamp(now)
+        try store.enqueue(PendingOp(
+            op_id: opId, table: "recipes", row_id: id, location_id: locationId,
+            client_mutated_at: mutatedAt, kind: .update, fields: fields,
+            state: .queued, reason: nil, created_at: mutatedAt))
+    }
+
+    /// Mirrors `POST /recipes/{id}/items`. `INSERT_FIELDS.recipe_items` is
+    /// `{recipe_id, ingredient_id, qty_base_units, deleted_at}`; this sends
+    /// the first three always. Guards run in this order: the recipe must be
+    /// live, the ingredient must be live, `qty` must parse positive, and no
+    /// live line on the recipe may already hold this ingredient --
+    /// pre-empting the server's `recipe_items_live_uq` constraint with the
+    /// same `EditError.duplicate` shape `createIngredient` uses.
+    public func addRecipeLine(
+        recipeId: String, ingredientId: String, qty: String, now: Date = Date()
+    ) throws -> String {
+        guard let recipe = try store.recipe(id: recipeId), recipe.deleted_at == nil else {
+            throw KernelError("recipe is not live")
+        }
+        guard let ingredient = try store.ingredient(id: ingredientId), ingredient.deleted_at == nil else {
+            throw KernelError("ingredient is not live")
+        }
+        guard try Rational.parseDec(qty).isPositive else {
+            throw KernelError("quantity must be greater than zero")
+        }
+        let liveLines = try store.liveRecipeItems(recipeId: recipeId)
+        if let existing = liveLines.first(where: { $0.ingredient_id == ingredientId }) {
+            throw EditError.duplicate(existingId: existing.id, name: ingredient.name)
+        }
+
+        let rowId = UUIDv7.generate(now: now)
+        let opId = UUIDv7.generate(now: now)
+        let mutatedAt = Kernel.canonicalTimestamp(now)
+        let fields: [String: String?] = [
+            "recipe_id": recipeId,
+            "ingredient_id": ingredientId,
+            "qty_base_units": qty,
+        ]
+
+        try store.enqueue(PendingOp(
+            op_id: opId, table: "recipe_items", row_id: rowId, location_id: locationId,
+            client_mutated_at: mutatedAt, kind: .insert, fields: fields,
+            state: .queued, reason: nil, created_at: mutatedAt))
+        return rowId
+    }
+
+    /// Mirrors `PATCH /recipe_items/{id}`. `fields` is `{qty_base_units}`
+    /// ONLY -- `recipe_id`/`ingredient_id` are immutable over sync
+    /// (`UPDATE_FIELDS.recipe_items` omits them entirely; repointing a line
+    /// to a different ingredient is a tombstone + a fresh `addRecipeLine`,
+    /// never an update).
+    public func updateRecipeLineQty(itemId: String, qty: String, now: Date = Date()) throws {
+        guard try store.liveRecipeItems().contains(where: { $0.id == itemId }) else {
+            throw KernelError("recipe line is not live")
+        }
+        guard try Rational.parseDec(qty).isPositive else {
+            throw KernelError("quantity must be greater than zero")
+        }
+
+        let opId = UUIDv7.generate(now: now)
+        let mutatedAt = Kernel.canonicalTimestamp(now)
+        try store.enqueue(PendingOp(
+            op_id: opId, table: "recipe_items", row_id: itemId, location_id: locationId,
+            client_mutated_at: mutatedAt, kind: .update,
+            fields: ["qty_base_units": qty],
+            state: .queued, reason: nil, created_at: mutatedAt))
+    }
+
+    /// A plain tombstone update -- fields are exactly `{deleted_at}`, a subset
+    /// of `UPDATE_FIELDS.recipe_items`. The local guard runs BEFORE any op is
+    /// queued, same shape as `tombstoneIngredient`'s in-use guard: a recipe's
+    /// last live line may never be tombstoned, because a lineless recipe
+    /// costs out at zero and reports a healthy FC% -- worse than an error
+    /// (spec §9).
+    public func tombstoneRecipeLine(itemId: String, now: Date = Date()) throws {
+        guard let item = try store.liveRecipeItems().first(where: { $0.id == itemId }) else {
+            throw KernelError("recipe line is not live")
+        }
+        let siblingLines = try store.liveRecipeItems(recipeId: item.recipe_id)
+        guard siblingLines.count > 1 else {
+            throw EditError.lastLine
+        }
+
+        let opId = UUIDv7.generate(now: now)
+        let mutatedAt = Kernel.canonicalTimestamp(now)
+        try store.enqueue(PendingOp(
+            op_id: opId, table: "recipe_items", row_id: itemId, location_id: locationId,
             client_mutated_at: mutatedAt, kind: .update,
             fields: ["deleted_at": mutatedAt],
             state: .queued, reason: nil, created_at: mutatedAt))
