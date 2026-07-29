@@ -157,10 +157,19 @@ public actor SyncEngine {
             // state that already claims `.caughtUp` -- exactly the signal
             // Task 9's suppression logic reads to decide whether to nag the
             // user about a still-pending edit.
-            var baselineResetDone = false
+            //
+            // This loop is UNBOUNDED by design, not an oversight: it is the
+            // only way to make "caughtUp implies nothing is queued" an
+            // actual guarantee rather than a best-effort. Termination still
+            // holds in the ordinary case -- `pushQueuedOps` always resolves
+            // every op it sends to either `.needsAttention` or deleted
+            // (never leaves it `.queued`), so a given op can delay at most
+            // one more pass -- and only fails to terminate if the app layer
+            // keeps enqueueing new edits faster than one push+pull round
+            // trip completes, which is not a realistic edit rate.
             while true {
                 let sawStale = try await pushQueuedOps()
-                if sawStale && !baselineResetDone {
+                if sawStale {
                     // §14 convergence / silent-LWW correctness (controller
                     // ruling: "truth arrives on the trailing pull" governs,
                     // make it true). A `stale` rejection means the LOCAL
@@ -185,11 +194,25 @@ public actor SyncEngine {
                     // re-fetch the conflicting row, and with the op already
                     // deleted, nothing re-applies the rejected value on top
                     // this time -- the server's true value lands and
-                    // stands. Full re-pull is only paid on this rare
-                    // (cross-device-conflict) path, and the org dataset is
-                    // small enough for that cost to be acceptable.
+                    // stands.
+                    //
+                    // Re-armed on EVERY iteration that sees a stale result,
+                    // not just the first: a row an earlier iteration's own
+                    // reset pull re-fetched can get freshly rebase-overlaid
+                    // by an op that was enqueued mid-reset (or simply hadn't
+                    // been pushed yet) and turns out to ALSO be stale on a
+                    // later iteration's push -- a one-shot flag would leave
+                    // THAT row's wrong value stuck forever, since its
+                    // server_seq is by then <= the already-advanced cursor
+                    // too. A given op can only ever trigger one stale result
+                    // (once pushed, it's gone from `.queued` either way), so
+                    // this can't itself cause an extra iteration -- it just
+                    // ensures whichever iteration discovers the conflict
+                    // also gets to fix it. Full re-pull is only paid on
+                    // these rare (cross-device-conflict) iterations, and the
+                    // org dataset is small enough for that cost to be
+                    // acceptable.
                     try store.applyPullPage([], cursor: 0)
-                    baselineResetDone = true
                 }
                 try await pullLoop()
                 if try store.pendingOps(state: .queued).isEmpty { break }

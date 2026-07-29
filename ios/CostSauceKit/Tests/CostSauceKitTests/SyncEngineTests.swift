@@ -278,6 +278,75 @@ struct SyncEngineTests {
         #expect(try store.ingredient(id: "ing-1")?.name == "Original")
     }
 
+    /// Review finding 3, round 2: a SECOND, later-discovered stale conflict
+    /// must ALSO force a re-pull, not just the first one the drain loop
+    /// sees. Without re-arming the reset every iteration (a one-shot flag
+    /// instead), this row's rejected value would be stuck locally forever
+    /// -- its server_seq is already <= the cursor the FIRST reset's pull
+    /// already advanced past, so a plain incremental pull never revisits
+    /// it.
+    @Test func secondStaleConflictDiscoveredMidDrainLoopAlsoForcesReset() async throws {
+        let server = FakeSyncServer()
+        server.seed(
+            table: "ingredients", id: "ing-a", clientMutatedAt: t2,
+            fields: ["name": "A-Server", "base_unit": "lb"])
+        server.seed(
+            table: "ingredients", id: "ing-b", clientMutatedAt: t2,
+            fields: ["name": "B-Server", "base_unit": "lb"])
+
+        let store = try makeStore()
+        let engine = SyncEngine(store: store, api: makeApi(), orgId: "org-1")
+
+        // Prep: pull both rows in so the device has a cursor past them
+        // BEFORE the hook below is armed -- the compound scenario is about
+        // what happens once syncing is already underway, not about the
+        // very first pull.
+        try await StubTransport.withStub(server.responder()) {
+            await engine.syncNow()
+        }
+        #expect(await engine.state == .caughtUp)
+
+        // ing-a's local edit is already queued and already stale (older
+        // than the row's known t2) -- this is iteration 1's conflict.
+        try store.enqueue(PendingOp(
+            op_id: "op-a-stale", table: "ingredients", row_id: "ing-a", location_id: "loc-1",
+            client_mutated_at: t1, kind: .update, fields: ["name": "A-Stale"],
+            state: .queued, reason: nil, created_at: t1))
+
+        // GET call count within the syncNow() below (pullCallCount carries
+        // over from the prep sync's 2 calls): #3 is this call's initial
+        // pullLoop (since=2, nothing new, precedes any push); #4 is
+        // iteration 1's reset-triggered full re-pull (since=0, after
+        // op-a-stale's push already came back stale and reset the
+        // baseline) -- exactly where a mid-flight local edit would land in
+        // the real world. Enqueueing here means op-b-stale is in
+        // pending_ops before THIS page's applyPullPage/rebase runs, so it
+        // gets rebase-overlaid onto the just-re-fetched ing-b row, exactly
+        // like op-a-stale was on an earlier pull. It's ALSO stale (t1 <
+        // ing-b's known t2) but hasn't been pushed yet -- iteration 2 is
+        // the one that discovers that, which is the whole point of this
+        // test.
+        server.onPullCall = { count in
+            if count == 4 {
+                try? store.enqueue(PendingOp(
+                    op_id: "op-b-stale", table: "ingredients", row_id: "ing-b", location_id: "loc-1",
+                    client_mutated_at: t1, kind: .update, fields: ["name": "B-Stale"],
+                    state: .queued, reason: nil, created_at: t1))
+            }
+        }
+
+        try await StubTransport.withStub(server.responder()) {
+            await engine.syncNow()
+        }
+
+        #expect(await engine.state == .caughtUp)
+        #expect(try store.pendingOps(state: nil).isEmpty)
+        // BOTH rows must show the server's value -- ing-a from iteration
+        // 1's reset, ing-b from iteration 2's (the one this fix adds).
+        #expect(try store.ingredient(id: "ing-a")?.name == "A-Server")
+        #expect(try store.ingredient(id: "ing-b")?.name == "B-Server")
+    }
+
     // MARK: - reentrancy (review finding 1)
 
     @Test func concurrentSyncNowCallsCoalesceEachOpPushedExactlyOnce() async throws {
