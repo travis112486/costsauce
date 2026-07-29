@@ -268,6 +268,121 @@ struct SyncEngineTests {
         // which is reserved for genuinely unresolvable ops (§5.5).
         #expect(try store.pendingOps(state: nil).isEmpty)
         #expect(try store.pendingOps(state: .needsAttention).isEmpty)
+        // §14 convergence (review finding 3): a `stale` result forces a full
+        // baseline re-pull (cursor reset to 0), so the row is guaranteed to
+        // be re-fetched with the rejected op already gone from pending_ops
+        // -- nothing left to rebase-overlay the locally-rejected edit back
+        // on top. The local copy must show the SERVER's value, not the
+        // value that was silently dropped -- never a value that exists
+        // nowhere.
+        #expect(try store.ingredient(id: "ing-1")?.name == "Original")
+    }
+
+    // MARK: - reentrancy (review finding 1)
+
+    @Test func concurrentSyncNowCallsCoalesceEachOpPushedExactlyOnce() async throws {
+        let server = FakeSyncServer()
+        let store = try makeStore()
+        let engine = SyncEngine(store: store, api: makeApi(), orgId: "org-1")
+        let edits = LocalEdits(store: store, locationId: "loc-1")
+        _ = try edits.createIngredient(name: "Onion", baseUnit: "lb", vendor: nil, category: nil)
+        _ = try edits.createIngredient(name: "Garlic", baseUnit: "lb", vendor: nil, category: nil)
+        #expect(try store.pendingOps(state: .queued).count == 2)
+
+        // Two concurrent syncNow() calls on the SAME actor -- without
+        // coalescing, each `await` inside performSync is a point where the
+        // second call can start running interleaved with the first
+        // (actors are reentrant across suspension points), independently
+        // reading the SAME still-queued ops and double-pushing them.
+        let opIdCounts: [String: Int] = try await StubTransport.withStub(server.responder()) {
+            async let first: Void = engine.syncNow()
+            async let second: Void = engine.syncNow()
+            _ = await (first, second)
+
+            var counts: [String: Int] = [:]
+            for (request, body) in StubTransport.recordedRequests where request.httpMethod == "POST" {
+                guard let body,
+                    let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+                    let ops = object["ops"] as? [[String: Any]]
+                else { continue }
+                for op in ops {
+                    if let opId = op["op_id"] as? String {
+                        counts[opId, default: 0] += 1
+                    }
+                }
+            }
+            return counts
+        }
+
+        #expect(await engine.state == .caughtUp)
+        #expect(try store.pendingOps(state: nil).isEmpty)
+        // Every op_id appears in exactly ONE POST body across BOTH
+        // concurrent calls combined -- coalesced onto one real sync, never
+        // pushed twice.
+        #expect(opIdCounts.count == 2)
+        #expect(opIdCounts.values.allSatisfy { $0 == 1 })
+    }
+
+    // MARK: - caughtUp only once no push work remains (review finding 2)
+
+    @Test func enqueuedOpMidSyncDelaysCaughtUpUntilItIsPushed() async throws {
+        let server = FakeSyncServer()
+        let store = try makeStore()
+        let engine = SyncEngine(store: store, api: makeApi(), orgId: "org-1")
+        let edits = LocalEdits(store: store, locationId: "loc-1")
+
+        let firstRowId = try edits.createIngredient(name: "Onion", baseUnit: "lb", vendor: nil, category: nil)
+        var secondRowId: String?
+
+        // Fires during the SECOND GET /sync call of this syncNow() -- the
+        // trailing pull that follows op-1's push -- simulating a local edit
+        // (from anywhere in the app; LocalStore.enqueue is plain and
+        // thread-safe, callable any time) landing while the sync is still
+        // mid-flight.
+        server.onPullCall = { callCount in
+            if callCount == 2 {
+                secondRowId = try? edits.createIngredient(
+                    name: "Garlic", baseUnit: "lb", vendor: nil, category: nil)
+            }
+        }
+
+        try await StubTransport.withStub(server.responder()) {
+            await engine.syncNow()
+        }
+
+        #expect(await engine.state == .caughtUp)
+        // Both ops -- the original and the one that landed mid-sync -- were
+        // actually pushed before caughtUp was declared; neither is left
+        // behind a state that already claims there's nothing outstanding.
+        #expect(try store.pendingOps(state: nil).isEmpty)
+        let secondId = try #require(secondRowId)
+        #expect((try store.ingredient(id: firstRowId)?.server_seq ?? 0) > 0)
+        #expect((try store.ingredient(id: secondId)?.server_seq ?? 0) > 0)
+    }
+
+    // MARK: - unrecognized push status (review finding 4)
+
+    @Test func unrecognizedPushStatusParksOpInsteadOfDeletingIt() async throws {
+        let server = FakeSyncServer()
+        let store = try makeStore()
+        let engine = SyncEngine(store: store, api: makeApi(), orgId: "org-1")
+        let edits = LocalEdits(store: store, locationId: "loc-1")
+        _ = try edits.createIngredient(name: "Cumin", baseUnit: "oz", vendor: nil, category: nil)
+        let opId = try #require(try store.pendingOps(state: .queued).first?.op_id)
+        server.bogusStatusOpId = opId
+
+        try await StubTransport.withStub(server.responder()) {
+            await engine.syncNow()
+        }
+
+        #expect(await engine.state == .caughtUp)
+        // §13 "never lose local work": an unrecognized status must park the
+        // op, not silently delete it.
+        let parked = try store.pendingOps(state: .needsAttention)
+        #expect(parked.count == 1)
+        #expect(parked.first?.op_id == opId)
+        #expect(parked.first?.reason == "unrecognized result: totally_unrecognized_status")
+        #expect(try store.pendingOps(state: .queued).isEmpty)
     }
 
     // MARK: - needs_attention

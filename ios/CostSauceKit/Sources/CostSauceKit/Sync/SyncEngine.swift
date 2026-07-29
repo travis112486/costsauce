@@ -4,7 +4,10 @@
 // pull everything new, push everything queued, then pull once more so the
 // device's own writes (and anything else that landed while it pushed) come
 // back with real server truth (`server_seq`, canonical ids, LWW arbitration
-// outcomes).
+// outcomes) — repeating the push+pull pass until nothing is left queued, so
+// `.caughtUp` never lies about outstanding local work. Concurrent callers
+// coalesce onto one real sync rather than interleaving (see `syncNow`'s doc
+// comment).
 //
 // Three warnings from api/routes/sync.py's module docstring bind this file
 // directly:
@@ -46,6 +49,12 @@ public actor SyncEngine {
 
     public private(set) var state: SyncState = .idle
 
+    /// The single real sync currently running, if any -- see `syncNow`'s
+    /// doc comment for why this exists at all (actors are NOT serialized
+    /// across suspension points; without this, two concurrent `syncNow()`
+    /// calls interleave).
+    private var inFlightSync: Task<Void, Never>?
+
     /// Thread-safe multi-subscriber fan-out for `stateStream`, held
     /// OUTSIDE actor isolation (a `Sendable` helper object, not
     /// actor-isolated state) so registration can happen SYNCHRONOUSLY, with
@@ -83,19 +92,108 @@ public actor SyncEngine {
 
     // MARK: - the one entry point
 
-    /// Rule 1: pull loop → push → pull loop, actor-serialized (concurrent
-    /// callers queue behind the actor, never interleave). `SyncState` has no
-    /// dedicated "pushing" case, so `.catchingUp` covers the whole in-flight
-    /// duration -- it flips to `.caughtUp` only once every phase has
-    /// finished cleanly. Never throws: every failure path ends in
+    /// Rule 1: pull loop → {push → pull loop} until no push work remains.
+    ///
+    /// **Coalesced, not merely "actor-serialized".** Actors only exclude
+    /// concurrent execution BETWEEN suspension points -- every `await` in
+    /// the body below is a point where a second, concurrently-arriving
+    /// `syncNow()` call can start running interleaved with the first
+    /// (reentrancy is the actor default, not something `actor` alone rules
+    /// out). Two independently-running copies of the loop below would
+    /// thrash `state`, could each read/push the SAME still-queued ops
+    /// (double-pushing a batch), and could race `markNeedsAttention`/
+    /// `deleteOp` against each other for the same op. `inFlightSync` fixes
+    /// this: the FIRST call creates and stores the real work as a child
+    /// `Task` before its first `await`, so a second call arriving while the
+    /// first is suspended sees `inFlightSync` already set and simply awaits
+    /// the SAME task instead of starting its own -- both calls return once
+    /// the one real sync finishes, and `inFlightSync` is cleared as that
+    /// task's last action (from inside actor isolation), so a LATER,
+    /// non-overlapping `syncNow()` call still starts a fresh sync rather
+    /// than replaying a stale result.
+    ///
+    /// `SyncState` has no dedicated "pushing" case, so `.catchingUp` covers
+    /// the whole in-flight duration -- it flips to `.caughtUp` only once
+    /// every phase has finished AND no push work remains (see
+    /// `performSync`'s loop). Never throws: every failure path ends in
     /// `.blocked(_)` instead, since this is the app layer's poll point, not
     /// a throwing call it awaits inside a do/catch.
     public func syncNow() async {
+        if let inFlightSync {
+            await inFlightSync.value
+            return
+        }
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.runAndClearInFlight()
+        }
+        inFlightSync = task
+        await task.value
+    }
+
+    /// The actual sync body, plus clearing `inFlightSync` as its very last
+    /// action -- both inside one actor-isolated hop, so by the time
+    /// `task.value` resolves for ANY awaiter (the leader or a coalesced
+    /// follower), `inFlightSync` is unconditionally `nil` already. Without
+    /// that ordering, a brand-new `syncNow()` call arriving in the tiny gap
+    /// between "the real work finished" and "the field got cleared" could
+    /// wrongly coalesce onto an already-finished task and return instantly
+    /// without ever pushing its own new work.
+    private func runAndClearInFlight() async {
+        await performSync()
+        inFlightSync = nil
+    }
+
+    private func performSync() async {
         setState(.catchingUp)
         do {
             try await pullLoop()
-            try await pushQueuedOps()
-            try await pullLoop()
+            // Rule 2's "no push work remains" half of caughtUp: loop
+            // push+trailing-pull until a pass finds nothing left queued.
+            // Without this, an op enqueued (from the app layer, entirely
+            // outside this actor -- `LocalStore.enqueue` is plain,
+            // thread-safe, callable any time) between this sync's push and
+            // its trailing pull would leave real, unpushed work behind a
+            // state that already claims `.caughtUp` -- exactly the signal
+            // Task 9's suppression logic reads to decide whether to nag the
+            // user about a still-pending edit.
+            var baselineResetDone = false
+            while true {
+                let sawStale = try await pushQueuedOps()
+                if sawStale && !baselineResetDone {
+                    // §14 convergence / silent-LWW correctness (controller
+                    // ruling: "truth arrives on the trailing pull" governs,
+                    // make it true). A `stale` rejection means the LOCAL
+                    // row may currently be showing a value that exists
+                    // NOWHERE on the server: `LocalStore.applyPullPage`'s
+                    // rebase step (frozen, Task 5) unconditionally
+                    // re-applies a still-queued op's fields onto ANY row a
+                    // pull page touches, with no regard for the op's
+                    // eventual staleness -- so if that row was ever
+                    // re-fetched by an earlier pull in THIS call (the only
+                    // way push could even discover the conflict, since the
+                    // winning edit must already be server-side), the
+                    // rejected edit got overlaid on top of the true value.
+                    // The op is gone from pending_ops now (deleteOp already
+                    // ran), but a plain incremental `since=<cursor>` pull
+                    // would never re-fetch that exact row again -- its
+                    // server_seq is already <= cursor. Resetting the
+                    // baseline to 0 (a pure cursor write; `changes: []`
+                    // touches no table row and no pending op -- see
+                    // `LocalStore.applyPullPage`) forces the very next
+                    // `pullLoop()` to walk every row from scratch. That DOES
+                    // re-fetch the conflicting row, and with the op already
+                    // deleted, nothing re-applies the rejected value on top
+                    // this time -- the server's true value lands and
+                    // stands. Full re-pull is only paid on this rare
+                    // (cross-device-conflict) path, and the org dataset is
+                    // small enough for that cost to be acceptable.
+                    try store.applyPullPage([], cursor: 0)
+                    baselineResetDone = true
+                }
+                try await pullLoop()
+                if try store.pendingOps(state: .queued).isEmpty { break }
+            }
             setState(.caughtUp)
         } catch let apiError as ApiError {
             switch apiError.status {
@@ -148,10 +246,15 @@ public actor SyncEngine {
     /// chunks/retries, which is what lets the server's idempotency ledger
     /// dedupe a resend. Never reorders or merges ops (rule 7): a chunk is a
     /// contiguous slice of the already-ordered queue, sent as-is.
-    private func pushQueuedOps() async throws {
+    ///
+    /// Returns whether ANY result in this call came back `stale` --
+    /// `performSync` uses that to decide whether the next pull needs a full
+    /// baseline reset (see its doc comment).
+    private func pushQueuedOps() async throws -> Bool {
         let queued = try store.pendingOps(state: .queued)
-        guard !queued.isEmpty else { return }
+        guard !queued.isEmpty else { return false }
 
+        var sawStale = false
         for chunk in Self.chunked(queued, size: Self.maxOpsPerBatch) {
             let batchId = UUIDv7.generate()
             let wireOps = chunk.map { op in
@@ -166,44 +269,59 @@ public actor SyncEngine {
             // `meta.cursor`.
             let response = try await api.syncPush(orgId: orgId, batchId: batchId, ops: wireOps)
             for (op, result) in zip(chunk, response.results) {
+                if result.status == "stale" { sawStale = true }
                 try apply(result, to: op)
             }
         }
+        return sawStale
     }
 
-    /// Rule 2's per-result outcomes, positionally zipped by the caller.
+    /// Rule 2's per-result outcomes, positionally zipped by the caller. An
+    /// explicit switch over the server's exact result vocabulary -- NOT an
+    /// `if status != "needs_attention"` catch-all -- because §13's "never
+    /// lose local work" contract means an unrecognized status must never
+    /// fall through to `deleteOp` by accident; it has to be an active,
+    /// enumerated choice for every case this client knows about, with a
+    /// `default` that fails safe.
+    ///
+    /// `applied`/`stale` (`replayed: true` only ever DECORATES one of those
+    /// two with a flag, api/routes/sync.py:83-85, never a distinct status
+    /// string of its own) end the same way: if the result carries a `rowId`
+    /// that differs from what THIS op minted, `adoptCanonicalRow` first,
+    /// then `deleteOp` either way. The rowId-mismatch check is what covers
+    /// `recipe_items`' ON CONFLICT upsert-arbitration (api/services/sync.py:
+    /// 247-271): a LOSING insert there comes back as `stale`/`older`
+    /// carrying the WINNING canonical row's id, and
+    /// `LocalStore.adoptCanonicalRow`'s own contract is to drop the local
+    /// minted row so the canonical copy is the only one left. A plain
+    /// UPDATE-vs-UPDATE `stale`/`older` never carries a `rowId` at all, so
+    /// for that case this reduces to exactly rule 2's literal "stale →
+    /// deleteOp" (see `performSync`'s baseline-reset for how the row's
+    /// CONTENT still converges to server truth).
     ///
     /// `needs_attention` is the only status that leaves the op queued (as
     /// `.needsAttention`, with the server's reason) -- terminal, never
-    /// retried automatically (Task 14's UI resolves it).
-    ///
-    /// Every other status (`applied`, or `stale` -- `replayed: true` only
-    /// ever DECORATES one of those two with a flag, api/routes/sync.py:
-    /// 83-85, never a distinct status string of its own) ends the same way:
-    /// if the result carries a `rowId` that differs from what THIS op
-    /// minted, `adoptCanonicalRow` first, then `deleteOp` either way.
-    ///
-    /// The rowId-mismatch check is what covers `recipe_items`' ON CONFLICT
-    /// upsert-arbitration (api/services/sync.py:247-271): a LOSING insert
-    /// there comes back as `stale`/`older` carrying the WINNING canonical
-    /// row's id, and `LocalStore.adoptCanonicalRow`'s own contract is to
-    /// drop the local minted row so the canonical copy (already known, or
-    /// arriving on the next pull) is the only one left. A plain
-    /// UPDATE-vs-UPDATE `stale`/`older` never carries a `rowId` at all, so
-    /// for that case this reduces to exactly rule 2's literal "stale →
-    /// deleteOp".
+    /// retried automatically (Task 14's UI resolves it). An unrecognized
+    /// status is treated the same way, with a reason naming the unknown
+    /// status string, rather than silently discarded -- a shape this client
+    /// doesn't understand yet is a reason to park and surface it, not to
+    /// pretend it succeeded.
     ///
     /// Per the Task 5 hand-off note: `adoptCanonicalRow` does NOT touch
     /// `pending_ops` -- `deleteOp` below is still required after it.
     private func apply(_ result: OpResult, to op: PendingOp) throws {
-        guard result.status != "needs_attention" else {
+        switch result.status {
+        case "applied", "stale":
+            if let rowId = result.rowId, rowId != op.row_id {
+                try store.adoptCanonicalRow(table: op.table, mintedId: op.row_id, canonicalId: rowId)
+            }
+            try store.deleteOp(opId: op.op_id)
+        case "needs_attention":
             try store.markNeedsAttention(opId: op.op_id, reason: result.reason ?? "needs attention")
-            return
+        default:
+            try store.markNeedsAttention(
+                opId: op.op_id, reason: "unrecognized result: \(result.status)")
         }
-        if let rowId = result.rowId, rowId != op.row_id {
-            try store.adoptCanonicalRow(table: op.table, mintedId: op.row_id, canonicalId: rowId)
-        }
-        try store.deleteOp(opId: op.op_id)
     }
 
     private static func chunked<T>(_ items: [T], size: Int) -> [[T]] {

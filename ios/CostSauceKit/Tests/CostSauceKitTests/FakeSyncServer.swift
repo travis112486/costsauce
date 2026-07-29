@@ -32,7 +32,12 @@
 // - `dropNextPushResponse`: a one-shot "the push succeeded server-side but
 //   the client never saw the response" toggle, used to build the replay
 //   scenario -- the op stays queued locally (nothing to process), so the
-//   next `syncNow()` resends the SAME op_id and hits the ledger.
+//   next `syncNow()` resends the SAME op_id and hits the ledger;
+// - `onPullCall`: a hook fired on every GET /sync call, used to inject a
+//   local store mutation at a precise point mid-`syncNow()`;
+// - `bogusStatusOpId`: forces one op_id's result to a synthetic,
+//   out-of-vocabulary status string, to exercise the client's fail-safe
+//   default.
 //
 // All mutable state lives behind one `NSLock` (the same "class is
 // `@unchecked Sendable`, a lock guards everything" shape `ApiClient` itself
@@ -74,6 +79,21 @@ final class FakeSyncServer: @unchecked Sendable {
     /// the org's global counter) -- used to prove the engine never adopts
     /// it (sync.py warning (a)).
     var pushResponseCursorOverride: Int64?
+    /// Fires synchronously on every GET /sync call, passed the 1-based call
+    /// count -- lets a test inject a LOCAL store mutation (e.g. enqueue a
+    /// new op via a captured `LocalEdits`/`LocalStore`) at a precise point
+    /// mid-`syncNow()`, simulating a local edit landing while a sync is
+    /// still in flight. `LocalStore` is plain and thread-safe (its own
+    /// GRDB `DatabaseQueue` serializes writes internally), so calling into
+    /// it from this hook -- which runs on whatever thread URLSession
+    /// dispatches the stub protocol on, under THIS class's own `lock` -- is
+    /// safe; there is no shared lock between the two.
+    var onPullCall: ((Int) -> Void)?
+    /// When set, the op with this `op_id` gets a synthetic, deliberately
+    /// UNRECOGNIZED status back instead of going through the normal
+    /// apply/ledger flow -- proves the client never silently deletes an op
+    /// whose result shape it doesn't understand (§13).
+    var bogusStatusOpId: String?
 
     private static let tableOrder = ["ingredients", "recipes", "recipe_items", "purchases"]
 
@@ -172,6 +192,7 @@ final class FakeSyncServer: @unchecked Sendable {
 
     private func handlePull(url: URL?) -> (status: Int, headers: [String: String], body: Data) {
         pullCallCount += 1
+        onPullCall?(pullCallCount)
         if failPullOnCall == pullCallCount {
             failPullOnCall = nil
             return StubTransport.json(503, ["detail": "simulated pull failure"])
@@ -222,6 +243,13 @@ final class FakeSyncServer: @unchecked Sendable {
         for (index, wireOp) in indexed {
             guard let opId = wireOp["op_id"] as? String else {
                 results[index] = ["status": "needs_attention", "reason": "malformed op"]
+                continue
+            }
+            if opId == bogusStatusOpId {
+                // Deliberately not ledgered -- this is a synthetic,
+                // out-of-vocabulary response, not a real applied/stale
+                // outcome the idempotency ledger should ever remember.
+                results[index] = ["status": "totally_unrecognized_status"]
                 continue
             }
             if let ledgered = ledger[opId] {
