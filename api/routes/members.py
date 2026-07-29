@@ -36,6 +36,15 @@ async def _require_owner(conn, user_id: str, org_id: uuid.UUID):
         raise HTTPException(403, "owner role required")
 
 
+async def _require_member_org(conn, org_id: uuid.UUID) -> None:
+    """404 for unknown AND non-member alike (RLS hides the row): same
+    pattern as api/routes/locations.py::_require_member_org and
+    api/routes/sync.py::_require_member_org."""
+    cur = await conn.execute("SELECT 1 FROM organizations WHERE id = %s", (org_id,))
+    if await cur.fetchone() is None:
+        raise HTTPException(404, "organization not found")
+
+
 async def _lock_org(conn, org_id: uuid.UUID) -> None:
     """Serialize every owner-count-sensitive decision for one org.
 
@@ -146,6 +155,40 @@ async def _check_member_limit(conn, org_id: uuid.UUID) -> None:
             f"invites); this organization already has {current_count}. "
             "Upgrade the plan to invite more members.",
         )
+
+
+@router.get("/orgs/{org_id}/members")
+async def list_members(
+    org_id: uuid.UUID, request: Request,
+    caller: CallerIdentity = Depends(require_caller),
+):
+    """Roster for the iOS client (Phase 2a, Task 1) -- the only reader of
+    this route. Auth is any member of the org, not owner-only: RLS's
+    membership_select policy already grants org-wide membership visibility
+    (supabase/migrations/0004_rls_policies.sql:192), so there is no
+    additional privilege to gate here beyond membership itself.
+
+    Query mirrors the export's members join exactly
+    (api/services/export.py:100-101). Under RLS profile_self
+    (0004_rls_policies.sql:225-226), the joined profiles row is visible only
+    for the caller's own user_id, so contact_email comes back non-null only
+    for the caller's own row -- every other member's row carries
+    contact_email: null, and the iOS roster renders "member" for that case.
+
+    Not blocked by the deletion middleware: GET is exempt (api/main.py:32),
+    so the roster stays visible during an org's deletion grace window,
+    matching export's own behavior.
+    """
+    async with tenant_connection(request.app.state.pool, caller.claims) as conn:
+        await _require_member_org(conn, org_id)
+        cur = await conn.execute(
+            "SELECT m.user_id::text, m.role, p.contact_email FROM memberships m "
+            "LEFT JOIN profiles p ON p.user_id = m.user_id WHERE m.org_id = %s "
+            "ORDER BY m.created_at, m.user_id",
+            (org_id,),
+        )
+        rows = await cur.fetchall()
+    return [dict(user_id=r[0], role=r[1], contact_email=r[2]) for r in rows]
 
 
 @router.post("/orgs/{org_id}/invites")

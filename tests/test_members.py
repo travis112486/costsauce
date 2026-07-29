@@ -912,3 +912,94 @@ async def test_create_invite_does_not_echo_token_without_the_enable_flag(
     assert r.status_code == 200
     assert "token" not in r.json(), "token must not be echoed when the flag is unset"
     assert "invite_id" in r.json()
+
+
+# --- Task 1 (Phase 2a): GET /orgs/{org_id}/members -------------------------
+#
+# The iOS client needs a member roster; none existed before (this file had
+# invite/accept/patch/delete only, and /me shows only the caller's own
+# memberships). Auth is deliberately "any member", not owner-only: RLS's
+# membership_select policy (supabase/migrations/0004_rls_policies.sql:192)
+# already grants org-wide membership visibility to every member, and the
+# query mirrors the export's members join exactly
+# (api/services/export.py:100-101). Under RLS profile_self
+# (0004_rls_policies.sql:225-226), a joined profiles row is only visible for
+# the caller's own user_id, so contact_email comes back non-null only for
+# the caller's own row and null for every other member's row.
+
+async def test_owner_lists_roster_with_own_contact_email_and_roles(
+    app_client, raw_conn, seeded
+):
+    carol = await make_user(raw_conn, "carol@acme.test")
+    await add_member(raw_conn, carol, seeded["acme"], "bookkeeper")
+    await raw_conn.commit()
+    r = await app_client.get(
+        f"/orgs/{seeded['acme']}/members",
+        headers={"Authorization": f"Bearer {mint(str(seeded['alice']))}"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert len(body) == 2
+    alice_row = next(m for m in body if m["user_id"] == str(seeded["alice"]))
+    assert alice_row["role"] == "owner"
+    assert alice_row["contact_email"] == "alice@acme.test"
+    carol_row = next(m for m in body if m["user_id"] == str(carol))
+    assert carol_row["role"] == "bookkeeper"
+    assert carol_row["contact_email"] is None, (
+        "RLS profile_self must hide another member's contact_email from the caller"
+    )
+
+
+async def test_bookkeeper_member_can_also_list_roster(app_client, raw_conn, seeded):
+    carol = await make_user(raw_conn, "carol@acme.test")
+    await add_member(raw_conn, carol, seeded["acme"], "bookkeeper")
+    await raw_conn.commit()
+    r = await app_client.get(
+        f"/orgs/{seeded['acme']}/members",
+        headers={"Authorization": f"Bearer {mint(str(carol))}"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert len(body) == 2
+    carol_row = next(m for m in body if m["user_id"] == str(carol))
+    assert carol_row["contact_email"] == "carol@acme.test"
+    alice_row = next(m for m in body if m["user_id"] == str(seeded["alice"]))
+    assert alice_row["contact_email"] is None
+
+
+async def test_non_member_cannot_list_roster(app_client, seeded):
+    r = await app_client.get(
+        f"/orgs/{seeded['acme']}/members",
+        headers={"Authorization": f"Bearer {mint(str(seeded['bob']))}"},
+    )
+    assert r.status_code == 404
+
+
+async def test_list_roster_unknown_org_is_404(app_client, seeded):
+    r = await app_client.get(
+        "/orgs/00000000-0000-0000-0000-000000000000/members",
+        headers={"Authorization": f"Bearer {mint(str(seeded['alice']))}"},
+    )
+    assert r.status_code == 404
+
+
+async def test_list_roster_unauthenticated_is_401(app_client, seeded):
+    r = await app_client.get(f"/orgs/{seeded['acme']}/members")
+    assert r.status_code == 401
+
+
+async def test_list_roster_ordering_stable_across_two_calls(app_client, raw_conn, seeded):
+    carol = await make_user(raw_conn, "carol@acme.test")
+    await add_member(raw_conn, carol, seeded["acme"], "bookkeeper")
+    dave = await make_user(raw_conn, "dave@acme.test")
+    await add_member(raw_conn, dave, seeded["acme"], "manager")
+    await raw_conn.commit()
+    headers = {"Authorization": f"Bearer {mint(str(seeded['alice']))}"}
+    r1 = await app_client.get(f"/orgs/{seeded['acme']}/members", headers=headers)
+    r2 = await app_client.get(f"/orgs/{seeded['acme']}/members", headers=headers)
+    assert r1.status_code == 200, r1.text
+    assert r2.status_code == 200, r2.text
+    ids1 = [m["user_id"] for m in r1.json()]
+    ids2 = [m["user_id"] for m in r2.json()]
+    assert len(ids1) == 3
+    assert ids1 == ids2, "ordering (created_at, user_id) must be stable across repeat calls"
