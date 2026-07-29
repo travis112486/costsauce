@@ -394,6 +394,16 @@ final class AppModel {
         }
     }
 
+    /// Task 13's `SettingsView` calls this after its own `patchLocation`
+    /// succeeds -- `currentLocation` has no other external setter
+    /// (`private(set)`), and a manual Save needs to land everywhere
+    /// `currentLocation` is read (the dashboard's drift threshold in
+    /// particular) immediately, not just on the next `refreshOnlineData()`
+    /// poll.
+    func applyLocationUpdate(_ location: LocationOut) {
+        currentLocation = location
+    }
+
     private var currentAccessToken: String? {
         if case .active(let activeSession) = session.state {
             return activeSession.accessToken
