@@ -243,6 +243,49 @@ import GRDB
         #expect(stillQueued.first?.op_id == "op-1")
     }
 
+    /// Two queued ops edit the same field of the same row, ENQUEUED (i.e.
+    /// inserted -- ascending rowid) in the OPPOSITE order of their
+    /// `created_at`: `op-late` is inserted first, `op-early` second. Without
+    /// an explicit `ORDER BY created_at, op_id` on the rebase replay query,
+    /// SQLite's natural rowid/insertion iteration order would replay
+    /// `op-late` before `op-early`, so `op-early`'s field would be applied
+    /// LAST and silently revert the row to a stale value. With the ordering
+    /// fix, replay follows `(created_at, op_id)` regardless of insertion
+    /// order, so `op-late` -- the chronologically SECOND (most recent) edit
+    /// -- is applied last and wins.
+    @Test func rebaseReplaysMultipleQueuedOpsOnTheSameRowInCreatedAtOrder() throws {
+        let store = try LocalStore.inMemory()
+        try store.bind(userId: "user-1", orgId: "org-1", locationId: "loc-1")
+
+        try store.applyPullPage([
+            Self.ingredientChange(id: "ing-x", name: "Original", serverSeq: 1),
+        ], cursor: 1)
+
+        // Inserted first (lower rowid) but chronologically the LATER edit.
+        try store.enqueue(PendingOp(
+            op_id: "op-late", table: "ingredients", row_id: "ing-x", location_id: "loc-1",
+            client_mutated_at: "2026-07-29T10:10:00.000000Z", kind: .update,
+            fields: ["name": "Newer Edit"], state: .queued, reason: nil,
+            created_at: "2026-07-29T10:10:00.000000Z"))
+        // Inserted second (higher rowid) but chronologically the EARLIER edit.
+        try store.enqueue(PendingOp(
+            op_id: "op-early", table: "ingredients", row_id: "ing-x", location_id: "loc-1",
+            client_mutated_at: "2026-07-29T10:05:00.000000Z", kind: .update,
+            fields: ["name": "Older Edit"], state: .queued, reason: nil,
+            created_at: "2026-07-29T10:05:00.000000Z"))
+
+        // A pull page touches the row, triggering rebase.
+        try store.applyPullPage([
+            Self.ingredientChange(id: "ing-x", name: "Original", serverSeq: 2),
+        ], cursor: 2)
+
+        // (created_at, op_id) order is op-early (10:05) then op-late
+        // (10:10), so op-late's field -- the chronologically SECOND edit --
+        // wins the replay.
+        let ingredient = try #require(try store.ingredient(id: "ing-x"))
+        #expect(ingredient.name == "Newer Edit")
+    }
+
     // MARK: - enqueue
 
     @Test func enqueueAppliesFieldsToLocalRowInTheSameCall() throws {

@@ -116,8 +116,12 @@ public final class LocalStore: Sendable {
                 upsertedRowIds[change.table, default: []].insert(rowId)
             }
 
+            // (created_at, op_id) order -- same rule as `pendingOps(state:)` --
+            // so that when two queued ops touch the same row, the later op's
+            // fields win the replay and the row doesn't end up reverted to an
+            // earlier edit's value.
             let queuedOps = try PendingOp.fetchAll(
-                db, sql: "SELECT * FROM pending_ops WHERE state = ?",
+                db, sql: "SELECT * FROM pending_ops WHERE state = ? ORDER BY created_at, op_id",
                 arguments: [OpState.queued.rawValue])
             for op in queuedOps {
                 guard upsertedRowIds[op.table]?.contains(op.row_id) == true else { continue }
