@@ -193,13 +193,34 @@ final class AppModel {
         phase = .bootstrap
     }
 
-    /// Re-auth from the sync chip's `.blocked(.authRequired)` tap. This
-    /// deliberately does NOT compare `newSession.userId` against the bound
-    /// store's `meta.user_id` — that identity-mismatch branch is Task 14's
-    /// contract (`BlockedStateViews`'s re-auth sheet); this task's job is
-    /// only to make the chip's tap target work end to end with the
-    /// existing login form.
+    /// Re-auth from the sync chip's `.blocked(.authRequired)` tap.
+    ///
+    /// §13's "identity switch → refuse flush" contract applies here just as
+    /// much as it does to `bindAndEnterMain`'s fresh-bootstrap path: the
+    /// store already bound in this session belongs to whoever was signed in
+    /// BEFORE the token expired, and re-auth on a shared device can easily
+    /// land a DIFFERENT person's credentials (a different `userId`) than
+    /// the one that store's `meta` records. Resuming `syncNow()` in that
+    /// case would silently start flushing one person's local queue to the
+    /// server under another person's identity/token.
+    ///
+    /// Mirrors `bindAndEnterMain`'s handling of the identical
+    /// `StoreError.identityMismatch` condition: on a mismatch, this method
+    /// does not adopt the new session or touch `tokenBox`/`syncEngine` at
+    /// all — it only flips `phase` to the same `.identityMismatch`
+    /// placeholder destination (Task 14 owns the real screen — export /
+    /// typed-ERASE switch / cancel — and whatever re-adoption of this
+    /// session that flow ends up needing). Not adopting the session here
+    /// also matters beyond just this one call: an adopted-but-mismatched
+    /// session would still be sitting in `tokenBox`, available to any OTHER
+    /// automatic sync trigger (`refreshOnlineData` on `scenePhase == .active`,
+    /// a future `syncSoon()` call) to flush the same wrong-identity queue
+    /// behind this guard's back.
     func completeReauth(session newSession: Session) {
+        if let store, let boundUserId = (try? store.meta())?.user_id, boundUserId != newSession.userId {
+            phase = .identityMismatch
+            return
+        }
         session.adopt(newSession)
         tokenBox.set(newSession.accessToken)
         Task { [weak self] in
