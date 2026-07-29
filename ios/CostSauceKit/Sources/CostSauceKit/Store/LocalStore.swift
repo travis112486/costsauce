@@ -169,10 +169,67 @@ public final class LocalStore: Sendable {
 
     /// Inserts `op` AND applies its `fields` to the local row, in one
     /// transaction — a read immediately after always sees the edit.
+    ///
+    /// For an `.insert`-kind op (Task 6's `LocalEdits.createIngredient`/
+    /// `createPurchase`, which mint a brand-new row id that has never been
+    /// pulled), `applyFields`'s `UPDATE ... WHERE id = ?` would silently
+    /// match zero rows -- there is nothing to update yet. `insertStub`
+    /// creates a NOT-NULL-satisfying placeholder row first (empty strings /
+    /// `op.client_mutated_at` for every column), which `applyFields` then
+    /// overwrites with the op's real field values in the same transaction,
+    /// so the new row is fully populated and immediately visible to local
+    /// reads (costing, dashboard, duplicate-name checks) even before the
+    /// op ever reaches the server. `.update`-kind ops are unaffected: their
+    /// target row already exists (pulled, or a previously inserted row).
     public func enqueue(_ op: PendingOp) throws {
         try dbQueue.write { db in
             try op.insert(db)
+            if op.kind == .insert {
+                try Self.insertStub(
+                    table: op.table, rowId: op.row_id, locationId: op.location_id,
+                    clientMutatedAt: op.client_mutated_at, in: db)
+            }
             try Self.applyFields(op.fields, table: op.table, rowId: op.row_id, in: db)
+        }
+    }
+
+    /// See `enqueue`'s doc comment. `server_seq` 0 marks "never pulled" --
+    /// local costing/dashboard math never reads `server_seq`, only the
+    /// decimal-string columns, which `applyFields` sets correctly right
+    /// after this runs.
+    private static func insertStub(
+        table: String, rowId: String, locationId: String, clientMutatedAt: String, in db: Database
+    ) throws {
+        switch table {
+        case "ingredients":
+            try LocalIngredient(
+                id: rowId, location_id: locationId, name: "", base_unit: "",
+                vendor: nil, category: nil, source: nil,
+                client_mutated_at: clientMutatedAt, server_seq: 0,
+                updated_at: clientMutatedAt, deleted_at: nil, created_at: clientMutatedAt
+            ).insert(db)
+        case "recipes":
+            try LocalRecipe(
+                id: rowId, location_id: locationId, name: "", menu_price: "0",
+                target_fc_pct: "0", client_mutated_at: clientMutatedAt, server_seq: 0,
+                updated_at: clientMutatedAt, deleted_at: nil, created_at: clientMutatedAt
+            ).insert(db)
+        case "recipe_items":
+            try LocalRecipeItem(
+                id: rowId, location_id: locationId, recipe_id: "", ingredient_id: "",
+                qty_base_units: "0", client_mutated_at: clientMutatedAt, server_seq: 0,
+                updated_at: clientMutatedAt, deleted_at: nil, created_at: clientMutatedAt
+            ).insert(db)
+        case "purchases":
+            try LocalPurchase(
+                id: rowId, location_id: locationId, ingredient_id: "", purchased_on: "",
+                recorded_at: clientMutatedAt, qty: "0", unit: "", qty_in_case: nil,
+                qty_base_units: "0", total_price: "0", unit_price: nil, source: nil,
+                client_mutated_at: clientMutatedAt, server_seq: 0,
+                updated_at: clientMutatedAt, deleted_at: nil, created_at: clientMutatedAt
+            ).insert(db)
+        default:
+            throw StoreError(kind: .unknownTable(table))
         }
     }
 
