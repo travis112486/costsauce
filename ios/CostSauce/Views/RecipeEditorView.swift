@@ -1,26 +1,43 @@
-// The CostSauce recipe editor — Task 8 builds the create path: composing a
+// The CostSauce recipe editor — Task 8 built the create path: composing a
 // new dish entirely offline as an in-memory `RecipeDraft` (spec D4) with a
 // live plate-cost preview, writing NOTHING to the local store until Save.
 // Task 9 fills in `.edit(recipeId:)`, which works directly on stored rows
-// instead of a draft (D4's other half, immediate-write) — this file's
-// `.edit` branch is a placeholder only, out of this task's scope.
+// instead of a draft (D4's other half, immediate-write): an existing dish
+// is live data, so there is no draft and no Save button on this path --
+// every change (a field blur/return, a debounced quantity edit, an added
+// or removed line) writes its row and enqueues its op the moment it
+// happens, then calls `appModel.syncSoon()`. Reads come from
+// `LocalStore.recipe(id:)`/`liveRecipeItems(recipeId:)` through the same
+// `RefreshKey`/`.task(id:)` idiom the create path (and every sibling view)
+// already uses, so a pull that changes the recipe re-renders it here too.
 //
 // Global Constraints: every money/qty/percentage value is a STRING end to
 // end — `RecipeDraft.name`/`menuPrice`/`targetFcPct` and each line's `qty`
 // are plain `TextField` string bindings (decimal-pad keyboards for the
-// numeric ones), never routed through Double/Float/Decimal.
-// `RecipeDraft.validate()` (Task 3) is the ONLY place validation rules
-// live — this file only maps its `DraftError` cases to their exact
-// user-facing strings (Task 3's own doc comment: "The messages above are
-// the exact user-facing strings; they live in the VIEW (Task 8), not
-// here") and renders them next to the offending field; it never
-// re-implements a rule `validate()` already owns.
+// numeric ones), never routed through Double/Float/Decimal. The edit
+// path's own `nameText`/`menuPriceText`/`targetFcPctText`/`qtyTexts` follow
+// the exact same rule.
+// `RecipeDraft.validate()` (Task 3) is the ONLY place CREATE-path
+// validation rules live — this file only maps its `DraftError` cases to
+// their exact user-facing strings (Task 3's own doc comment: "The messages
+// above are the exact user-facing strings; they live in the VIEW (Task
+// 8), not here") and renders them next to the offending field; it never
+// re-implements a rule `validate()` already owns. The edit path reuses
+// several of those same frozen strings (`message(for:)`) for the
+// equivalent per-field commit failures rather than inventing new text or
+// surfacing `LocalEdits`' own internal `KernelError.message` (English
+// meant for a log, not a user).
 //
-// `appModel.canEditRecipes` (Task 6) gates the Save button here — Task 8 is
-// its first consumer anywhere in the app. This screen is normally
-// unreachable for a bookkeeper at all (Task 10 hides the "+" entry point
-// entirely), so the disabled Save button is a second line of defence, not
-// the primary gate.
+// `appModel.canEditRecipes` (Task 6) gates the Save button on the create
+// path and every write affordance on the edit path (Task 9): a bookkeeper
+// reaches a fully read-only rendering of the SAME fields/lines/preview,
+// never a blank or missing screen, because reading is permitted by RLS.
+// This screen is normally unreachable for a bookkeeper at all for
+// CREATION (Task 10 hides the "+" entry point entirely), so the disabled
+// Save button there is a second line of defence, not the primary gate --
+// but EDITING an existing recipe stays reachable (a bookkeeper can still
+// view costing), so the edit path's read-only rendering is not a backstop,
+// it's load-bearing.
 
 import SwiftUI
 import CostSauceKit
@@ -58,16 +75,67 @@ struct RecipeEditorView: View {
     @State private var drift: [String: DriftResult] = [:]
     @State private var loadError: String?
 
+    // MARK: - Edit-path state (Task 9)
+
+    /// The stored recipe row itself. `LocalStore.recipe(id:)` is NOT
+    /// filtered by `deleted_at` (same contract as `ingredient(id:)`), so a
+    /// recipe tombstoned from elsewhere while this screen is open still
+    /// reads back non-nil with `deleted_at` set, which `editContent` below
+    /// turns into a "deleted" state rather than a crash or a stale form.
+    @State private var recipe: LocalRecipe?
+    @State private var lines: [LocalRecipeItem] = []
+
+    /// Mirrors of the stored recipe row's editable columns. Reseeded from
+    /// `recipe` on every reload UNLESS the matching field is the one
+    /// currently focused (`loadEditState`'s guard) -- otherwise an
+    /// unrelated write elsewhere (which bumps `pendingCount` and reruns
+    /// `.task(id:)`) would silently overwrite whatever the user is mid-
+    /// typing into this field before they ever get a chance to commit it.
+    @State private var nameText = ""
+    @State private var menuPriceText = ""
+    @State private var targetFcPctText = ""
+    @State private var nameFieldInvalid = false
+    @State private var menuPriceFieldInvalid = false
+    @State private var targetFcPctFieldInvalid = false
+    /// A thrown `KernelError.message` from `updateRecipeFields` itself --
+    /// only reachable as a backstop, since `commitName`/`commitMenuPrice`/
+    /// `commitTargetFcPct` already pre-validate with the same positivity
+    /// check `RecipeDraft.validate()` uses before ever calling it.
+    @State private var recipeFieldsErrorMessage: String?
+
+    /// Per-line quantity text, keyed by the STORED `recipe_items.id` (never
+    /// a fresh id of its own — unlike the create path's `RecipeDraft.Line`,
+    /// there is no local-only line identity here). Reseeded from `lines` on
+    /// reload with the same currently-focused-field carve-out as the three
+    /// recipe fields above.
+    @State private var qtyTexts: [String: String] = [:]
+    @State private var qtyErrors: [String: String] = [:]
+    /// One coalescing debounce `Task` per line, same cancel-then-resleep
+    /// shape as `AppModel.syncSoon()` -- keyed by line id so editing two
+    /// lines' quantities in quick succession debounces each independently
+    /// rather than one line's edit resetting another's timer.
+    @State private var qtyDebounceTasks: [String: Task<Void, Never>] = [:]
+
+    @FocusState private var focusedField: EditField?
+
+    @State private var addLineDestinationPresented = false
+    @State private var newLineIngredient: LocalIngredient?
+    @State private var newLineQtyText = ""
+    @State private var addLineErrorMessage: String?
+
+    @State private var pendingRemoveLine: LocalRecipeItem?
+    @State private var lastLineMessage: String?
+
+    @State private var deleteRecipeConfirming = false
+    @State private var deleteErrorMessage: String?
+
     var body: some View {
         Group {
             switch mode {
             case .create:
                 createForm
-            case .edit:
-                // Task 9's real edit path. Never reachable in this task's
-                // build — Task 10, the only wired entry point into this
-                // screen, does not exist yet either.
-                ProgressView()
+            case .edit(let recipeId):
+                editContent(recipeId: recipeId)
             }
         }
         .navigationTitle(navigationTitle)
@@ -315,20 +383,52 @@ struct RecipeEditorView: View {
 
     /// Rebuilds from `LocalStore` reads, same synchronous-blocking-GRDB-call
     /// idiom as `DashboardView`/`IngredientsListView`/`IngredientPickerView`.
+    /// `ingredients`/`drift` back the preview for BOTH modes; `.edit` also
+    /// reloads the recipe row and its live lines via `loadEditState`.
     private func loadStoreData() {
         guard let store = appModel.store else {
             ingredients = []
             drift = [:]
             loadError = nil
+            recipe = nil
+            lines = []
             return
         }
         do {
             ingredients = try store.liveIngredients()
             drift = Costing.driftByIngredient(purchases: try store.allLivePurchases())
+            if case .edit(let recipeId) = mode {
+                try loadEditState(store: store, recipeId: recipeId)
+            }
             loadError = nil
         } catch {
             loadError = error.localizedDescription
         }
+    }
+
+    /// `recipe`/`lines` themselves are always overwritten -- they're pure
+    /// reflections of the store, never user-typed. The per-field TEXT
+    /// mirrors are the ones that skip a field currently under the user's
+    /// finger (`focusedField`), per this file's top doc comment.
+    private func loadEditState(store: LocalStore, recipeId: String) throws {
+        let fetchedRecipe = try store.recipe(id: recipeId)
+        let fetchedLines = try store.liveRecipeItems(recipeId: recipeId)
+        recipe = fetchedRecipe
+        lines = fetchedLines
+
+        if focusedField != .name { nameText = fetchedRecipe?.name ?? "" }
+        if focusedField != .menuPrice { menuPriceText = fetchedRecipe?.menu_price ?? "" }
+        if focusedField != .targetFcPct { targetFcPctText = fetchedRecipe?.target_fc_pct ?? "" }
+
+        for line in fetchedLines where focusedField != .lineQty(line.id) {
+            qtyTexts[line.id] = line.qty_base_units
+        }
+        // Prune state for lines that are no longer live (removed here or
+        // tombstoned elsewhere) so a reused id can never resurrect a stale
+        // error/text after the line itself is gone.
+        let liveIds = Set(fetchedLines.map(\.id))
+        qtyTexts = qtyTexts.filter { liveIds.contains($0.key) }
+        qtyErrors = qtyErrors.filter { liveIds.contains($0.key) }
     }
 
     // MARK: - Save
@@ -365,6 +465,442 @@ struct RecipeEditorView: View {
             isSaving = false
         }
     }
+
+    // MARK: - Edit form (Task 9)
+
+    @ViewBuilder
+    private func editContent(recipeId: String) -> some View {
+        if let loadError {
+            ContentUnavailableView(
+                "Couldn't Load Recipe", systemImage: "exclamationmark.triangle",
+                description: Text(loadError))
+        } else if let recipe, recipe.deleted_at == nil {
+            editForm(recipe: recipe, recipeId: recipeId)
+        } else if recipe?.deleted_at != nil {
+            // The recipe was tombstoned (here, moments ago via `deleteRecipe`
+            // and `dismiss()` raced by the reload, or from another device)
+            // — a stale form with no live row behind it would be worse than
+            // this plain state.
+            ContentUnavailableView(
+                "Recipe Deleted", systemImage: "trash",
+                description: Text("This recipe has been deleted."))
+        } else {
+            ProgressView()
+        }
+    }
+
+    private func editForm(recipe: LocalRecipe, recipeId: String) -> some View {
+        Form {
+            editRecipeFieldsSection(recipe: recipe)
+            editLinesSection
+            Section("Preview") {
+                PlatePreview(result: editPreviewResult, suppressSuggestions: appModel.suppressSuggestions)
+            }
+            if appModel.canEditRecipes {
+                Section {
+                    Button("Delete Recipe", role: .destructive) {
+                        deleteErrorMessage = nil
+                        deleteRecipeConfirming = true
+                    }
+                }
+            }
+            if let deleteErrorMessage {
+                Section {
+                    Text(deleteErrorMessage).foregroundStyle(.red)
+                }
+            }
+        }
+        .onSubmit {
+            // The only field with a real return key (default keyboard) is
+            // Name -- the decimal-pad fields have none. Dropping focus here
+            // routes through the SAME `onChange(of: focusedField)` blur
+            // handler below, so "return" and "blur" commit through one
+            // path, not two.
+            focusedField = nil
+        }
+        .onChange(of: focusedField) { oldValue, newValue in
+            guard let oldValue, oldValue != newValue else { return }
+            switch oldValue {
+            case .name: commitName(recipe: recipe, recipeId: recipeId)
+            case .menuPrice: commitMenuPrice(recipe: recipe, recipeId: recipeId)
+            case .targetFcPct: commitTargetFcPct(recipe: recipe, recipeId: recipeId)
+            case .lineQty: break  // Quantity commits on its own debounce timer, not on blur.
+            }
+        }
+        .confirmationDialog(
+            "Delete \(recipe.name)?",
+            isPresented: $deleteRecipeConfirming,
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) { deleteRecipe(recipeId: recipeId) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes the recipe and its \(lines.count) ingredient lines.")
+        }
+        .confirmationDialog(
+            "Remove \(removeLineIngredientName)?",
+            isPresented: confirmRemoveLineBinding,
+            titleVisibility: .visible
+        ) {
+            Button("Remove", role: .destructive) {
+                if let pendingRemoveLine { removeLine(pendingRemoveLine) }
+            }
+            Button("Cancel", role: .cancel) { pendingRemoveLine = nil }
+        }
+        .alert("Can't Remove Ingredient", isPresented: lastLineAlertBinding) {
+            Button("OK") {}
+        } message: {
+            Text(lastLineMessage ?? "")
+        }
+        .navigationDestination(isPresented: $addLineDestinationPresented) {
+            addLineDestination(recipeId: recipeId)
+        }
+    }
+
+    @ViewBuilder
+    private func editRecipeFieldsSection(recipe: LocalRecipe) -> some View {
+        Section("Recipe") {
+            if appModel.canEditRecipes {
+                TextField("Name", text: $nameText)
+                    .focused($focusedField, equals: .name)
+                if nameFieldInvalid {
+                    Text(message(for: .nameEmpty)).font(.caption).foregroundStyle(.red)
+                }
+                TextField("Menu price", text: $menuPriceText)
+                    .keyboardType(.decimalPad)
+                    .focused($focusedField, equals: .menuPrice)
+                if menuPriceFieldInvalid {
+                    Text(message(for: .menuPriceInvalid)).font(.caption).foregroundStyle(.red)
+                }
+                TextField("Target food cost %", text: $targetFcPctText)
+                    .keyboardType(.decimalPad)
+                    .focused($focusedField, equals: .targetFcPct)
+                if targetFcPctFieldInvalid {
+                    Text(message(for: .targetFcPctInvalid)).font(.caption).foregroundStyle(.red)
+                }
+            } else {
+                // Bookkeeper: plain text, no `TextField`, no focus, no
+                // commit path at all -- reading is permitted by RLS, editing
+                // is not.
+                LabeledContent("Name", value: nameText.isEmpty ? "—" : nameText)
+                LabeledContent("Menu price", value: menuPriceText.isEmpty ? "—" : "$\(menuPriceText)")
+                LabeledContent(
+                    "Target food cost %",
+                    value: targetFcPctText.isEmpty ? "—" : "\(targetFcPctText)%")
+            }
+            if let recipeFieldsErrorMessage {
+                Text(recipeFieldsErrorMessage).font(.caption).foregroundStyle(.red)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var editLinesSection: some View {
+        Section("Ingredients") {
+            ForEach(lines, id: \.id) { line in
+                let row = EditLineRow(
+                    name: ingredientsById[line.ingredient_id]?.name ?? "—",
+                    baseUnit: ingredientsById[line.ingredient_id]?.base_unit,
+                    qty: qtyBinding(for: line),
+                    errorMessage: qtyErrors[line.id],
+                    isEditable: appModel.canEditRecipes,
+                    focus: $focusedField,
+                    focusValue: .lineQty(line.id))
+                if appModel.canEditRecipes {
+                    row.swipeActions(edge: .trailing) {
+                        Button(role: .destructive) {
+                            pendingRemoveLine = line
+                        } label: {
+                            Label("Remove", systemImage: "trash")
+                        }
+                    }
+                } else {
+                    row
+                }
+            }
+            if appModel.canEditRecipes {
+                Button {
+                    newLineIngredient = nil
+                    newLineQtyText = ""
+                    addLineErrorMessage = nil
+                    addLineDestinationPresented = true
+                } label: {
+                    Label("Add ingredient", systemImage: "plus")
+                }
+            }
+        }
+    }
+
+    /// The picker, pushed (never a `.sheet` inside this already-pushed
+    /// screen's own `.sheet` — see the create path's `addIngredientDestination`
+    /// doc comment for why), plus a quantity step below it: unlike the
+    /// create path's `addLine` (which just appends a blank-qty draft line),
+    /// `LocalEdits.addRecipeLine` writes immediately and REQUIRES an
+    /// already-positive `qty` argument, so a quantity has to be collected
+    /// here, before the line can exist at all.
+    private func addLineDestination(recipeId: String) -> some View {
+        Form {
+            IngredientPickerView(
+                appModel: appModel,
+                excludedIngredientIds: Set(lines.map(\.ingredient_id)),
+                onPick: { ingredient in
+                    newLineIngredient = ingredient
+                    addLineErrorMessage = nil
+                },
+                onClear: { newLineIngredient = nil },
+                onQueryEdited: {})
+            if let newLineIngredient {
+                Section("Quantity") {
+                    HStack {
+                        TextField("Qty", text: $newLineQtyText)
+                            .keyboardType(.decimalPad)
+                        Text(newLineIngredient.base_unit)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if let addLineErrorMessage {
+                        Text(addLineErrorMessage).font(.caption).foregroundStyle(.red)
+                    }
+                    Button("Add") { addLine(recipeId: recipeId) }
+                        .disabled(newLineQtyText.isEmpty)
+                }
+            }
+        }
+        .navigationTitle("Add Ingredient")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    // MARK: - Edit-path field commits
+
+    /// Blur/return commit for Name: blank shows the SAME frozen string
+    /// `RecipeDraft.DraftError.nameEmpty` renders on the create path and
+    /// mints nothing; unchanged (compared against the STORED `recipe.name`,
+    /// not against whatever the last commit happened to write) also mints
+    /// nothing, per `LocalEdits.updateRecipeFields`'s own doc comment — that
+    /// method diffs only "was a value supplied," never against the current
+    /// row, so this view is the one place the "did it actually change"
+    /// check has to live.
+    private func commitName(recipe: LocalRecipe, recipeId: String) {
+        let trimmed = nameText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            nameFieldInvalid = true
+            return
+        }
+        nameFieldInvalid = false
+        guard trimmed != recipe.name else { return }
+        commitRecipeFields(recipeId: recipeId, name: trimmed, menuPrice: nil, targetFcPct: nil)
+    }
+
+    private func commitMenuPrice(recipe: LocalRecipe, recipeId: String) {
+        let trimmed = menuPriceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let value = try? Rational.parseDec(trimmed), value.isPositive else {
+            menuPriceFieldInvalid = true
+            return
+        }
+        menuPriceFieldInvalid = false
+        guard trimmed != recipe.menu_price else { return }
+        commitRecipeFields(recipeId: recipeId, name: nil, menuPrice: trimmed, targetFcPct: nil)
+    }
+
+    private func commitTargetFcPct(recipe: LocalRecipe, recipeId: String) {
+        let trimmed = targetFcPctText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let value = try? Rational.parseDec(trimmed), value.isPositive else {
+            targetFcPctFieldInvalid = true
+            return
+        }
+        targetFcPctFieldInvalid = false
+        guard trimmed != recipe.target_fc_pct else { return }
+        commitRecipeFields(recipeId: recipeId, name: nil, menuPrice: nil, targetFcPct: trimmed)
+    }
+
+    /// Exactly one of `name`/`menuPrice`/`targetFcPct` is ever non-nil at a
+    /// call site above -- each field commits independently on its OWN blur,
+    /// so this never batches two changed fields into one op.
+    private func commitRecipeFields(recipeId: String, name: String?, menuPrice: String?, targetFcPct: String?) {
+        guard let edits = appModel.edits else { return }
+        recipeFieldsErrorMessage = nil
+        do {
+            try edits.updateRecipeFields(id: recipeId, name: name, menuPrice: menuPrice, targetFcPct: targetFcPct)
+            appModel.syncSoon()
+        } catch let error as KernelError {
+            recipeFieldsErrorMessage = error.message
+        } catch {
+            recipeFieldsErrorMessage = error.localizedDescription
+        }
+    }
+
+    // MARK: - Edit-path line quantity (debounced)
+
+    private func qtyBinding(for line: LocalRecipeItem) -> Binding<String> {
+        Binding(
+            get: { qtyTexts[line.id] ?? line.qty_base_units },
+            set: { newValue in
+                qtyTexts[line.id] = newValue
+                scheduleQtyCommit(itemId: line.id, text: newValue)
+            })
+    }
+
+    /// Cancel-then-resleep, the exact shape `AppModel.syncSoon()` already
+    /// uses for its own debounce: typing "0.25" restarts this 500ms timer
+    /// on every keystroke, so only the LAST keystroke's timer ever survives
+    /// to fire — one op, not four.
+    private func scheduleQtyCommit(itemId: String, text: String) {
+        qtyDebounceTasks[itemId]?.cancel()
+        qtyDebounceTasks[itemId] = Task {
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled else { return }
+            commitQty(itemId: itemId, text: text)
+        }
+    }
+
+    /// A blank or unparseable value shows the field error and mints
+    /// NOTHING -- the last good quantity (still sitting in the store row,
+    /// untouched) stands, per spec §9. Pre-validated locally with the same
+    /// positivity check every other field here uses, rather than letting
+    /// `updateRecipeLineQty` throw and catching its `KernelError` --
+    /// keeps the exact same frozen "Quantity must be greater than zero."
+    /// string the create path already shows for the equivalent case.
+    ///
+    /// Also skips when `text` already matches the line's STORED
+    /// `qty_base_units` -- found live, not theorized: scrolling a line's
+    /// `TextField` into view and tapping it to focus (no typing at all)
+    /// reliably fired this Binding's `set` once with the field's own
+    /// unchanged starting text, which -- absent this guard -- queued a
+    /// pointless `{"qty_base_units": "2.0000"}` update op for a value that
+    /// never actually changed, confirmed by reading `pending_ops` directly
+    /// off the simulator's on-disk store during Task 9's own simulator
+    /// walk. `updateRecipeLineQty` has no such diff built in (its own doc
+    /// comment: `fields` is always exactly `{qty_base_units}` when called),
+    /// so -- same as `commitName`/`commitMenuPrice`/`commitTargetFcPct`
+    /// diffing against `recipe` before calling `updateRecipeFields` -- this
+    /// is the one place that check can live.
+    private func commitQty(itemId: String, text: String) {
+        qtyDebounceTasks[itemId] = nil
+        guard let edits = appModel.edits else { return }
+        guard let value = try? Rational.parseDec(text), value.isPositive else {
+            qtyErrors[itemId] = "Quantity must be greater than zero."
+            return
+        }
+        qtyErrors[itemId] = nil
+        guard lines.first(where: { $0.id == itemId })?.qty_base_units != text else { return }
+        do {
+            try edits.updateRecipeLineQty(itemId: itemId, qty: text)
+            appModel.syncSoon()
+        } catch let error as KernelError {
+            qtyErrors[itemId] = error.message
+        } catch {
+            qtyErrors[itemId] = error.localizedDescription
+        }
+    }
+
+    // MARK: - Edit-path add/remove line, delete recipe
+
+    /// `IngredientPickerView`'s own `excludedIngredientIds` keeps an
+    /// already-on-the-recipe ingredient out of its match/near-match/
+    /// create-new results (including the create-new duplicate-adoption
+    /// refusal), so `EditError.duplicate` cannot normally surface here --
+    /// caught anyway rather than crashing, same defensive posture the
+    /// picker's own doc comment describes for its "fix round 2".
+    private func addLine(recipeId: String) {
+        guard let edits = appModel.edits, let ingredient = newLineIngredient else { return }
+        addLineErrorMessage = nil
+        guard let value = try? Rational.parseDec(newLineQtyText), value.isPositive else {
+            addLineErrorMessage = "Quantity must be greater than zero."
+            return
+        }
+        do {
+            _ = try edits.addRecipeLine(recipeId: recipeId, ingredientId: ingredient.id, qty: newLineQtyText)
+            appModel.syncSoon()
+            newLineIngredient = nil
+            newLineQtyText = ""
+            addLineDestinationPresented = false
+        } catch let error as LocalEdits.EditError {
+            if case .duplicate = error {
+                addLineErrorMessage = "That ingredient is already on this recipe."
+            }
+        } catch let error as KernelError {
+            addLineErrorMessage = error.message
+        } catch {
+            addLineErrorMessage = error.localizedDescription
+        }
+    }
+
+    /// `tombstoneRecipeLine`'s own local guard runs BEFORE any op is queued
+    /// (its own doc comment) -- `EditError.lastLine` here is just surfacing
+    /// that guard's result as the brief's alert, never a network round trip.
+    private func removeLine(_ line: LocalRecipeItem) {
+        pendingRemoveLine = nil
+        guard let edits = appModel.edits else { return }
+        do {
+            try edits.tombstoneRecipeLine(itemId: line.id)
+            appModel.syncSoon()
+        } catch let error as LocalEdits.EditError {
+            if case .lastLine = error {
+                lastLineMessage = "A recipe needs at least one ingredient. Delete the recipe instead."
+            }
+        } catch {
+            loadError = error.localizedDescription
+        }
+    }
+
+    /// `tombstoneRecipe` enqueues N+1 ops (every live line plus the recipe
+    /// itself) in ONE transaction (its own doc comment) -- this view never
+    /// enumerates lines itself for the delete, it just calls through.
+    private func deleteRecipe(recipeId: String) {
+        guard let edits = appModel.edits else { return }
+        deleteErrorMessage = nil
+        do {
+            try edits.tombstoneRecipe(id: recipeId)
+            appModel.syncSoon()
+            dismiss()
+        } catch let error as KernelError {
+            deleteErrorMessage = error.message
+        } catch {
+            deleteErrorMessage = error.localizedDescription
+        }
+    }
+
+    private var removeLineIngredientName: String {
+        guard let pendingRemoveLine else { return "" }
+        return ingredientsById[pendingRemoveLine.ingredient_id]?.name ?? "this ingredient"
+    }
+
+    private var confirmRemoveLineBinding: Binding<Bool> {
+        Binding(get: { pendingRemoveLine != nil }, set: { if !$0 { pendingRemoveLine = nil } })
+    }
+
+    private var lastLineAlertBinding: Binding<Bool> {
+        Binding(get: { lastLineMessage != nil }, set: { if !$0 { lastLineMessage = nil } })
+    }
+
+    // MARK: - Edit-path preview
+
+    /// Same `Costing.previewPlate` call the create path's `previewResult`
+    /// makes, over the STORED lines but each line's LIVE `qtyTexts` entry
+    /// (falling back to the stored qty for a line not currently being
+    /// typed into) -- so the preview reacts to every keystroke exactly like
+    /// the create path's draft preview does, even though the actual
+    /// `LocalEdits` write for that keystroke is still debounced. A mid-typing
+    /// unparseable qty degrades this to "no preview yet," never a crash --
+    /// same `try?` reasoning as `previewResult`'s own doc comment.
+    private var editPreviewResult: Costing.PreviewResult? {
+        try? Costing.previewPlate(
+            lines: lines.map { (ingredientId: $0.ingredient_id, qty: qtyTexts[$0.id] ?? $0.qty_base_units) },
+            menuPrice: positiveDecimalOrNil(menuPriceText),
+            targetFcPct: positiveDecimalOrNil(targetFcPctText),
+            ingredients: ingredients, drift: drift)
+    }
+}
+
+/// Field identity for the edit path's `@FocusState`, and the debounce/
+/// reload-skip key for quantity edits -- `.lineQty` carries the STORED
+/// `recipe_items.id`, never a view-only identity like the create path's
+/// `RecipeDraft.Line.id`.
+private enum EditField: Hashable {
+    case name
+    case menuPrice
+    case targetFcPct
+    case lineQty(String)
 }
 
 /// What `.task(id:)` reruns `loadStoreData()` on — same `pendingCount`/
@@ -399,6 +935,54 @@ private struct LineRow: View {
                     .keyboardType(.decimalPad)
                     .multilineTextAlignment(.trailing)
                     .frame(width: 70)
+                if let baseUnit {
+                    Text(baseUnit)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if let errorMessage {
+                Text(errorMessage).font(.caption).foregroundStyle(.red)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+// MARK: - Edit-path line row
+
+/// The edit path's line row: same visual shape as `LineRow`, plus the two
+/// things the create path never needed -- a read-only rendering for a
+/// bookkeeper (`isEditable`) and the line's own `focused` binding (so
+/// `loadEditState` can tell this line's quantity is under the user's
+/// finger and skip reseeding it out from under them). The ingredient name
+/// is always plain text, never a picker -- Task 9's brief, matching web
+/// (web/js/app.js:802-810): a line's ingredient is immutable over sync, so
+/// changing it is remove-then-add, never offered as an in-place edit.
+private struct EditLineRow: View {
+    let name: String
+    let baseUnit: String?
+    let qty: Binding<String>
+    let errorMessage: String?
+    let isEditable: Bool
+    let focus: FocusState<EditField?>.Binding
+    let focusValue: EditField
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(name)
+                Spacer()
+                if isEditable {
+                    TextField("Qty", text: qty)
+                        .keyboardType(.decimalPad)
+                        .multilineTextAlignment(.trailing)
+                        .frame(width: 70)
+                        .focused(focus, equals: focusValue)
+                } else {
+                    Text(qty.wrappedValue)
+                        .foregroundStyle(.secondary)
+                }
                 if let baseUnit {
                     Text(baseUnit)
                         .font(.caption)
