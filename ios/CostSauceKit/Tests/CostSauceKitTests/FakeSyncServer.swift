@@ -119,6 +119,17 @@ final class FakeSyncServer: @unchecked Sendable {
     // (LocalPurchase's own doc comment) -- always emitted as null here.
     private static let extraPullOnlyFields: [String: [String]] = ["purchases": ["unit_price"]]
 
+    /// Parent tables each syncable table's INSERT must check for liveness
+    /// at the op's `location_id` before writing -- mirrors
+    /// `_PARENT_CHECKS` (api/services/sync.py:44-50).
+    private static let parentChecks: [String: [(field: String, table: String, label: String)]] = [
+        "purchases": [("ingredient_id", "ingredients", "ingredient")],
+        "recipe_items": [
+            ("recipe_id", "recipes", "recipe"),
+            ("ingredient_id", "ingredients", "ingredient"),
+        ],
+    ]
+
     init() {}
 
     // MARK: - seeding (test setup helper -- bypasses push entirely)
@@ -337,6 +348,24 @@ final class FakeSyncServer: @unchecked Sendable {
             return ["status": "needs_attention", "reason": "unknown field: \(bad)"]
         }
 
+        // Parent liveness (mirrors api/services/sync.py:44-50's
+        // `_PARENT_CHECKS`, run before the recipe_items arbitration block
+        // below): a field naming a parent row must point at one that
+        // exists at THIS location and isn't tombstoned. A field simply
+        // absent from `fields` (nil here) is skipped, same as the real
+        // server's `if parent_id is None: continue`.
+        for check in Self.parentChecks[table] ?? [] {
+            guard let parentId = fields[check.field] as? String else { continue }
+            let parentRow = tables[check.table]?[parentId]
+            let isLive = parentRow.map { row in
+                (row["location_id"] as? String) == locationId
+                    && !((row["deleted_at"] as? String).map { !$0.isEmpty } ?? false)
+            } ?? false
+            if !isLive {
+                return ["status": "needs_attention", "reason": "referenced \(check.label) is not live"]
+            }
+        }
+
         if table == "recipe_items" {
             let recipeId = fields["recipe_id"] as? String
             let ingredientId = fields["ingredient_id"] as? String
@@ -350,9 +379,15 @@ final class FakeSyncServer: @unchecked Sendable {
                 guard let existingCM = existingRow["client_mutated_at"] as? String else {
                     return ["status": "needs_attention", "reason": "corrupt fixture row"]
                 }
-                if clientMutatedAt <= existingCM {
+                if clientMutatedAt < existingCM {
                     // Our INSERT loses the ON CONFLICT arbitration -- the
-                    // one case a `stale` result carries a `row_id`.
+                    // one case a `stale` result carries a `row_id`. Strictly
+                    // `<` (not `<=`): the real server's upsert is `WHERE
+                    // recipe_items.client_mutated_at <= EXCLUDED
+                    // .client_mutated_at` (api/services/sync.py:257), so it
+                    // rejects ONLY a strictly older write -- an EQUAL
+                    // timestamp wins and folds onto the canonical row below,
+                    // same as this file's own plain-update path (:311).
                     return ["status": "stale", "reason": "older", "row_id": existingId]
                 }
                 var updated = existingRow

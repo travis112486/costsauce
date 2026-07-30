@@ -16,6 +16,7 @@ struct SyncEngineTests {
     let baseURL = URL(string: "https://api.test")!
     let t1 = "2026-07-29T09:00:00.000000Z"
     let t2 = "2026-07-29T10:00:00.000000Z"
+    let t3 = "2026-07-29T11:00:00.000000Z"
 
     private func makeStore() throws -> LocalStore {
         let store = try LocalStore.inMemory()
@@ -233,6 +234,281 @@ struct SyncEngineTests {
         #expect(items.count == 1)  // never 2 -- LocalStore.adoptCanonicalRow's own contract
         #expect(items.first?.id == "canonical-1")
         #expect(items.first?.qty_base_units == "1.0000")  // server value stands
+    }
+
+    // MARK: - recipe_items ON CONFLICT: equal-timestamp tie-break (Task 5, FIX 1)
+
+    /// The real server's upsert only rejects a STRICTLY older write (`WHERE
+    /// recipe_items.client_mutated_at <= EXCLUDED.client_mutated_at`,
+    /// api/services/sync.py:257) -- an EQUAL timestamp wins and folds onto
+    /// the canonical row. Before FIX 1, `FakeSyncServer` rejected ties too
+    /// (its own `<=` inverted the winner), which would make this insert
+    /// come back `stale` and leave the canonical row's original qty
+    /// standing instead of the tying insert's value.
+    @Test func recipeItemInsertAtEqualTimestampWinsArbitrationAndItsValueStands() async throws {
+        let server = FakeSyncServer()
+        server.seed(
+            table: "recipes", id: "rec-1", clientMutatedAt: t1,
+            fields: ["name": "Bread", "menu_price": "12.00", "target_fc_pct": "30.00"])
+        server.seed(
+            table: "ingredients", id: "ing-1", clientMutatedAt: t1,
+            fields: ["name": "Flour", "base_unit": "lb"])
+        server.seed(
+            table: "recipe_items", id: "canonical-1", clientMutatedAt: t2,
+            fields: ["recipe_id": "rec-1", "ingredient_id": "ing-1", "qty_base_units": "1.0000"])
+
+        let store = try makeStore()
+        let engine = SyncEngine(store: store, api: makeApi(), orgId: "org-1")
+
+        try await StubTransport.withStub(server.responder()) {
+            await engine.syncNow()
+        }
+
+        // Offline, this device re-creates its own copy of the SAME line at
+        // the EXACT SAME timestamp as the canonical row's -- a genuine tie,
+        // not a strictly-older loser (that case is the existing test right
+        // below this one).
+        try store.enqueue(PendingOp(
+            op_id: "op-tie", table: "recipe_items", row_id: "minted-tie", location_id: "loc-1",
+            client_mutated_at: t2, kind: .insert,
+            fields: ["recipe_id": "rec-1", "ingredient_id": "ing-1", "qty_base_units": "3.0000"],
+            state: .queued, reason: nil, created_at: t2))
+
+        try await StubTransport.withStub(server.responder()) {
+            await engine.syncNow()
+        }
+
+        #expect(await engine.state == .caughtUp)
+        #expect(try store.pendingOps(state: nil).isEmpty)
+        let items = try store.liveRecipeItems()
+        #expect(items.count == 1)  // still one canonical row, never two
+        #expect(items.first?.id == "canonical-1")
+        #expect(items.first?.qty_base_units == "3.0000")  // the TYING insert's value stands, not the original 1.0000
+    }
+
+    // MARK: - recipe_items parent liveness on insert (Task 5, FIX 2)
+
+    /// Mirrors `_PARENT_CHECKS` (api/services/sync.py:44-50): a
+    /// `recipe_items` INSERT whose `recipe_id`/`ingredient_id` doesn't name
+    /// a live row at this location must park as `needs_attention`, not
+    /// silently apply an orphaned line. Reachable per spec §7 if a
+    /// recipe's own insert op parked, or an ingredient was tombstoned by
+    /// another device between this device composing the line and pushing
+    /// it.
+    @Test func recipeItemInsertWithNonLiveParentParksAsNeedsAttentionNotDeleted() async throws {
+        let server = FakeSyncServer()
+        server.seed(
+            table: "recipes", id: "rec-1", clientMutatedAt: t1,
+            fields: ["name": "Bread", "menu_price": "12.00", "target_fc_pct": "30.00"])
+        server.seed(
+            table: "ingredients", id: "ing-1", clientMutatedAt: t1,
+            fields: ["name": "Flour", "base_unit": "lb"])
+        server.seed(
+            table: "ingredients", id: "ing-dead", clientMutatedAt: t1,
+            fields: ["name": "Ghost", "base_unit": "lb", "deleted_at": t1])
+
+        let store = try makeStore()
+        let engine = SyncEngine(store: store, api: makeApi(), orgId: "org-1")
+
+        try await StubTransport.withStub(server.responder()) {
+            await engine.syncNow()
+        }
+
+        // (1) recipe_id names no server row at all.
+        try store.enqueue(PendingOp(
+            op_id: "op-no-recipe", table: "recipe_items", row_id: "line-1", location_id: "loc-1",
+            client_mutated_at: t2, kind: .insert,
+            fields: ["recipe_id": "rec-missing", "ingredient_id": "ing-1", "qty_base_units": "1.0000"],
+            state: .queued, reason: nil, created_at: t2))
+        // (2) ingredient_id names a TOMBSTONED server row.
+        try store.enqueue(PendingOp(
+            op_id: "op-dead-ingredient", table: "recipe_items", row_id: "line-2", location_id: "loc-1",
+            client_mutated_at: t2, kind: .insert,
+            fields: ["recipe_id": "rec-1", "ingredient_id": "ing-dead", "qty_base_units": "1.0000"],
+            state: .queued, reason: nil, created_at: t2))
+
+        try await StubTransport.withStub(server.responder()) {
+            await engine.syncNow()
+        }
+
+        #expect(await engine.state == .caughtUp)
+        // Still present as two ops total -- parked, not deleted.
+        #expect(try store.pendingOps(state: nil).count == 2)
+        #expect(try store.pendingOps(state: .queued).isEmpty)
+        let parked = try store.pendingOps(state: .needsAttention)
+        #expect(parked.count == 2)
+        #expect(parked.first(where: { $0.op_id == "op-no-recipe" })?.reason == "referenced recipe is not live")
+        #expect(
+            parked.first(where: { $0.op_id == "op-dead-ingredient" })?.reason
+                == "referenced ingredient is not live")
+        #expect(server.rowCount(table: "recipe_items") == 0)  // neither orphan ever landed
+    }
+
+    // MARK: - create-with-lines in one push batch (TABLE_ORDER FK safety)
+
+    /// `saveNewRecipe` (Task 3) mints a `recipes` insert plus one
+    /// `recipe_items` insert per line, all in ONE `enqueueBatch` call, and
+    /// they can go out in the SAME push -- the server's `TABLE_ORDER`
+    /// ranking applies every `recipes` op before any `recipe_items` op
+    /// within a batch (api/services/sync.py:23, mirrored by
+    /// `FakeSyncServer`'s own `tableOrder` sort in `handlePush`), so the
+    /// lines' FK parent is already live by the time their inserts run even
+    /// though it arrived in the identical wire batch.
+    @Test func createWithLinesInOneBatchAppliesAllThreeDespiteSameBatchFKOrdering() async throws {
+        let server = FakeSyncServer()
+        server.seed(
+            table: "ingredients", id: "ing-flour", clientMutatedAt: t1,
+            fields: ["name": "Flour", "base_unit": "lb"])
+        server.seed(
+            table: "ingredients", id: "ing-salt", clientMutatedAt: t1,
+            fields: ["name": "Salt", "base_unit": "oz"])
+
+        let store = try makeStore()
+        let engine = SyncEngine(store: store, api: makeApi(), orgId: "org-1")
+        let edits = LocalEdits(store: store, locationId: "loc-1")
+
+        try await StubTransport.withStub(server.responder()) {
+            await engine.syncNow()
+        }
+
+        let draft = RecipeDraft(
+            name: "Bread", menuPrice: "12.00", targetFcPct: "30.00",
+            lines: [
+                RecipeDraft.Line(ingredientId: "ing-flour", qty: "1.0000"),
+                RecipeDraft.Line(ingredientId: "ing-salt", qty: "0.5000"),
+            ])
+        let recipeId = try edits.saveNewRecipe(draft)
+        #expect(try store.pendingOps(state: .queued).count == 3)  // 1 recipe + 2 lines
+
+        try await StubTransport.withStub(server.responder()) {
+            await engine.syncNow()
+        }
+
+        #expect(await engine.state == .caughtUp)
+        #expect(try store.pendingOps(state: nil).isEmpty)  // all 3 applied, none parked
+        #expect(server.rowCount(table: "recipes") == 1)
+        #expect(server.rowCount(table: "recipe_items") == 2)
+        #expect(try store.recipe(id: recipeId)?.name == "Bread")
+        #expect(try store.liveRecipeItems(recipeId: recipeId).count == 2)
+    }
+
+    // MARK: - delete fan-out round-trip (Task 2 end-to-end guard)
+
+    /// `tombstoneRecipe` enqueues N+1 ops (one tombstone per live line plus
+    /// the recipe's own) in ONE batch. Proves the whole fan-out survives a
+    /// real push+pull round-trip against the double: every op applies, and
+    /// the server ends with zero live lines for the deleted recipe.
+    @Test func deleteFanOutRoundTripAppliesEveryTombstoneAndLeavesNoLiveLines() async throws {
+        let server = FakeSyncServer()
+        server.seed(
+            table: "recipes", id: "rec-1", clientMutatedAt: t1,
+            fields: ["name": "Bread", "menu_price": "12.00", "target_fc_pct": "30.00"])
+        server.seed(
+            table: "ingredients", id: "ing-flour", clientMutatedAt: t1,
+            fields: ["name": "Flour", "base_unit": "lb"])
+        server.seed(
+            table: "ingredients", id: "ing-salt", clientMutatedAt: t1,
+            fields: ["name": "Salt", "base_unit": "oz"])
+        server.seed(
+            table: "recipe_items", id: "line-1", clientMutatedAt: t1,
+            fields: ["recipe_id": "rec-1", "ingredient_id": "ing-flour", "qty_base_units": "1.0000"])
+        server.seed(
+            table: "recipe_items", id: "line-2", clientMutatedAt: t1,
+            fields: ["recipe_id": "rec-1", "ingredient_id": "ing-salt", "qty_base_units": "0.5000"])
+
+        let store = try makeStore()
+        let engine = SyncEngine(store: store, api: makeApi(), orgId: "org-1")
+        let edits = LocalEdits(store: store, locationId: "loc-1")
+
+        try await StubTransport.withStub(server.responder()) {
+            await engine.syncNow()
+        }
+        #expect(try store.liveRecipeItems(recipeId: "rec-1").count == 2)
+
+        try edits.tombstoneRecipe(id: "rec-1")
+        #expect(try store.pendingOps(state: .queued).count == 3)  // recipe + 2 lines, one timestamp
+
+        try await StubTransport.withStub(server.responder()) {
+            await engine.syncNow()
+        }
+
+        #expect(await engine.state == .caughtUp)
+        #expect(try store.pendingOps(state: nil).isEmpty)  // every op applied
+        #expect(server.rowCount(table: "recipe_items") == 0)
+        #expect(try store.liveRecipeItems(recipeId: "rec-1").isEmpty)
+        #expect(try store.recipe(id: "rec-1")?.deleted_at != nil)
+    }
+
+    // MARK: - stale/deleted: quantity edit against a server-tombstoned line
+
+    /// Spec §7's "one deliberate exception to silence": a quantity edit
+    /// against a line another device already tombstoned must PARK as
+    /// `needs_attention` rather than silently vanish like a plain
+    /// stale/older LWW loss, so the user can see the edit didn't land. The
+    /// double already returns the server's exact `stale`/`reason: "deleted"`
+    /// for this (locked protocol, `docs/superpowers/plans/
+    /// 2026-07-27-phase-1c-sync-protocol.md:24`: "Tombstones are terminal
+    /// -- any op against a tombstoned row is `stale` with `reason:
+    /// "deleted"` regardless of clocks"). What's missing is the CLIENT side:
+    /// `SyncEngine.apply()` currently treats every `stale` result
+    /// identically (`case "applied", "stale": ... deleteOp`, SyncEngine.swift
+    /// :335-347) with no branch on `reason`, so this park never happens
+    /// today -- a genuine production gap in the frozen 2a engine, not
+    /// something this test-only task may fix (task-5-report.md has the full
+    /// writeup). Disabled rather than left red so `swift test` stays a
+    /// trustworthy gate; re-enable once `apply()` grows the `reason ==
+    /// "deleted"` branch.
+    @Test(
+        .disabled(
+            "Production gap in SyncEngine.apply() (SyncEngine.swift:335-347): every `stale` result deletes the op regardless of `reason`, so a tombstoned-row rejection never parks as needs_attention the way spec §7 requires. Out of scope for this test-only task -- see task-5-report.md."
+        )
+    )
+    func quantityEditAgainstServerTombstonedLineParksAsNeedsAttention() async throws {
+        let server = FakeSyncServer()
+        server.seed(
+            table: "recipes", id: "rec-1", clientMutatedAt: t1,
+            fields: ["name": "Bread", "menu_price": "12.00", "target_fc_pct": "30.00"])
+        server.seed(
+            table: "ingredients", id: "ing-1", clientMutatedAt: t1,
+            fields: ["name": "Flour", "base_unit": "lb"])
+        server.seed(
+            table: "recipe_items", id: "line-1", clientMutatedAt: t1,
+            fields: ["recipe_id": "rec-1", "ingredient_id": "ing-1", "qty_base_units": "1.0000"])
+
+        let store = try makeStore()
+        let engine = SyncEngine(store: store, api: makeApi(), orgId: "org-1")
+
+        try await StubTransport.withStub(server.responder()) {
+            await engine.syncNow()
+        }
+        #expect(try store.liveRecipeItems(recipeId: "rec-1").count == 1)
+
+        // Another device tombstones the line server-side; this device
+        // hasn't pulled that yet and queues a quantity edit against it.
+        server.seed(
+            table: "recipe_items", id: "line-1", clientMutatedAt: t2,
+            fields: [
+                "recipe_id": "rec-1", "ingredient_id": "ing-1", "qty_base_units": "1.0000",
+                "deleted_at": t2,
+            ])
+        try store.enqueue(PendingOp(
+            op_id: "op-qty-on-dead-line", table: "recipe_items", row_id: "line-1", location_id: "loc-1",
+            client_mutated_at: t3, kind: .update, fields: ["qty_base_units": "2.0000"],
+            state: .queued, reason: nil, created_at: t3))
+
+        try await StubTransport.withStub(server.responder()) {
+            await engine.syncNow()
+        }
+
+        #expect(await engine.state == .caughtUp)
+        #expect(try store.pendingOps(state: nil).count == 1)  // parked, not deleted
+        let parked = try store.pendingOps(state: .needsAttention)
+        #expect(parked.count == 1)
+        #expect(parked.first?.op_id == "op-qty-on-dead-line")
+        #expect(parked.first?.reason == "deleted")
+        #expect(try store.pendingOps(state: .queued).isEmpty)
+        // Regardless of the park, the trailing pull still removes the line locally.
+        #expect(try store.liveRecipeItems(recipeId: "rec-1").isEmpty)
     }
 
     // MARK: - stale: plain older-edit silently dropped
@@ -565,6 +841,14 @@ struct SyncEngineTests {
 
     // MARK: - two-store convergence (§14 item-count scenario, client-side)
 
+    /// Task 5(g) extends this beyond ingredients/purchases into the recipe
+    /// surface Phase 2b adds: A creates a recipe with two lines (one op
+    /// batch, TABLE_ORDER-safe in a single push alongside an unrelated
+    /// ingredient+purchase), B pulls it, then the two devices each mutate a
+    /// DIFFERENT line offline (B edits one line's quantity, A tombstones
+    /// the other) before both push and pull to convergence -- proving the
+    /// non-conflicting fan-out and the plain LWW update path agree on a
+    /// final, field-identical state on both sides.
     @Test func twoStoreConvergenceFieldIdenticalRowsAndCounts() async throws {
         let server = FakeSyncServer()
         let storeA = try makeStore()
@@ -573,6 +857,8 @@ struct SyncEngineTests {
         let engineA = SyncEngine(store: storeA, api: makeApi(token: "tok-a"), orgId: "org-1")
         let engineB = SyncEngine(store: storeB, api: makeApi(token: "tok-b"), orgId: "org-1")
         let editsA = LocalEdits(store: storeA, locationId: "loc-1")
+        let editsB = LocalEdits(store: storeB, locationId: "loc-1")
+        var recipeId = ""
 
         try await StubTransport.withStub(server.responder()) {
             // B starts caught up.
@@ -596,17 +882,69 @@ struct SyncEngineTests {
             // B then pulls.
             await engineB.syncNow()
             #expect(await engineB.state == .caughtUp)
+
+            // A, still offline, adds a second ingredient and composes a
+            // two-line recipe over it plus the already-synced Ground Beef
+            // -- 1 ingredient insert + saveNewRecipe's 3 ops, all still
+            // local.
+            let saltId = try editsA.createIngredient(
+                name: "Salt", baseUnit: "oz", vendor: nil, category: nil)
+            recipeId = try editsA.saveNewRecipe(RecipeDraft(
+                name: "Meatloaf", menuPrice: "18.00", targetFcPct: "30.00",
+                lines: [
+                    RecipeDraft.Line(ingredientId: ingredientId, qty: "1.0000"),
+                    RecipeDraft.Line(ingredientId: saltId, qty: "0.1000"),
+                ]))
+            #expect(try storeA.pendingOps(state: .queued).count == 4)
+
+            await engineA.syncNow()
+            #expect(await engineA.state == .caughtUp)
+            #expect(try storeA.pendingOps(state: nil).isEmpty)
+
+            await engineB.syncNow()
+            #expect(await engineB.state == .caughtUp)
+
+            // Now each device mutates a DIFFERENT line of the SAME recipe,
+            // still offline -- no conflict, just the fan-out and the plain
+            // LWW update path racing to converge together.
+            let groundBeefLineB = try #require(
+                try storeB.liveRecipeItems(recipeId: recipeId).first { $0.ingredient_id == ingredientId })
+            try editsB.updateRecipeLineQty(itemId: groundBeefLineB.id, qty: "1.2500")
+            #expect(try storeB.pendingOps(state: .queued).count == 1)
+
+            let saltLineA = try #require(
+                try storeA.liveRecipeItems(recipeId: recipeId).first { $0.ingredient_id == saltId })
+            try editsA.tombstoneRecipeLine(itemId: saltLineA.id)
+            #expect(try storeA.pendingOps(state: .queued).count == 1)
+
+            await engineA.syncNow()  // pushes the tombstone
+            #expect(await engineA.state == .caughtUp)
+            await engineB.syncNow()  // pushes the qty edit, pulls A's tombstone too
+            #expect(await engineB.state == .caughtUp)
+            await engineA.syncNow()  // trailing pull to see B's qty edit
+            #expect(await engineA.state == .caughtUp)
         }
 
         let ingredientsA = try storeA.liveIngredients()
         let ingredientsB = try storeB.liveIngredients()
-        #expect(ingredientsA.count == 1)
+        #expect(ingredientsA.count == 2)  // Ground Beef + Salt
         #expect(ingredientsA == ingredientsB)
 
         let purchasesA = try storeA.allLivePurchases()
         let purchasesB = try storeB.allLivePurchases()
         #expect(purchasesA.count == 1)
         #expect(purchasesA == purchasesB)
+
+        let recipesA = try storeA.liveRecipes()
+        let recipesB = try storeB.liveRecipes()
+        #expect(recipesA.count == 1)
+        #expect(recipesA == recipesB)
+
+        let itemsA = try storeA.liveRecipeItems(recipeId: recipeId)
+        let itemsB = try storeB.liveRecipeItems(recipeId: recipeId)
+        #expect(itemsA.count == 1)  // the salt line is tombstoned on both sides
+        #expect(itemsA == itemsB)
+        #expect(itemsA.first?.qty_base_units == "1.2500")  // B's edit stands
     }
 
     // MARK: - push ordering (rules 2/7: no reordering, no merging)
