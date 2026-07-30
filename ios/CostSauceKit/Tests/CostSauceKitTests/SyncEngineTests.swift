@@ -458,11 +458,7 @@ struct SyncEngineTests {
     /// writeup). Disabled rather than left red so `swift test` stays a
     /// trustworthy gate; re-enable once `apply()` grows the `reason ==
     /// "deleted"` branch.
-    @Test(
-        .disabled(
-            "Production gap in SyncEngine.apply() (SyncEngine.swift:335-347): every `stale` result deletes the op regardless of `reason`, so a tombstoned-row rejection never parks as needs_attention the way spec §7 requires. Out of scope for this test-only task -- see task-5-report.md."
-        )
-    )
+    @Test
     func quantityEditAgainstServerTombstonedLineParksAsNeedsAttention() async throws {
         let server = FakeSyncServer()
         server.seed(

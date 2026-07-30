@@ -307,23 +307,35 @@ public actor SyncEngine {
     /// enumerated choice for every case this client knows about, with a
     /// `default` that fails safe.
     ///
-    /// `applied`/`stale` (`replayed: true` only ever DECORATES one of those
-    /// two with a flag, api/routes/sync.py:83-85, never a distinct status
-    /// string of its own) end the same way: if the result carries a `rowId`
-    /// that differs from what THIS op minted, `adoptCanonicalRow` first,
-    /// then `deleteOp` either way. The rowId-mismatch check is what covers
-    /// `recipe_items`' ON CONFLICT upsert-arbitration (api/services/sync.py:
-    /// 247-271): a LOSING insert there comes back as `stale`/`older`
-    /// carrying the WINNING canonical row's id, and
-    /// `LocalStore.adoptCanonicalRow`'s own contract is to drop the local
-    /// minted row so the canonical copy is the only one left. A plain
-    /// UPDATE-vs-UPDATE `stale`/`older` never carries a `rowId` at all, so
-    /// for that case this reduces to exactly rule 2's literal "stale →
-    /// deleteOp" (see `performSync`'s baseline-reset for how the row's
-    /// CONTENT still converges to server truth).
+    /// `applied` and `stale`/`reason: "older"` (a plain LWW loss; `replayed:
+    /// true` only ever DECORATES one of these with a flag, api/routes/
+    /// sync.py:83-85, never a distinct status string of its own) end the
+    /// same way: if the result carries a `rowId` that differs from what THIS
+    /// op minted, `adoptCanonicalRow` first, then `deleteOp` either way. The
+    /// rowId-mismatch check is what covers `recipe_items`' ON CONFLICT
+    /// upsert-arbitration (api/services/sync.py:247-271): a LOSING insert
+    /// there comes back as `stale`/`older` carrying the WINNING canonical
+    /// row's id, and `LocalStore.adoptCanonicalRow`'s own contract is to
+    /// drop the local minted row so the canonical copy is the only one
+    /// left. A plain UPDATE-vs-UPDATE `stale`/`older` never carries a
+    /// `rowId` at all, so for that case this reduces to exactly rule 2's
+    /// literal "stale → deleteOp" (see `performSync`'s baseline-reset for
+    /// how the row's CONTENT still converges to server truth).
     ///
-    /// `needs_attention` is the only status that leaves the op queued (as
-    /// `.needsAttention`, with the server's reason) -- terminal, never
+    /// `stale`/`reason: "deleted"` is different in kind, not degree: it is
+    /// the server refusing to re-mutate a row another device already
+    /// tombstoned (spec §7's locked protocol -- tombstones are terminal
+    /// regardless of clocks), not an ordinary conflict the trailing pull
+    /// silently resolves. §13 requires a server-side refusal never cost the
+    /// user work without telling them, so this parks -- exactly the way an
+    /// unrecognized status already does below -- instead of deleting the
+    /// op. Any OTHER `stale` reason (including none at all) parks the same
+    /// fail-safe way, for the same reason an unrecognized status does:
+    /// a shape this client doesn't specifically know how to resolve is
+    /// grounds to surface it, not to guess it converges silently.
+    ///
+    /// `needs_attention` is the only OTHER status that leaves the op queued
+    /// (as `.needsAttention`, with the server's reason) -- terminal, never
     /// retried automatically (Task 14's UI resolves it). An unrecognized
     /// status is treated the same way, with a reason naming the unknown
     /// status string, rather than silently discarded -- a shape this client
@@ -334,11 +346,39 @@ public actor SyncEngine {
     /// `pending_ops` -- `deleteOp` below is still required after it.
     private func apply(_ result: OpResult, to op: PendingOp) throws {
         switch result.status {
-        case "applied", "stale":
+        case "applied":
             if let rowId = result.rowId, rowId != op.row_id {
                 try store.adoptCanonicalRow(table: op.table, mintedId: op.row_id, canonicalId: rowId)
             }
             try store.deleteOp(opId: op.op_id)
+        case "stale":
+            // Rule 2's "stale" outcome is NOT uniform: an ordinary
+            // last-write-wins loss (`reason: "older"`) means the trailing
+            // pull already fixes the row's content, so the op is simply
+            // dropped -- silently, per §14 (see `staleOlderUpdateSilently
+            // DropsOpWithoutNeedsAttention`). But `reason: "deleted"` means
+            // the server refused to re-mutate a TOMBSTONED row (spec §7,
+            // locked protocol: "Tombstones are terminal -- any op against a
+            // tombstoned row is `stale` with `reason: "deleted"` regardless
+            // of clocks"). That is not an ordinary conflict the trailing
+            // pull silently resolves in the user's favor or the server's --
+            // it is a server-side refusal, and §13 requires those never cost
+            // the user work without telling them. So this parks exactly the
+            // way an unrecognized status already does below, reusing that
+            // same mechanism rather than inventing a second one. Any OTHER
+            // reason (including an absent one) is treated the same
+            // fail-safe way: park, don't silently discard -- a shape this
+            // client doesn't specifically know how to resolve is a reason to
+            // surface it, not to guess it's fine.
+            if result.reason == "older" {
+                if let rowId = result.rowId, rowId != op.row_id {
+                    try store.adoptCanonicalRow(table: op.table, mintedId: op.row_id, canonicalId: rowId)
+                }
+                try store.deleteOp(opId: op.op_id)
+            } else {
+                try store.markNeedsAttention(
+                    opId: op.op_id, reason: result.reason ?? "stale")
+            }
         case "needs_attention":
             try store.markNeedsAttention(opId: op.op_id, reason: result.reason ?? "needs attention")
         default:
