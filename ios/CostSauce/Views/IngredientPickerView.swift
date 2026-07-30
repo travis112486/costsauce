@@ -31,6 +31,20 @@
 // signal `onClear` cannot stand in for -- typing the FIRST characters of a
 // brand new search does not touch `effectiveSelectionId` at all (nil before
 // and after) until something actually matches.
+//
+// Fix round 2 (Travis-ruled -- fix it here, in the picker, not in every
+// future caller): `matchResult`/`nearMatchRows` correctly hide an excluded
+// candidate from RANKING, but that alone left a gap in the CREATE-NEW path
+// -- if the user types an excluded ingredient's exact name, no match
+// surfaces (correctly suppressed), the "Create new ingredient" button
+// appears, and `CreateIngredientSheet`'s `.duplicate` branch adopts that
+// existing (excluded) id, which used to flow straight into `onPick`. Fixed
+// at the source: `CreateIngredientSheet` now also takes
+// `excludedIngredientIds` and refuses to adopt an excluded duplicate,
+// surfacing "That ingredient is already on this recipe." (the same string
+// Task 9's editor shows for its own analogous case) through the sheet's
+// existing error `Section` instead of calling `onCreated`. Purchase entry
+// passes `[]`, so this check is always false there -- a verified no-op.
 
 import SwiftUI
 import CostSauceKit
@@ -91,7 +105,9 @@ struct IngredientPickerView: View {
             }
         }
         .sheet(isPresented: $createSheetPresented) {
-            CreateIngredientSheet(appModel: appModel, name: trimmedQuery) { id, name in
+            CreateIngredientSheet(
+                appModel: appModel, name: trimmedQuery, excludedIngredientIds: excludedIngredientIds
+            ) { id, name in
                 loadCandidates()
                 manualSelection = (id: id, name: name)
                 nameQuery = name
@@ -270,10 +286,13 @@ private let baseUnitChoices = ["lb", "oz", "kg", "g", "each"]
 /// field (shown as a header, not re-editable here) rather than a fourth
 /// input. `EditError.duplicate` is adopted silently (web's 409-adoption
 /// parity, per the brief): `onCreated` fires with the EXISTING id/name and
-/// no error is ever shown for that case.
+/// no error is ever shown for that case -- UNLESS that existing id is in
+/// `excludedIngredientIds` (fix round 2), in which case adoption is refused
+/// and the sheet shows an error instead (see `create()`).
 private struct CreateIngredientSheet: View {
     let appModel: AppModel
     let name: String
+    let excludedIngredientIds: Set<String>
     var onCreated: (_ id: String, _ name: String) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -337,12 +356,25 @@ private struct CreateIngredientSheet: View {
             onCreated(id, name)
         } catch let error as LocalEdits.EditError {
             if case .duplicate(let existingId, let existingName) = error {
-                // No `syncSoon()` here on purpose: `createIngredient` throws
-                // `.duplicate` BEFORE it ever calls `store.enqueue` (see its
-                // own doc comment / implementation), so adopting the
-                // existing id mints no op and changes nothing that needs
-                // pushing -- this is a pure local read, not a write.
-                onCreated(existingId, existingName)
+                if excludedIngredientIds.contains(existingId) {
+                    // Fix round 2: the id this duplicate resolves to is
+                    // already on the caller's exclusion list (e.g. already
+                    // a line on the recipe being edited) -- refuse the
+                    // adopt-and-pick and surface the same message Task 9's
+                    // editor shows for its own analogous
+                    // `addRecipeLine`-throws-`.duplicate` case, rather than
+                    // silently handing the caller the very ingredient it
+                    // asked this view never to pick.
+                    errorMessage = "That ingredient is already on this recipe."
+                } else {
+                    // No `syncSoon()` here on purpose: `createIngredient`
+                    // throws `.duplicate` BEFORE it ever calls
+                    // `store.enqueue` (see its own doc comment /
+                    // implementation), so adopting the existing id mints no
+                    // op and changes nothing that needs pushing -- this is
+                    // a pure local read, not a write.
+                    onCreated(existingId, existingName)
+                }
             }
             // `.inUse` is never thrown by `createIngredient` (only by
             // `tombstoneIngredient`) -- no other case reaches here.
