@@ -277,11 +277,38 @@ struct RecipeEditorView: View {
     /// parse (its own doc comment — an unresolvable line short-circuits
     /// before ever touching `qty`), a state `validate()` would flag as
     /// `.lineQtyInvalid` on Save regardless.
+    ///
+    /// `menuPrice`/`targetFcPct` are passed through `positiveDecimalOrNil`
+    /// rather than straight from `draft` -- `RecipeDraft`'s defaults leave
+    /// `menuPrice` `""` until the user types one, and `previewPlate`'s
+    /// `menuPrice: String?`/`targetFcPct: String?` parameters mean "not
+    /// supplied" only for a genuine `nil`. Passing `""` auto-wraps to
+    /// `.some("")`, which satisfies `previewPlate`'s `if complete, let
+    /// menuPrice, let targetFcPct` guard and then fails to parse inside it
+    /// -- a throw this `try?` cannot distinguish from a real failure,
+    /// collapsing the WHOLE `PreviewResult` (plate cost included) to nil
+    /// instead of just leaving `fcPct`/`status`/`suggestedPrice` nil. Fixed
+    /// at this call site, per plan: `Costing.previewPlate` itself is
+    /// correct and already pinned by the Kit's own tests (which pass
+    /// `nil`, not `""`, for "not supplied").
     private var previewResult: Costing.PreviewResult? {
         try? Costing.previewPlate(
             lines: draft.lines.map { (ingredientId: $0.ingredientId, qty: $0.qty) },
-            menuPrice: draft.menuPrice, targetFcPct: draft.targetFcPct,
+            menuPrice: positiveDecimalOrNil(draft.menuPrice),
+            targetFcPct: positiveDecimalOrNil(draft.targetFcPct),
             ingredients: ingredients, drift: drift)
+    }
+
+    /// `nil` unless `s` parses as a positive `Rational` -- the same
+    /// positivity test `RecipeDraft.validate()` applies to these two
+    /// fields (its own `isPositiveDecimal`, private to that type), used
+    /// here purely to decide what counts as "supplied" for
+    /// `previewPlate`'s optional parameters. This does not relax or
+    /// duplicate a VALIDATION rule: an empty/invalid value here still
+    /// blocks Save exactly as before, unchanged, via `draft.validate()`.
+    private func positiveDecimalOrNil(_ s: String) -> String? {
+        guard let value = try? Rational.parseDec(s), value.isPositive else { return nil }
+        return s
     }
 
     // MARK: - Store reads
