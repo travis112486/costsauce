@@ -68,6 +68,13 @@ struct RecipeEditorView: View {
     @State private var saveErrorMessage: String?
     @State private var isSaving = false
     @State private var addIngredientPresented = false
+    /// The picker's currently staged (but not yet committed) selection --
+    /// the create-path mirror of the edit path's own `newLineIngredient`
+    /// (below). Set by `onPick`, cleared by `onClear` or by an explicit
+    /// "Add" tap (`addLine`), never auto-committed: see `addIngredientDestination`'s
+    /// doc comment for why a live `onPick` firing on every fuzzy match can no
+    /// longer append-and-pop directly the way it did before this fix.
+    @State private var pickedIngredient: LocalIngredient?
 
     // MARK: - Store reads backing the preview (ingredient names/units, drift)
 
@@ -222,6 +229,7 @@ struct RecipeEditorView: View {
             }
             .onDelete(perform: removeLines)
             Button {
+                pickedIngredient = nil
                 addIngredientPresented = true
             } label: {
                 Label("Add ingredient", systemImage: "plus")
@@ -231,32 +239,39 @@ struct RecipeEditorView: View {
 
     /// The picker lives on its own PUSHED screen (not a `.sheet`), presented
     /// solely to pick-then-add a line — unlike `PurchaseEntryView`, nothing
-    /// on this screen is gated on the picker's LIVE selection state, so
-    /// `onClear`/`onQueryEdited` (both meaningful only to a caller that
-    /// renders dependent content alongside the picker itself) are no-ops
-    /// here; see this task's report for why.
+    /// ELSE on this screen is gated on the picker's LIVE selection state, so
+    /// `onQueryEdited` (meaningful only to a caller that renders dependent
+    /// content alongside the picker itself, keyed off every keystroke rather
+    /// than off the selection) is a no-op here; see this task's report for
+    /// why.
     ///
-    /// Deliberately a PUSH (`.navigationDestination(isPresented:)`), not a
-    /// `.sheet`: `IngredientPickerView` already presents its own
-    /// `CreateIngredientSheet` internally via `.sheet(isPresented:)`
-    /// (Task 7, frozen) — wrapping the WHOLE picker in a second, outer
-    /// `.sheet` here makes `CreateIngredientSheet` a sheet-presented-from-
-    /// within-a-sheet, which reproduced live, every time: tapping "Create
-    /// new ingredient" silently dismissed the OUTER sheet instead of
-    /// presenting the inner one (confirmed with a brand-new, non-colliding
-    /// name, ruling out any match/exclusion timing). Pushing onto the same
-    /// `NavigationStack` this screen is itself pushed on (Task 10 wires
-    /// entry via `NavigationLink`, so one is always present) keeps
-    /// `CreateIngredientSheet` at the SAME single-nesting-depth
-    /// `PurchaseEntryView` already proves works.
+    /// `onPick`/`onClear` themselves are NOT no-ops (final-review fix): they
+    /// used to feed `addLine` directly, so picking a fuzzy match — which
+    /// needs only ONE substring-matching character, per `Kernel.matchIngredient`'s
+    /// own no-minimum-length contract (Kernel.swift:88) — appended the line
+    /// and popped this screen mid-keystroke, spraying the user's remaining
+    /// characters onto whatever field the parent screen focused next. Staged
+    /// into `pickedIngredient` instead, exactly like the edit path's
+    /// `addLineDestination` below stages into `newLineIngredient`: `onPick`
+    /// only records the live match, `onClear` only forgets it, and nothing
+    /// commits — appends the line, pops the screen — until the explicit
+    /// "Add" tap below calls `addLine`. No quantity gate here unlike the
+    /// edit path's own "Add" (this create-path line starts with a blank
+    /// `qty`, filled in back on the recipe form itself, same as before this
+    /// fix), so the button needs no `.disabled` guard.
     private var addIngredientDestination: some View {
         Form {
             IngredientPickerView(
                 appModel: appModel,
                 excludedIngredientIds: Set(draft.lines.map(\.ingredientId)),
-                onPick: addLine,
-                onClear: {},
+                onPick: { ingredient in pickedIngredient = ingredient },
+                onClear: { pickedIngredient = nil },
                 onQueryEdited: {})
+            if let pickedIngredient {
+                Section {
+                    Button("Add \(pickedIngredient.name)") { addLine(pickedIngredient) }
+                }
+            }
         }
         .navigationTitle("Add Ingredient")
         .navigationBarTitleDisplayMode(.inline)
@@ -301,14 +316,17 @@ struct RecipeEditorView: View {
 
     // MARK: - Draft mutation
 
-    /// `IngredientPickerView`'s `onPick` — `excludedIngredientIds` above
-    /// already keeps an already-added ingredient out of the picker's own
-    /// match/near-match/create-new results (including the create-new
+    /// The explicit "Add" tap in `addIngredientDestination` — NOT
+    /// `IngredientPickerView`'s `onPick` directly (final-review fix; see
+    /// that computed property's own doc comment). `excludedIngredientIds`
+    /// above already keeps an already-added ingredient out of the picker's
+    /// own match/near-match/create-new results (including the create-new
     /// duplicate-adoption refusal — see `IngredientPickerView`'s doc
     /// comment), so this is never called with an ingredient already on
     /// `draft.lines`.
     private func addLine(_ ingredient: LocalIngredient) {
         draft.lines.append(RecipeDraft.Line(ingredientId: ingredient.id, qty: ""))
+        pickedIngredient = nil
         addIngredientPresented = false
     }
 

@@ -96,35 +96,28 @@ final class SmokeTests: XCTestCase {
         XCTAssertTrue(dashboardSyncedChip.waitForExistence(timeout: 20), "initial pull never reached Synced state")
     }
 
-    /// A real, reproduced quirk of `RecipeEditorView`'s CREATE-path
-    /// ingredient picker (`addIngredientDestination`'s `onPick: addLine`,
-    /// RecipeEditorView.swift:252-259/310-313): unlike `PurchaseEntryView`'s
-    /// picker (which only updates a chip in place), picking a candidate on
-    /// this path appends the line AND pops the pushed screen immediately --
-    /// and `Kernel.matchIngredient`'s fuzzy pass is a bidirectional
-    /// substring test with no minimum-length floor, so it is very common
-    /// for the FIRST character typed to already substring-match some live
-    /// candidate. Sending the whole name via one `typeText` call races
-    /// this: characters sent AFTER the pop land on whatever field the
-    /// parent screen's first responder happens to be next, corrupting it
-    /// -- reproduced live while writing this suite ("Ground Beef" left a
-    /// stray "round Beef" appended onto the Menu price field; "Onion" left
-    /// a stray "n" appended onto the just-added line's own Qty field, both
-    /// from characters typed after the picker had already popped). This is
-    /// disclosed as a genuine finding in this task's report, not silently
-    /// worked around in product code (Task 11's own discipline rule) --
-    /// this helper is the TEST's accommodation: it types one character at
-    /// a time and stops the INSTANT the picker screen is gone, so it never
-    /// sends a keystroke the app has nowhere correct to deliver. However
-    /// many characters that turns out to take is not fixed in advance and
-    /// is not asserted on here; only the caller's own post-condition (the
-    /// right ingredient ends up on the recipe) is.
-    private func typeIntoPickerUntilItPops(_ field: XCUIElement, _ name: String, app: XCUIApplication) {
-        for character in name {
-            guard field.exists else { return }
-            field.typeText(String(character))
-            if !field.exists { return }
-        }
+    /// The create-path picker's staged-selection "Add" tap, keyed by the
+    /// exact button label `RecipeEditorView.addIngredientDestination` renders
+    /// (`"Add \(pickedIngredient.name)"`, RecipeEditorView.swift) once a
+    /// live fuzzy match stages `pickedIngredient`. This suite used to need a
+    /// bespoke `typeIntoPickerUntilItPops` character-at-a-time workaround
+    /// here: before the final-review fix, `onPick` fed `addLine` directly,
+    /// so a single substring-matching character (`Kernel.matchIngredient`
+    /// has no minimum-length floor, Kernel.swift:88) appended the line and
+    /// popped the screen mid-keystroke, spraying whatever characters were
+    /// sent afterward onto the parent screen's next first responder --
+    /// reproduced live twice while writing this suite ("Ground Beef" left a
+    /// stray "round Beef" on the Menu price field; "Onion" left a stray "n"
+    /// on a Qty field). The fix stages the pick into `pickedIngredient`
+    /// instead (mirroring the edit path's own `newLineIngredient`) and
+    /// requires this explicit "Add" tap before the line is appended and the
+    /// screen pops, so a full `typeText` call is now safe -- no more racing
+    /// a mid-keystroke pop -- and this helper replaces the old one.
+    private func addStagedIngredient(_ field: XCUIElement, _ name: String, app: XCUIApplication) {
+        field.typeText(name)
+        let addButton = app.buttons["Add \(name)"]
+        XCTAssertTrue(addButton.waitForExistence(timeout: 10), "picker never staged a match for \(name)")
+        addButton.tap()
     }
 
     /// `IngredientDetailView`'s `List` (Header / Price Drift / History
@@ -331,7 +324,7 @@ final class SmokeTests: XCTestCase {
         var ingredientNameField = app.textFields["Ingredient name"]
         XCTAssertTrue(ingredientNameField.waitForExistence(timeout: 10))
         ingredientNameField.tap()
-        typeIntoPickerUntilItPops(ingredientNameField, "Ground Beef", app: app)
+        addStagedIngredient(ingredientNameField, "Ground Beef", app: app)
         // The pushed Form is a `List` under the hood -- once the keyboard
         // comes up for the newly-added line's own Qty field, the list can
         // auto-scroll enough that "Name" (several rows above) is no longer
@@ -353,7 +346,7 @@ final class SmokeTests: XCTestCase {
         ingredientNameField = app.textFields["Ingredient name"]
         XCTAssertTrue(ingredientNameField.waitForExistence(timeout: 10))
         ingredientNameField.tap()
-        typeIntoPickerUntilItPops(ingredientNameField, "Onion", app: app)
+        addStagedIngredient(ingredientNameField, "Onion", app: app)
         XCTAssertTrue(app.staticTexts["Onion"].waitForExistence(timeout: 10), "picking Onion never returned to the recipe form")
 
         // Two lines now share the "Qty" label -- `boundBy: 1` is the

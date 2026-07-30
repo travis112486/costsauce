@@ -40,13 +40,23 @@ Postgres + local `uvicorn`), the same shape as `phase-2a-acceptance.md`'s.
     mid-journey, since XCUITest (compiled against the iOS SDK, even for a
     Simulator-hosted UI test runner) cannot shell out to `psql` itself —
     `Foundation.Process` is unavailable there.
-  - A new private helper, `typeIntoPickerUntilItPops(_:_:app:)` — see §6.1
-    for why it exists; it's a workaround for a real automation-environment
-    interaction this task found, not a copy of app behavior.
+  - A private helper, `addStagedIngredient(_:_:app:)`, types a candidate's
+    full name into the picker's name field, waits for the resulting
+    `"Add \(name)"` button to appear, then taps it — see §6.1 for the
+    finding this replaced.
 - This document.
 
 Nothing else changed: the Kit (`swift test`), the app target's production
 Swift files, and the backend are all untouched by this task.
+
+**Update (final-review fix wave, same phase):** the finding in §6.1 below
+was fixed in `RecipeEditorView.swift` after this task's own acceptance run
+recorded it — the create-path picker now stages a pick instead of
+committing it live, exactly as §6.1 now describes. This runbook's file list
+above and the helper name reflect the file as it stands post-fix; the
+narrative in §6.1 is kept as the historical record of what this task found
+and reproduced, with the fix and its own re-verification appended at the
+end of that section.
 
 ---
 
@@ -371,7 +381,7 @@ xcodebuild test
 Recorded here rather than silently smoothed over, per this task's own
 evidence/honesty requirement.
 
-### 6.1 The create-path ingredient picker pops mid-keystroke
+### 6.1 The create-path ingredient picker pops mid-keystroke (fixed)
 
 `RecipeEditorView`'s CREATE-path ingredient picker
 (`addIngredientDestination`'s `onPick: addLine`) appends the picked line
@@ -394,11 +404,45 @@ normally into this exact picker could, depending on what's already on
 their live ingredient list, end up with a stray character in an unrelated
 field** the instant their query happens to substring-match something.
 
-This is a **product-level UX gap worth a human look**, not something fixed
-here (Task 11's own discipline rule: report, don't silently patch). The
-test's own accommodation — `typeIntoPickerUntilItPops`, which types one
-character at a time and stops the instant the picker screen is gone — is
-a test-side workaround, not a claim that the underlying behavior is fine.
+This was a **product-level UX gap worth a human look**, not something fixed
+by Task 11 itself (its own discipline rule: report, don't silently patch).
+That task's own accommodation — `typeIntoPickerUntilItPops`, which typed
+one character at a time and stopped the instant the picker screen was
+gone — was a test-side workaround, not a claim that the underlying
+behavior was fine.
+
+**Fixed (final-review pass, same phase).** `RecipeEditorView.swift`'s
+create-path `addIngredientDestination` no longer wires `IngredientPickerView`'s
+`onPick` straight to `addLine`. It now stages the live match into a new
+`pickedIngredient` state variable — mirroring the edit path's own
+`addLineDestination`/`newLineIngredient`, which never had this problem
+because it was already stage-then-confirm — and renders an explicit
+`Button("Add \(pickedIngredient.name)")` below the picker. Nothing is
+appended and the screen does not pop until that button is tapped, so the
+race described above (characters typed after the pop landing on whatever
+field focus moved to next) no longer has a pop to race. `IngredientPickerView`
+itself was not touched (its `onPick`/`onClear` contract is still correct
+for `PurchaseEntryView`, which is a live, non-navigating consumer), and no
+minimum-length floor was added to `Kernel.matchIngredient` (its behavior
+stays pinned to the golden vectors shared with the web/Python
+implementations) — the fuzzy match on a single character still surfaces,
+it just no longer auto-commits.
+
+The test-side workaround this necessitated is gone too:
+`typeIntoPickerUntilItPops` has been removed and replaced by
+`addStagedIngredient(_:_:app:)` (§1), which sends a candidate's full name
+in one `typeText` call — safe now that there is no mid-keystroke pop to
+race — then waits for the staged `"Add \(name)"` button and taps it as the
+explicit commit. Re-run against this fix: `xcodebuild test` (both
+`SmokeTests` methods, one invocation, fresh stack) —
+`Executed 2 tests, with 0 failures (0 unexpected) in 118.130 seconds`,
+`** TEST SUCCEEDED **`. The single-character non-commit behavior itself
+(typing "G" alone leaves the picker on-screen with nothing added) was
+confirmed live in the simulator during the fix but is not asserted by a
+permanently committed test — driving that specific negative case reliably
+in this XCUITest/simulator environment is the same class of limitation
+§6.5 below documents for swipe gestures, so it's recorded here as a known
+gap rather than built into a fragile assertion.
 
 ### 6.2 `editLinesSection`'s row order is not deterministic across runs
 
