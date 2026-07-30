@@ -364,4 +364,107 @@ import Foundation
         #expect(try store.pendingCount() == before)
         #expect(try store.liveRecipeItems(recipeId: "rec-1").count == 1)
     }
+
+    // MARK: - tombstoneRecipe
+
+    /// A live recipe ("Bread") with THREE live lines plus a fourth,
+    /// already-tombstoned line, and a second recipe ("Other") with its own
+    /// single live line -- the exact scenario the brief specifies, distinct
+    /// from `recipeFixture()` (which only has two live lines on rec-1 and
+    /// is shared by the other recipe-mutation tests above).
+    private func tombstoneRecipeFixture() throws -> LocalStore {
+        try seededStore([
+            StoreTests.ingredientChange(id: "ing-1", name: "Flour", serverSeq: 1),
+            StoreTests.ingredientChange(id: "ing-2", name: "Water", serverSeq: 2),
+            StoreTests.ingredientChange(id: "ing-3", name: "Salt", serverSeq: 3),
+            StoreTests.ingredientChange(id: "ing-4", name: "Yeast", serverSeq: 4),
+            StoreTests.recipeChange(id: "rec-1", name: "Bread", serverSeq: 5),
+            StoreTests.recipeChange(id: "rec-2", name: "Other", serverSeq: 6),
+            StoreTests.recipeItemChange(id: "ri-1", recipeId: "rec-1", ingredientId: "ing-1", serverSeq: 7),
+            StoreTests.recipeItemChange(id: "ri-2", recipeId: "rec-1", ingredientId: "ing-2", serverSeq: 8),
+            StoreTests.recipeItemChange(id: "ri-3", recipeId: "rec-1", ingredientId: "ing-3", serverSeq: 9),
+            StoreTests.recipeItemChange(
+                id: "ri-4", recipeId: "rec-1", ingredientId: "ing-4", serverSeq: 10,
+                deletedAt: "2026-07-29 10:00:00+00"),
+            StoreTests.recipeItemChange(id: "ri-5", recipeId: "rec-2", ingredientId: "ing-1", serverSeq: 11),
+        ])
+    }
+
+    @Test func tombstoneRecipeFansOutOneOpPerLiveLinePlusTheRecipeItselfInOneSharedTimestamp() throws {
+        let store = try tombstoneRecipeFixture()
+        let edits = LocalEdits(store: store, locationId: "loc-1")
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+        try edits.tombstoneRecipe(id: "rec-1", now: now)
+
+        let opsData = try store.exportPendingOps()
+        let ops = try JSONDecoder().decode([PendingOp].self, from: opsData)
+        #expect(ops.count == 4)
+
+        let mutatedAt = Kernel.canonicalTimestamp(now)
+        for op in ops {
+            #expect(op.kind == .update)
+            #expect(Set(op.fields.keys) == ["deleted_at"])
+            #expect(fieldValue(op, "deleted_at") == mutatedAt)
+        }
+        // All four share the identical timestamp string.
+        #expect(Set(ops.map { fieldValue($0, "deleted_at") }).count == 1)
+
+        // (table, row_id) pairs are exactly the 3 live line ids on
+        // recipe_items plus the recipe id on recipes -- the already-
+        // tombstoned line (ri-4) gets no op (no double-tombstone), and the
+        // second recipe (rec-2) plus its line (ri-5) are untouched.
+        let pairs = Set(ops.map { "\($0.table):\($0.row_id)" })
+        #expect(pairs == ["recipe_items:ri-1", "recipe_items:ri-2", "recipe_items:ri-3", "recipes:rec-1"])
+
+        #expect(try store.liveRecipeItems(recipeId: "rec-1").isEmpty)
+        #expect(try store.recipe(id: "rec-1")?.deleted_at == mutatedAt)
+        #expect(try store.liveRecipes().map(\.id) == ["rec-2"])
+
+        // The second recipe and its line are untouched: still live, no ops.
+        #expect(try store.recipe(id: "rec-2")?.deleted_at == nil)
+        #expect(try store.liveRecipeItems(recipeId: "rec-2").count == 1)
+
+        // Calling tombstoneRecipe again throws KernelError and enqueues nothing.
+        let before = try store.pendingCount()
+        #expect(throws: KernelError.self) {
+            try edits.tombstoneRecipe(id: "rec-1")
+        }
+        #expect(try store.pendingCount() == before)
+    }
+
+    @Test func tombstoneRecipeOnUnknownIdThrowsKernelErrorAndEnqueuesNothing() throws {
+        let store = try tombstoneRecipeFixture()
+        let edits = LocalEdits(store: store, locationId: "loc-1")
+        let before = try store.pendingCount()
+
+        #expect(throws: KernelError.self) {
+            try edits.tombstoneRecipe(id: "nope")
+        }
+
+        #expect(try store.pendingCount() == before)
+    }
+
+    /// Robust to future seeding changes: for a recipe seeded with N live
+    /// lines, `tombstoneRecipe` must enqueue exactly N + 1 ops (one per
+    /// live line, plus the recipe's own), regardless of what N is.
+    @Test func tombstoneRecipeFanOutCompletenessForFiveLiveLines() throws {
+        let n = 5
+        var changes: [PullChange] = [
+            StoreTests.recipeChange(id: "rec-big", name: "Big Recipe", serverSeq: 1),
+        ]
+        for i in 0..<n {
+            changes.append(StoreTests.ingredientChange(id: "ing-big-\(i)", name: "Ing \(i)", serverSeq: Int64(2 + i)))
+            changes.append(StoreTests.recipeItemChange(
+                id: "ri-big-\(i)", recipeId: "rec-big", ingredientId: "ing-big-\(i)",
+                serverSeq: Int64(2 + n + i)))
+        }
+        let store = try seededStore(changes)
+        let edits = LocalEdits(store: store, locationId: "loc-1")
+
+        try edits.tombstoneRecipe(id: "rec-big")
+
+        let ops = try store.pendingOps(state: .queued)
+        #expect(ops.count == n + 1)
+    }
 }

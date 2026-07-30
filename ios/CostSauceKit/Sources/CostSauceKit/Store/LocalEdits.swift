@@ -285,4 +285,38 @@ public struct LocalEdits {
             fields: ["deleted_at": mutatedAt],
             state: .queued, reason: nil, created_at: mutatedAt))
     }
+
+    /// Deletes a recipe by tombstoning it AND every one of its live lines,
+    /// one `deleted_at` update op per row, all sharing a single timestamp
+    /// and enqueued in ONE transaction (`LocalStore.enqueueBatch`). This is
+    /// warning (b) of api/routes/sync.py:15-22: unlike `DELETE
+    /// /locations/{id}/recipes/{id}`, a recipe tombstone op does NOT
+    /// cascade to its lines server-side -- skipping the fan-out strands
+    /// live lines against a dead recipe, which `cost_recipes` surfaces as a
+    /// loud data-integrity complaint. Deliberately bypasses
+    /// `tombstoneRecipeLine`'s `EditError.lastLine` guard by enqueuing the
+    /// line tombstones directly: deleting the recipe is exactly the
+    /// sanctioned way to remove its final line.
+    public func tombstoneRecipe(id: String, now: Date = Date()) throws {
+        guard let recipe = try store.recipe(id: id), recipe.deleted_at == nil else {
+            throw KernelError("recipe is not live")
+        }
+        let liveLines = try store.liveRecipeItems(recipeId: id)
+        let mutatedAt = Kernel.canonicalTimestamp(now)
+
+        var ops: [PendingOp] = liveLines.map { line in
+            PendingOp(
+                op_id: UUIDv7.generate(now: now), table: "recipe_items", row_id: line.id,
+                location_id: locationId, client_mutated_at: mutatedAt, kind: .update,
+                fields: ["deleted_at": mutatedAt],
+                state: .queued, reason: nil, created_at: mutatedAt)
+        }
+        ops.append(PendingOp(
+            op_id: UUIDv7.generate(now: now), table: "recipes", row_id: id,
+            location_id: locationId, client_mutated_at: mutatedAt, kind: .update,
+            fields: ["deleted_at": mutatedAt],
+            state: .queued, reason: nil, created_at: mutatedAt))
+
+        try store.enqueueBatch(ops)
+    }
 }

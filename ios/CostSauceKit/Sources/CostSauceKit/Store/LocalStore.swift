@@ -182,14 +182,29 @@ public final class LocalStore: Sendable {
     /// op ever reaches the server. `.update`-kind ops are unaffected: their
     /// target row already exists (pulled, or a previously inserted row).
     public func enqueue(_ op: PendingOp) throws {
+        try enqueueBatch([op])
+    }
+
+    /// `enqueue`'s per-op contract (insert the row, stub an `.insert`-kind
+    /// target, apply `fields`), applied to every op in `ops` inside ONE
+    /// transaction. `enqueue` itself is `enqueueBatch([op])` -- a caller
+    /// that must mint several ops atomically (Task 2's `tombstoneRecipe`
+    /// fan-out: a recipe's own tombstone plus one per live line) cannot
+    /// just call `enqueue` in a loop, because each call would open its own
+    /// transaction and a crash between calls could strand the fan-out
+    /// half-applied. `dbQueue.write` is not reentrant, so this is the only
+    /// way to batch more than one op atomically.
+    public func enqueueBatch(_ ops: [PendingOp]) throws {
         try dbQueue.write { db in
-            try op.insert(db)
-            if op.kind == .insert {
-                try Self.insertStub(
-                    table: op.table, rowId: op.row_id, locationId: op.location_id,
-                    clientMutatedAt: op.client_mutated_at, in: db)
+            for op in ops {
+                try op.insert(db)
+                if op.kind == .insert {
+                    try Self.insertStub(
+                        table: op.table, rowId: op.row_id, locationId: op.location_id,
+                        clientMutatedAt: op.client_mutated_at, in: db)
+                }
+                try Self.applyFields(op.fields, table: op.table, rowId: op.row_id, in: db)
             }
-            try Self.applyFields(op.fields, table: op.table, rowId: op.row_id, in: db)
         }
     }
 
