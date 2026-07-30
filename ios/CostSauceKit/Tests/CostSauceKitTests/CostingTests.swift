@@ -184,4 +184,221 @@ import Foundation
         #expect(unsyncedPrice == syncedPrice)
         #expect(unsyncedPrice == "2.000000")
     }
+
+    // MARK: - previewPlate: parity with costRecipes (transitive pinning)
+
+    /// Same round-then-sum fixture as
+    /// `roundEachItemThenSumDiffersFromSumThenRound`, driven through
+    /// `previewPlate` instead of stored rows. This is the case that fails
+    /// if the implementation sums first: sum-then-round of the exact
+    /// products (1.005 + 1.005 = 2.010) would read "2.01".
+    @Test func previewPlateMatchesCostRecipesRoundThenSumFixture() throws {
+        let ingredients = [
+            Self.ingredient(id: "ing-a", name: "A"),
+            Self.ingredient(id: "ing-b", name: "B"),
+        ]
+        let items = [
+            Self.item(id: "item-1", recipeId: "rec-1", ingredientId: "ing-a", qtyBaseUnits: "0.6700"),
+            Self.item(id: "item-2", recipeId: "rec-1", ingredientId: "ing-b", qtyBaseUnits: "0.6700"),
+        ]
+        let recipes = [Self.recipe(id: "rec-1", name: "Two Item")]
+        let drift = [
+            "ing-a": Self.drift(latestPrice: "1.500000"),
+            "ing-b": Self.drift(latestPrice: "1.500000"),
+        ]
+
+        let costed = try Costing.costRecipes(
+            recipes: recipes, items: items, ingredients: ingredients, drift: drift)
+        let expected = try #require(costed.first)
+
+        let lines = items.map { (ingredientId: $0.ingredient_id, qty: $0.qty_base_units) }
+        let preview = try Costing.previewPlate(
+            lines: lines, menuPrice: nil, targetFcPct: nil,
+            ingredients: ingredients, drift: drift)
+
+        #expect(preview.plateCost == expected.plateCost)
+        #expect(preview.complete == expected.complete)
+        #expect(preview.plateCost == "2.02")
+    }
+
+    /// Same tombstoned-ingredient fixture as
+    /// `tombstonedIngredientItemIsUnresolvableButOtherItemStillCosted`:
+    /// the unresolvable line contributes nothing to `plateCost`, and
+    /// `complete` flips false without repricing the resolvable remainder.
+    @Test func previewPlateMatchesCostRecipesTombstonedIngredientFixture() throws {
+        let ingredients = [
+            Self.ingredient(id: "ing-a", name: "Live One"),
+            Self.ingredient(id: "ing-b", name: "Gone", deletedAt: Self.ts),
+        ]
+        let items = [
+            Self.item(id: "item-1", recipeId: "rec-1", ingredientId: "ing-a", qtyBaseUnits: "2.0000"),
+            Self.item(id: "item-2", recipeId: "rec-1", ingredientId: "ing-b", qtyBaseUnits: "1.0000"),
+        ]
+        let recipes = [Self.recipe(id: "rec-1", name: "Partial")]
+        let drift = [
+            "ing-a": Self.drift(latestPrice: "3.000000"),
+            "ing-b": Self.drift(latestPrice: "9.000000"),
+        ]
+
+        let costed = try Costing.costRecipes(
+            recipes: recipes, items: items, ingredients: ingredients, drift: drift)
+        let expected = try #require(costed.first)
+
+        let lines = items.map { (ingredientId: $0.ingredient_id, qty: $0.qty_base_units) }
+        let preview = try Costing.previewPlate(
+            lines: lines, menuPrice: recipes[0].menu_price, targetFcPct: recipes[0].target_fc_pct,
+            ingredients: ingredients, drift: drift)
+
+        #expect(preview.plateCost == expected.plateCost)
+        #expect(preview.complete == expected.complete)
+        #expect(preview.plateCost == "6.00")
+        #expect(preview.complete == false)
+        #expect(preview.fcPct == nil)
+        #expect(preview.status == nil)
+        #expect(preview.suggestedPrice == nil)
+    }
+
+    /// Same no-drift-entry fixture as
+    /// `ingredientWithZeroPurchasesIsUnresolvable`: an ingredient with no
+    /// purchase history is unresolvable, same as a tombstoned one.
+    @Test func previewPlateMatchesCostRecipesNoDriftEntryFixture() throws {
+        let ingredients = [Self.ingredient(id: "ing-c", name: "No Purchases")]
+        let items = [
+            Self.item(id: "item-1", recipeId: "rec-1", ingredientId: "ing-c", qtyBaseUnits: "1.0000"),
+        ]
+        let recipes = [Self.recipe(id: "rec-1", name: "Empty History")]
+        let drift: [String: DriftResult] = [:]
+
+        let costed = try Costing.costRecipes(
+            recipes: recipes, items: items, ingredients: ingredients, drift: drift)
+        let expected = try #require(costed.first)
+
+        let lines = items.map { (ingredientId: $0.ingredient_id, qty: $0.qty_base_units) }
+        let preview = try Costing.previewPlate(
+            lines: lines, menuPrice: recipes[0].menu_price, targetFcPct: recipes[0].target_fc_pct,
+            ingredients: ingredients, drift: drift)
+
+        #expect(preview.plateCost == expected.plateCost)
+        #expect(preview.complete == expected.complete)
+        #expect(preview.plateCost == "0.00")
+        #expect(preview.complete == false)
+    }
+
+    /// Same whole-dollar fixture as
+    /// `suggestedPriceFormatsViaMoneyFromCentsNeverOneDecimalPlace`: proves
+    /// `previewPlate`'s `suggestedPrice` matches `costRecipes`' exactly,
+    /// including formatting as "4.00" and never "4.0".
+    @Test func previewPlateMatchesCostRecipesSuggestedPriceWholeDollarFixture() throws {
+        let ingredients = [Self.ingredient(id: "ing-d", name: "D")]
+        let items = [
+            Self.item(id: "item-1", recipeId: "rec-1", ingredientId: "ing-d", qtyBaseUnits: "1.0000"),
+        ]
+        let recipes = [Self.recipe(id: "rec-1", name: "Whole Dollar", menuPrice: "5.00", targetFcPct: "30.00")]
+        let drift = ["ing-d": Self.drift(latestPrice: "1.200000")]
+
+        let costed = try Costing.costRecipes(
+            recipes: recipes, items: items, ingredients: ingredients, drift: drift)
+        let expected = try #require(costed.first)
+
+        let lines = items.map { (ingredientId: $0.ingredient_id, qty: $0.qty_base_units) }
+        let preview = try Costing.previewPlate(
+            lines: lines, menuPrice: recipes[0].menu_price, targetFcPct: recipes[0].target_fc_pct,
+            ingredients: ingredients, drift: drift)
+
+        #expect(preview.plateCost == expected.plateCost)
+        #expect(preview.complete == expected.complete)
+        #expect(preview.fcPct == expected.fcPct)
+        #expect(preview.status == expected.status)
+        #expect(preview.suggestedPrice == expected.suggestedPrice)
+        #expect(preview.suggestedPrice == "4.00")
+    }
+
+    /// A resolvable line alongside one whose ingredient has no drift entry
+    /// (distinct from tombstoning -- the ingredient is live, it simply has
+    /// no purchase history yet): `complete` is false, and `plateCost` is
+    /// the resolvable line's cost alone, not zero.
+    @Test func lineWithNoDriftEntryIsUnresolvableButResolvableLineStillCounted() throws {
+        let ingredients = [
+            Self.ingredient(id: "ing-g", name: "Has History"),
+            Self.ingredient(id: "ing-h", name: "No History"),
+        ]
+        let lines: [(ingredientId: String, qty: String)] = [
+            (ingredientId: "ing-g", qty: "2.0000"),
+            (ingredientId: "ing-h", qty: "5.0000"),
+        ]
+        let drift = ["ing-g": Self.drift(latestPrice: "3.000000")]  // no entry for ing-h
+
+        let preview = try Costing.previewPlate(
+            lines: lines, menuPrice: "18.00", targetFcPct: "30.00",
+            ingredients: ingredients, drift: drift)
+
+        #expect(preview.complete == false)
+        #expect(preview.plateCost == "6.00")
+        #expect(preview.fcPct == nil)
+        #expect(preview.status == nil)
+        #expect(preview.suggestedPrice == nil)
+    }
+
+    // MARK: - previewPlate: draft-only behaviors costRecipes has no equivalent for
+
+    @Test func zeroLinesProduceZeroPlateCostAndIncompleteWithNilOptionals() throws {
+        let preview = try Costing.previewPlate(
+            lines: [], menuPrice: "18.00", targetFcPct: "30.00",
+            ingredients: [], drift: [:])
+
+        #expect(preview.plateCost == "0.00")
+        #expect(preview.complete == false)
+        #expect(preview.fcPct == nil)
+        #expect(preview.status == nil)
+        #expect(preview.suggestedPrice == nil)
+    }
+
+    /// Complete lines with a menu price and target: `fcPct`/`status`/
+    /// `suggestedPrice` must equal what `Kernel.fcStatus`/
+    /// `Kernel.suggestedPriceCents` themselves return for the same cents --
+    /// computed here from the kernel, not hardcoded, so this can't silently
+    /// decouple from the pinned primitives.
+    @Test func completeLinesWithMenuPriceProduceFcFieldsMatchingKernelDirectly() throws {
+        let ingredients = [Self.ingredient(id: "ing-e", name: "E")]
+        let lines: [(ingredientId: String, qty: String)] = [(ingredientId: "ing-e", qty: "2.0000")]
+        let drift = ["ing-e": Self.drift(latestPrice: "3.000000")]
+
+        let preview = try Costing.previewPlate(
+            lines: lines, menuPrice: "18.00", targetFcPct: "30.00",
+            ingredients: ingredients, drift: drift)
+
+        #expect(preview.complete == true)
+        #expect(preview.plateCost == "6.00")
+
+        let plateCents = try Kernel.centsFromString(preview.plateCost)
+        let menuCents = try Kernel.centsFromString("18.00")
+        let targetBp = try Kernel.bpFromString("30.00")
+        let (expectedFc, expectedStatus) = try Kernel.fcStatus(
+            plateCents: plateCents, menuCents: menuCents, targetBp: targetBp)
+        let expectedSuggested = Kernel.moneyFromCents(
+            try Kernel.suggestedPriceCents(plateCents: plateCents, targetBp: targetBp))
+
+        #expect(preview.fcPct == expectedFc)
+        #expect(preview.status == expectedStatus)
+        #expect(preview.suggestedPrice == expectedSuggested)
+    }
+
+    /// `menuPrice: nil` (with `targetFcPct` also unset) leaves the plate
+    /// cost visible but never reprices -- §10.1 applies to missing pricing
+    /// inputs, not just unresolvable lines.
+    @Test func completeLinesWithNilMenuPriceLeaveFcFieldsNil() throws {
+        let ingredients = [Self.ingredient(id: "ing-f", name: "F")]
+        let lines: [(ingredientId: String, qty: String)] = [(ingredientId: "ing-f", qty: "1.0000")]
+        let drift = ["ing-f": Self.drift(latestPrice: "2.500000")]
+
+        let preview = try Costing.previewPlate(
+            lines: lines, menuPrice: nil, targetFcPct: nil,
+            ingredients: ingredients, drift: drift)
+
+        #expect(preview.complete == true)
+        #expect(preview.plateCost == "2.50")
+        #expect(preview.fcPct == nil)
+        #expect(preview.status == nil)
+        #expect(preview.suggestedPrice == nil)
+    }
 }

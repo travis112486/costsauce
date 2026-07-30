@@ -103,6 +103,27 @@ public enum Costing {
         return result
     }
 
+    /// One line's cost -- shared by `costRecipes` and `previewPlate` so the
+    /// rounding order (round each line, THEN sum) lives in exactly one
+    /// place. Resolvable iff the ingredient is present AND live
+    /// (`deleted_at == nil`) AND `drift` has an entry for it (spec §10.1).
+    /// An unresolvable line contributes no cents.
+    private static func costLine(
+        ingredientId: String, qtyBaseUnits: String,
+        ingredient: LocalIngredient?, drift: [String: DriftResult]
+    ) throws -> (resolvable: Bool, unitPrice: String?, cost: String?, cents: Int) {
+        let ingredientLive = ingredient != nil && ingredient?.deleted_at == nil
+        let itemDrift = drift[ingredientId]
+        guard ingredientLive, let itemDrift else {
+            return (false, nil, nil, 0)
+        }
+        let qty = try Rational.parseDec(qtyBaseUnits)
+        let price = try Rational.parseDec(itemDrift.latestPrice)
+        let cost = Kernel.roundHalfAway(qty.mul(price), places: 2)
+        let cents = try Kernel.centsFromString(cost)
+        return (true, itemDrift.latestPrice, cost, cents)
+    }
+
     /// Exact mirror of api/services/costing.py's `cost_recipes`.
     /// Completeness contract (spec §10.1): an item is resolvable only when
     /// its ingredient is present in `ingredients` AND live (`deleted_at ==
@@ -130,19 +151,12 @@ public enum Costing {
 
             for item in itemsByRecipe[recipe.id] ?? [] {
                 let ingredient = ingredientsById[item.ingredient_id]
-                let ingredientLive = ingredient != nil && ingredient?.deleted_at == nil
-                let itemDrift = drift[item.ingredient_id]
-                let resolvable = ingredientLive && itemDrift != nil
+                let line = try costLine(
+                    ingredientId: item.ingredient_id, qtyBaseUnits: item.qty_base_units,
+                    ingredient: ingredient, drift: drift)
 
-                var unitPriceOut: String?
-                var costOut: String?
-                if resolvable, let itemDrift {
-                    unitPriceOut = itemDrift.latestPrice
-                    let qty = try Rational.parseDec(item.qty_base_units)
-                    let price = try Rational.parseDec(itemDrift.latestPrice)
-                    let cost = Kernel.roundHalfAway(qty.mul(price), places: 2)
-                    costOut = cost
-                    plateCents += try Kernel.centsFromString(cost)
+                if line.resolvable {
+                    plateCents += line.cents
                 } else {
                     complete = false
                 }
@@ -150,8 +164,8 @@ public enum Costing {
                 costedItems.append(CostedItem(
                     id: item.id, ingredientId: item.ingredient_id,
                     name: ingredient?.name, baseUnit: ingredient?.base_unit,
-                    qtyBaseUnits: item.qty_base_units, unitPrice: unitPriceOut,
-                    cost: costOut, isResolvable: resolvable))
+                    qtyBaseUnits: item.qty_base_units, unitPrice: line.unitPrice,
+                    cost: line.cost, isResolvable: line.resolvable))
             }
 
             // (ingredient name, item id) ASC, nil names LAST -- Postgres'
@@ -193,5 +207,81 @@ public enum Costing {
         // (name, id) ASC -- "ORDER BY name, id".
         out.sort { a, b in a.name != b.name ? a.name < b.name : a.recipeId < b.recipeId }
         return out
+    }
+}
+
+extension Costing {
+
+    /// The draft-time twin of `costRecipes`, for lines that aren't rows
+    /// yet -- same completeness contract (spec §10.1), same rounding
+    /// order (each line rounded to 2dp half-away-from-zero, THEN summed
+    /// as integer cents), sharing `costLine` so both stay identical.
+    public struct PreviewResult: Equatable, Sendable {
+        public let plateCost: String
+        public let complete: Bool
+        public let fcPct: String?
+        public let status: String?
+        public let suggestedPrice: String?
+
+        public init(
+            plateCost: String, complete: Bool, fcPct: String?, status: String?,
+            suggestedPrice: String?
+        ) {
+            self.plateCost = plateCost
+            self.complete = complete
+            self.fcPct = fcPct
+            self.status = status
+            self.suggestedPrice = suggestedPrice
+        }
+    }
+
+    /// Costs a set of not-yet-saved lines exactly as `costRecipes` costs
+    /// stored rows: `complete` requires every line resolvable AND `lines`
+    /// non-empty; an unresolvable line contributes nothing to `plateCost`.
+    /// `fcPct`/`status`/`suggestedPrice` are computed only when `complete`
+    /// AND both `menuPrice`/`targetFcPct` are supplied -- never reprice a
+    /// partial, and never reprice without pricing inputs.
+    public static func previewPlate(
+        lines: [(ingredientId: String, qty: String)], menuPrice: String?, targetFcPct: String?,
+        ingredients: [LocalIngredient], drift: [String: DriftResult]
+    ) throws -> PreviewResult {
+        var ingredientsById: [String: LocalIngredient] = [:]
+        for ingredient in ingredients { ingredientsById[ingredient.id] = ingredient }
+
+        var plateCents = 0
+        var complete = !lines.isEmpty
+        for line in lines {
+            let ingredient = ingredientsById[line.ingredientId]
+            let costed = try costLine(
+                ingredientId: line.ingredientId, qtyBaseUnits: line.qty,
+                ingredient: ingredient, drift: drift)
+
+            if costed.resolvable {
+                plateCents += costed.cents
+            } else {
+                complete = false
+            }
+        }
+
+        let plateCost = Kernel.moneyFromCents(plateCents)
+
+        var fcPct: String?
+        var status: String?
+        var suggestedPrice: String?
+        if complete, let menuPrice, let targetFcPct {
+            let menuCents = try Kernel.centsFromString(menuPrice)
+            let targetBp = try Kernel.bpFromString(targetFcPct)
+            let (fc, st) = try Kernel.fcStatus(
+                plateCents: plateCents, menuCents: menuCents, targetBp: targetBp)
+            let suggestedCents = try Kernel.suggestedPriceCents(
+                plateCents: plateCents, targetBp: targetBp)
+            fcPct = fc
+            status = st
+            suggestedPrice = Kernel.moneyFromCents(suggestedCents)
+        }
+
+        return PreviewResult(
+            plateCost: plateCost, complete: complete, fcPct: fcPct, status: status,
+            suggestedPrice: suggestedPrice)
     }
 }
