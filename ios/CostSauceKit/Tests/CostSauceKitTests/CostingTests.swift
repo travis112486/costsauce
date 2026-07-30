@@ -401,4 +401,43 @@ import Foundation
         #expect(preview.status == nil)
         #expect(preview.suggestedPrice == nil)
     }
+
+    /// Asymmetric case: only ONE of `menuPrice`/`targetFcPct` supplied.
+    /// "When complete AND menuPrice/targetFcPct are non-nil" requires
+    /// BOTH -- a lone menu price (no target) must still collapse to the
+    /// nil trio, not compute `plateCost`-derived pricing off a missing
+    /// target. Plate cost itself is still reported either way.
+    @Test func onlyMenuPriceSuppliedWithoutTargetFcPctLeavesFcFieldsNil() throws {
+        let ingredients = [Self.ingredient(id: "ing-i", name: "I")]
+        let lines: [(ingredientId: String, qty: String)] = [(ingredientId: "ing-i", qty: "1.0000")]
+        let drift = ["ing-i": Self.drift(latestPrice: "2.500000")]
+
+        let preview = try Costing.previewPlate(
+            lines: lines, menuPrice: "10.00", targetFcPct: nil,
+            ingredients: ingredients, drift: drift)
+
+        #expect(preview.complete == true)
+        #expect(preview.plateCost == "2.50")
+        #expect(preview.fcPct == nil)
+        #expect(preview.status == nil)
+        #expect(preview.suggestedPrice == nil)
+    }
+
+    /// Mirror of the above with the two arguments swapped: only
+    /// `targetFcPct` supplied, `menuPrice` nil.
+    @Test func onlyTargetFcPctSuppliedWithoutMenuPriceLeavesFcFieldsNil() throws {
+        let ingredients = [Self.ingredient(id: "ing-j", name: "J")]
+        let lines: [(ingredientId: String, qty: String)] = [(ingredientId: "ing-j", qty: "1.0000")]
+        let drift = ["ing-j": Self.drift(latestPrice: "2.500000")]
+
+        let preview = try Costing.previewPlate(
+            lines: lines, menuPrice: nil, targetFcPct: "30.00",
+            ingredients: ingredients, drift: drift)
+
+        #expect(preview.complete == true)
+        #expect(preview.plateCost == "2.50")
+        #expect(preview.fcPct == nil)
+        #expect(preview.status == nil)
+        #expect(preview.suggestedPrice == nil)
+    }
 }

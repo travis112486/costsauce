@@ -124,6 +124,24 @@ public enum Costing {
         return (true, itemDrift.latestPrice, cost, cents)
     }
 
+    /// The `fcPct`/`status`/`suggestedPrice` triple -- shared by
+    /// `costRecipes` and `previewPlate`, both of which call this only once
+    /// they've already established `complete` and parsed `menuCents`/
+    /// `targetBp` (each in its own shape: unconditionally for a stored
+    /// recipe's always-present menu price, conditionally in `previewPlate`
+    /// when both draft pricing inputs are supplied). Taking already-parsed
+    /// `Int`s here, rather than raw `String?`s, keeps that parsing
+    /// asymmetry at each call site while sharing the arithmetic itself.
+    private static func priceFields(
+        plateCents: Int, menuCents: Int, targetBp: Int
+    ) throws -> (fcPct: String, status: String, suggestedPrice: String) {
+        let (fc, status) = try Kernel.fcStatus(
+            plateCents: plateCents, menuCents: menuCents, targetBp: targetBp)
+        let suggestedCents = try Kernel.suggestedPriceCents(
+            plateCents: plateCents, targetBp: targetBp)
+        return (fc, status, Kernel.moneyFromCents(suggestedCents))
+    }
+
     /// Exact mirror of api/services/costing.py's `cost_recipes`.
     /// Completeness contract (spec §10.1): an item is resolvable only when
     /// its ingredient is present in `ingredients` AND live (`deleted_at ==
@@ -188,13 +206,11 @@ public enum Costing {
             var status: String?
             var suggestedPrice: String?
             if complete {
-                let (fc, st) = try Kernel.fcStatus(
+                let priced = try priceFields(
                     plateCents: plateCents, menuCents: menuCents, targetBp: targetBp)
-                let suggestedCents = try Kernel.suggestedPriceCents(
-                    plateCents: plateCents, targetBp: targetBp)
-                fcPct = fc
-                status = st
-                suggestedPrice = Kernel.moneyFromCents(suggestedCents)
+                fcPct = priced.fcPct
+                status = priced.status
+                suggestedPrice = priced.suggestedPrice
             }
 
             out.append(CostedRecipe(
@@ -271,13 +287,11 @@ extension Costing {
         if complete, let menuPrice, let targetFcPct {
             let menuCents = try Kernel.centsFromString(menuPrice)
             let targetBp = try Kernel.bpFromString(targetFcPct)
-            let (fc, st) = try Kernel.fcStatus(
+            let priced = try priceFields(
                 plateCents: plateCents, menuCents: menuCents, targetBp: targetBp)
-            let suggestedCents = try Kernel.suggestedPriceCents(
-                plateCents: plateCents, targetBp: targetBp)
-            fcPct = fc
-            status = st
-            suggestedPrice = Kernel.moneyFromCents(suggestedCents)
+            fcPct = priced.fcPct
+            status = priced.status
+            suggestedPrice = priced.suggestedPrice
         }
 
         return PreviewResult(
