@@ -319,4 +319,60 @@ public struct LocalEdits {
 
         try store.enqueueBatch(ops)
     }
+
+    /// Mirrors `POST /locations/{id}/recipes` followed by N `POST
+    /// /recipes/{id}/items` calls, but as the offline create path for a
+    /// `RecipeDraft` (Task 3) composed entirely in memory. Order: `validate()`
+    /// first -- a non-empty result throws its FIRST error (the editor view
+    /// pre-validates before ever calling this, so this is a backstop, not
+    /// the UI path). Then every draft line's ingredient must still be live
+    /// -- checked BEFORE any row or op is written, so a line naming a
+    /// tombstoned ingredient leaves nothing behind (no partially-written
+    /// recipe, no orphaned ops): same precede-the-write-with-a-read shape as
+    /// `tombstoneRecipe`'s guards. Finally ONE `enqueueBatch` call -- ONE
+    /// transaction, ONE timestamp -- mints the recipe id, enqueues its
+    /// insert op (`fields` ⊆ `INSERT_FIELDS.recipes`), then one insert op per
+    /// line (`fields` ⊆ `INSERT_FIELDS.recipe_items`). Safe in one push
+    /// despite the FK: `TABLE_ORDER` applies all `recipes` ops before any
+    /// `recipe_items` ops.
+    public func saveNewRecipe(_ draft: RecipeDraft, now: Date = Date()) throws -> String {
+        if let firstError = draft.validate().first {
+            throw firstError
+        }
+        for line in draft.lines {
+            guard let ingredient = try store.ingredient(id: line.ingredientId), ingredient.deleted_at == nil else {
+                throw KernelError("ingredient is not live")
+            }
+        }
+
+        let recipeId = UUIDv7.generate(now: now)
+        let mutatedAt = Kernel.canonicalTimestamp(now)
+
+        var ops: [PendingOp] = [
+            PendingOp(
+                op_id: UUIDv7.generate(now: now), table: "recipes", row_id: recipeId,
+                location_id: locationId, client_mutated_at: mutatedAt, kind: .insert,
+                fields: [
+                    "name": draft.name.trimmingCharacters(in: .whitespacesAndNewlines),
+                    "menu_price": draft.menuPrice,
+                    "target_fc_pct": draft.targetFcPct,
+                ],
+                state: .queued, reason: nil, created_at: mutatedAt),
+        ]
+        for line in draft.lines {
+            ops.append(PendingOp(
+                op_id: UUIDv7.generate(now: now), table: "recipe_items",
+                row_id: UUIDv7.generate(now: now), location_id: locationId,
+                client_mutated_at: mutatedAt, kind: .insert,
+                fields: [
+                    "recipe_id": recipeId,
+                    "ingredient_id": line.ingredientId,
+                    "qty_base_units": line.qty,
+                ],
+                state: .queued, reason: nil, created_at: mutatedAt))
+        }
+
+        try store.enqueueBatch(ops)
+        return recipeId
+    }
 }

@@ -467,4 +467,89 @@ import Foundation
         let ops = try store.pendingOps(state: .queued)
         #expect(ops.count == n + 1)
     }
+
+    // MARK: - saveNewRecipe
+
+    @Test func saveNewRecipeWithTwoLinesEnqueuesThreeOpsInOneSharedTimestamp() throws {
+        let store = try recipeFixture()
+        let edits = LocalEdits(store: store, locationId: "loc-1")
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let draft = RecipeDraft(
+            name: "  Carbonara  ", menuPrice: "18.00", targetFcPct: "28.00",
+            lines: [
+                RecipeDraft.Line(ingredientId: "ing-1", qty: "2.0000"),
+                RecipeDraft.Line(ingredientId: "ing-2", qty: "1.0000"),
+            ])
+
+        let recipeId = try edits.saveNewRecipe(draft, now: now)
+
+        let opsData = try store.exportPendingOps()
+        let ops = try JSONDecoder().decode([PendingOp].self, from: opsData)
+        #expect(ops.count == 3)
+
+        let recipeOp = try #require(ops.first { $0.table == "recipes" })
+        #expect(recipeOp.row_id == recipeId)
+        #expect(recipeOp.kind == .insert)
+        #expect(Set(recipeOp.fields.keys) == ["name", "menu_price", "target_fc_pct"])
+        #expect(fieldValue(recipeOp, "name") == "Carbonara")
+        #expect(fieldValue(recipeOp, "menu_price") == "18.00")
+        #expect(fieldValue(recipeOp, "target_fc_pct") == "28.00")
+
+        let lineOps = ops.filter { $0.table == "recipe_items" }
+        #expect(lineOps.count == 2)
+        for lineOp in lineOps {
+            #expect(lineOp.kind == .insert)
+            #expect(Set(lineOp.fields.keys) == ["recipe_id", "ingredient_id", "qty_base_units"])
+            #expect(fieldValue(lineOp, "recipe_id") == recipeId)
+        }
+
+        // All 3 ops share one timestamp.
+        let mutatedAt = Kernel.canonicalTimestamp(now)
+        #expect(Set(ops.map(\.client_mutated_at)) == [mutatedAt])
+        #expect(Set(ops.map(\.created_at)) == [mutatedAt])
+
+        // Immediately readable locally.
+        #expect(try store.liveRecipes().contains { $0.id == recipeId })
+        #expect(try store.liveRecipeItems(recipeId: recipeId).count == 2)
+    }
+
+    @Test func saveNewRecipeNamingTombstonedIngredientThrowsAndEnqueuesNothing() throws {
+        let store = try recipeFixture()
+        let edits = LocalEdits(store: store, locationId: "loc-1")
+        let before = try store.pendingCount()
+        let draft = RecipeDraft(
+            name: "Sourdough", menuPrice: "10.00", targetFcPct: "30.00",
+            lines: [
+                RecipeDraft.Line(ingredientId: "ing-1", qty: "1"),
+                RecipeDraft.Line(ingredientId: "ing-4", qty: "1"), // ing-4 (Yeast) is tombstoned
+            ])
+
+        #expect(throws: KernelError.self) {
+            _ = try edits.saveNewRecipe(draft)
+        }
+
+        // The transaction rolled back: no op, and no recipe row, was left behind.
+        #expect(try store.pendingCount() == before)
+        #expect(try store.liveRecipes().map(\.name) == ["Bread", "Other"])
+    }
+
+    @Test func saveNewRecipeInvalidDraftThrowsFirstDraftErrorAndEnqueuesNothing() throws {
+        let store = try recipeFixture()
+        let edits = LocalEdits(store: store, locationId: "loc-1")
+        let before = try store.pendingCount()
+        // Wrong in two ways -- name empty AND no lines -- validate()'s first
+        // error (declaration order) is nameEmpty.
+        let draft = RecipeDraft(name: "", menuPrice: "10.00", targetFcPct: "30.00", lines: [])
+
+        do {
+            _ = try edits.saveNewRecipe(draft)
+            Issue.record("expected saveNewRecipe to throw")
+        } catch let error as RecipeDraft.DraftError {
+            #expect(error == .nameEmpty)
+        } catch {
+            Issue.record("expected DraftError, got \(error)")
+        }
+
+        #expect(try store.pendingCount() == before)
+    }
 }
