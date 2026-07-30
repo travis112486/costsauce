@@ -66,7 +66,9 @@ struct DashboardView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     AlertsSection(alerts: dashboard.alerts)
                     TopMoversSection(movers: dashboard.topMovers)
-                    MenuSection(items: dashboard.menuItems, suppressSuggestions: appModel.suppressSuggestions)
+                    MenuSection(
+                        appModel: appModel, items: dashboard.menuItems,
+                        suppressSuggestions: appModel.suppressSuggestions)
                     SummarySection(summary: dashboard.summary)
                 }
                 .padding()
@@ -241,23 +243,51 @@ private struct MoverBarRow: View {
 // MARK: - Menu
 
 private struct MenuSection: View {
+    let appModel: AppModel
     let items: [CostedRecipe]
     let suppressSuggestions: Bool
 
     var body: some View {
         SectionCard(title: "Menu") {
             if items.isEmpty {
-                Text("Recipes are created on the web app; they cost themselves here automatically.")
+                Text(emptyStateText)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             } else {
                 VStack(alignment: .leading, spacing: 12) {
                     ForEach(items, id: \.recipeId) { item in
-                        MenuRow(item: item, suppressSuggestions: suppressSuggestions)
+                        NavigationLink {
+                            RecipeEditorView(appModel: appModel, mode: .edit(recipeId: item.recipeId))
+                        } label: {
+                            MenuRow(item: item, suppressSuggestions: suppressSuggestions)
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
             }
+        } accessory: {
+            // A bookkeeper's writes are refused by the database (RLS), so
+            // the create affordance is hidden for them entirely — the
+            // same `canEditRecipes` gate `RecipeEditorView`'s own Save
+            // button and edit-path write affordances use (Tasks 8/9).
+            if appModel.canEditRecipes {
+                NavigationLink {
+                    RecipeEditorView(appModel: appModel, mode: .create)
+                } label: {
+                    Image(systemName: "plus.circle")
+                }
+                .accessibilityLabel("Add Recipe")
+            }
         }
+    }
+
+    /// D5: no fifth tab — this section IS the recipe list, so the empty
+    /// state stops pointing at the web app and instead reflects whether
+    /// this caller can actually create one here.
+    private var emptyStateText: String {
+        appModel.canEditRecipes
+            ? "No recipes yet. Tap + to build your first one."
+            : "No recipes yet."
     }
 }
 
@@ -372,19 +402,36 @@ private struct StatTile: View {
 
 // MARK: - shared
 
-private struct SectionCard<Content: View>: View {
+private struct SectionCard<Content: View, Accessory: View>: View {
     let title: String
     @ViewBuilder var content: () -> Content
+    /// Optional header-trailing affordance (e.g. Menu's "+"). The
+    /// `Accessory == EmptyView` initializer below defaults this to
+    /// nothing, so every other section card is visually unchanged.
+    @ViewBuilder var accessory: () -> Accessory
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(title)
-                .font(.headline)
+            HStack {
+                Text(title)
+                    .font(.headline)
+                Spacer()
+                accessory()
+            }
             content()
         }
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+/// Convenience for the no-accessory case (Alerts/Top Movers/Summary) so
+/// those three call sites stay exactly as they were — a single trailing
+/// closure, no visible change.
+extension SectionCard where Accessory == EmptyView {
+    init(title: String, @ViewBuilder content: @escaping () -> Content) {
+        self.init(title: title, content: content, accessory: { EmptyView() })
     }
 }
 

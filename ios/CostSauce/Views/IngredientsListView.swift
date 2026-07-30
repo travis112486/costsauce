@@ -140,7 +140,7 @@ struct IngredientsListView: View {
             appModel.syncSoon()
         } catch let error as LocalEdits.EditError {
             if case .inUse(let count) = error {
-                inUseMessage = "Used by \(count) recipe line(s). Remove it from those recipes on the web app, or merge it there."
+                inUseMessage = "Used by \(count) recipe line(s). Remove it from those recipes first."
             }
         } catch {
             loadError = error.localizedDescription
