@@ -26,7 +26,9 @@ struct PendingQueueView: View {
     @State private var needsAttention: [PendingOp] = []
     @State private var pendingDiscard: PendingOp?
     @State private var exportURL: URL?
-    @State private var exportError: String?
+    /// Shared by both write paths this screen has (export, discard) — one
+    /// alert, generic title, message set to whichever action failed.
+    @State private var actionError: String?
 
     var body: some View {
         content
@@ -50,10 +52,10 @@ struct PendingQueueView: View {
             } message: {
                 Text("The local value stays until the next sync refreshes it from the server.")
             }
-            .alert("Export Failed", isPresented: exportErrorBinding) {
+            .alert("Couldn't Complete Action", isPresented: actionErrorBinding) {
                 Button("OK") {}
             } message: {
-                Text(exportError ?? "")
+                Text(actionError ?? "")
             }
             .task(id: RefreshKey(appModel: appModel)) {
                 load()
@@ -116,18 +118,18 @@ struct PendingQueueView: View {
     }
 
     private func exportPending() {
-        exportError = nil
+        actionError = nil
         guard let store = appModel.store else { return }
         do {
             let data = try store.exportPendingOps()
             exportURL = try PendingOpsExport.write(data)
         } catch {
-            exportError = error.localizedDescription
+            actionError = "Couldn't export pending changes: \(error.localizedDescription)"
         }
     }
 
-    private var exportErrorBinding: Binding<Bool> {
-        Binding(get: { exportError != nil }, set: { if !$0 { exportError = nil } })
+    private var actionErrorBinding: Binding<Bool> {
+        Binding(get: { actionError != nil }, set: { if !$0 { actionError = nil } })
     }
 
     // MARK: - discard
@@ -136,16 +138,25 @@ struct PendingQueueView: View {
         Binding(get: { pendingDiscard != nil }, set: { if !$0 { pendingDiscard = nil } })
     }
 
-    /// `deleteOp` (Task 5, already tested) is the resolution `SyncEngine`'s
-    /// own doc comment on `needs_attention` points at. `syncSoon()` both
-    /// refreshes `pendingCount` immediately (so the chip/badge and this
-    /// screen's own `RefreshKey` reflect the discard right away) and
-    /// kicks a debounced sync for whatever else is still queued — same
-    /// idiom `IngredientsListView.delete`/`PurchaseEntryView` use after
-    /// every local write.
+    /// `AppModel.discardOp` (wrapping `LocalStore.deleteOp`, Task 5, already
+    /// tested) is the resolution `SyncEngine`'s own doc comment on
+    /// `needs_attention` points at — views never write the store directly
+    /// (a 2a review follow-up; this used to call `appModel.store?.deleteOp`
+    /// through a bare `try?`, silently swallowing any failure). On success,
+    /// `syncSoon()` both refreshes `pendingCount` immediately (so the
+    /// chip/badge and this screen's own `RefreshKey` reflect the discard
+    /// right away) and kicks a debounced sync for whatever else is still
+    /// queued — same idiom `IngredientsListView.delete`/`PurchaseEntryView`
+    /// use after every local write. On failure, the op is left in place and
+    /// the shared action-error alert surfaces it instead.
     private func discard(_ op: PendingOp) {
         pendingDiscard = nil
-        try? appModel.store?.deleteOp(opId: op.op_id)
+        do {
+            try appModel.discardOp(op.op_id)
+        } catch {
+            actionError = "Couldn't discard this change: \(error.localizedDescription)"
+            return
+        }
         appModel.syncSoon()
     }
 
@@ -189,6 +200,10 @@ struct PendingQueueView: View {
             return op.fields["purchased_on"] ?? nil
         case "ingredients":
             return op.fields["name"] ?? nil
+        case "recipes":
+            return op.fields["name"] ?? nil
+        case "recipe_items":
+            return op.fields["qty_base_units"] ?? nil
         default:
             return nil
         }

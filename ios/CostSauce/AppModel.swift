@@ -11,6 +11,15 @@ import Foundation
 import Observation
 import CostSauceKit
 
+/// App-target-only errors — `CostSauceKit`'s `StoreError` is the frozen,
+/// caller-facing contract for the Kit's OWN failure modes (Global
+/// Constraints: no app-target code may widen that type), so a failure that
+/// only exists because THIS layer called into the Kit incorrectly (no store
+/// attached yet) gets its own small type instead.
+enum AppModelError: Error {
+    case noStore
+}
+
 @Observable
 @MainActor
 final class AppModel {
@@ -50,10 +59,33 @@ final class AppModel {
     private(set) var syncState: SyncState = .idle
     private(set) var pendingCount: Int = 0
 
+    /// The caller's role in the bound org — `"owner"` | `"manager"` |
+    /// `"bookkeeper"` | `nil`. Task 2b's offline edit-gating signal: see
+    /// `canEditRecipes` below and the "role snapshot" section for how this
+    /// stays populated across an offline cold start.
+    private(set) var callerRole: String?
+
     /// True unless the latest `SyncEngine.stateStream` value is
     /// `.caughtUp` (§5.5) — dashboards/etc. read this to decide whether a
     /// suggested price is safe to show yet.
     private(set) var suppressSuggestions: Bool = true
+
+    /// Recipe-edit gating (spec §8, decision D2). RLS truth:
+    /// `recipe_write`/`recipe_item_write` are owner/manager only
+    /// (`supabase/migrations/0012_business_tables.sql:158-188`) —
+    /// bookkeepers have read-only access to both recipe tables at the
+    /// database level, so an op composed offline by a bookkeeper can never
+    /// actually land. This is what keeps the app from ever offering that
+    /// dead-end write affordance in the first place.
+    ///
+    /// Unknown role (`callerRole == nil`) reads as `false` — read-only —
+    /// never permissive: a normal launch can't hit this, since bootstrap
+    /// always resolves `/me` before `phase` ever reaches `.main` (either
+    /// the fresh path's own fetch, via `proceedWithMembership`, or the fast
+    /// path's snapshot load, via `tryFastPathToMain`, both below). `nil` is
+    /// only reachable right after one of the §13 erase paths clears the
+    /// snapshot, before the next successful `/me` repopulates it.
+    var canEditRecipes: Bool { callerRole == "owner" || callerRole == "manager" }
 
     /// §13 identity-mismatch recovery (Task 14): populated exactly when
     /// `phase` flips to `.identityMismatch`, by BOTH throw sites that route
@@ -268,6 +300,77 @@ final class AppModel {
             forKey: locationSnapshotKey(userId: userId, orgId: orgId, locationId: locationId))
     }
 
+    // MARK: - role snapshot (offline edit gating)
+
+    /// Sibling of the location snapshot above, same offline-cold-start
+    /// problem: `tryFastPathToMain` never calls `/me`, so without this a
+    /// relaunch that starts offline would leave `callerRole` nil — and per
+    /// `canEditRecipes`'s doc comment, nil reads as read-only, so a
+    /// bookkeeper's device would correctly stay locked out, but so would an
+    /// owner's or manager's, with no way to tell the difference until a
+    /// fresh `/me` lands. Persisting the last-known role closes that gap
+    /// the same way the location snapshot closes it for `currentLocation`.
+    ///
+    /// Keyed by `(userId, orgId)`, not `(userId, orgId, locationId)` — role
+    /// is a property of the MEMBERSHIP, not the location, so folding
+    /// `locationId` into the key would needlessly fragment the snapshot
+    /// across a member's locations (and miss it entirely the first time
+    /// they switch to a location they haven't been bound to before).
+    private static func roleSnapshotKey(userId: String, orgId: String) -> String {
+        "roleSnapshot-\(userId)-\(orgId)"
+    }
+
+    /// Called on every successful `/me` that resolves a membership for the
+    /// org in question — `proceedWithMembership` below (the one `/me` call
+    /// site inside this file), plus `recordCallerRole`, the wrapper
+    /// `SettingsView`/`MembersView`/`OrgDeletedView`'s own `/me` calls go
+    /// through (those views resolve membership independently because
+    /// `AppModel.membership` is never populated on the fast bootstrap path
+    /// — see each file's header). A later successful `/me` always
+    /// overwrites this the same way it overwrites `callerRole` itself, so
+    /// the snapshot never lags more than one fetch behind.
+    private static func saveRoleSnapshot(_ role: String, userId: String, orgId: String) {
+        UserDefaults.standard.set(role, forKey: roleSnapshotKey(userId: userId, orgId: orgId))
+    }
+
+    private static func loadRoleSnapshot(userId: String, orgId: String) -> String? {
+        UserDefaults.standard.string(forKey: roleSnapshotKey(userId: userId, orgId: orgId))
+    }
+
+    /// §13 erase paths only (`switchAccountAndErase`/`eraseDeviceAndSignOut`)
+    /// — mirrors `clearLocationSnapshot`'s scope exactly: the ONE snapshot
+    /// the erased identity owns, never a broader sweep. Ordinary
+    /// `signOut()` deliberately does NOT call this, for the same §13
+    /// reasoning `clearLocationSnapshot`'s doc comment gives: sign-out never
+    /// wipes local data, and this snapshot sits beside the same sqlite file
+    /// that already survives sign-out untouched, so a later sign-in as the
+    /// SAME user resumes via `tryFastPathToMain` with a still-correct role
+    /// snapshot ready to seed it immediately.
+    private static func clearRoleSnapshot(userId: String, orgId: String) {
+        UserDefaults.standard.removeObject(forKey: roleSnapshotKey(userId: userId, orgId: orgId))
+    }
+
+    /// `SettingsView`/`MembersView`/`OrgDeletedView`'s own `/me` calls
+    /// resolve a fresh `Membership` for `boundOrgId` without going through
+    /// `proceedWithMembership` (they run long after bootstrap, from a
+    /// signed-in `.main` session) — this is their write-back path, mirroring
+    /// `applyLocationUpdate`. Unlike `applyLocationUpdate`'s counterparts
+    /// (those views keep their OWN local `resolvedMembership` copy rather
+    /// than writing back to `AppModel.membership`, deliberately, per their
+    /// file headers), the role snapshot has no such view-local fallback to
+    /// rely on offline, so this DOES write back — both live (`callerRole`,
+    /// so `canEditRecipes` reflects it everywhere immediately, not just in
+    /// the view that happened to fetch it) and to disk. Guarded on
+    /// `orgId == boundOrgId` so a stale or unrelated membership (e.g. a
+    /// `/me` response's OTHER org, or a call that lands after the user has
+    /// already switched away) can never overwrite the snapshot for the
+    /// currently-bound org.
+    func recordCallerRole(_ role: String, orgId: String) {
+        guard orgId == boundOrgId, let userId = currentUserId else { return }
+        callerRole = role
+        Self.saveRoleSnapshot(role, userId: userId, orgId: orgId)
+    }
+
     // MARK: - config / GoTrue
 
     /// `/config`'s null `supabase_url` means the reviewer-only sign-in path
@@ -353,14 +456,16 @@ final class AppModel {
     /// task, and the in-memory token mirror); the sqlite file on disk is
     /// left completely untouched, so a later sign-in as the SAME user
     /// resumes it via `tryFastPathToMain` exactly as if the app had just
-    /// relaunched. `currentLocation = nil` below is that same in-memory-only
-    /// teardown — deliberately does NOT call `clearLocationSnapshot`: the
-    /// persisted snapshot sits beside the sqlite file under the exact same
-    /// "local data survives sign-out" rule, and leaving it in place is what
-    /// lets that same later sign-in seed `currentLocation` immediately
-    /// rather than spinning again. Only the §13 erase paths
-    /// (`switchAccountAndErase`/`eraseDeviceAndSignOut`) ever call
-    /// `clearLocationSnapshot`, matching exactly where they call
+    /// relaunched. `currentLocation = nil` and `callerRole = nil` below are
+    /// that same in-memory-only teardown — deliberately does NOT call
+    /// `clearLocationSnapshot`/`clearRoleSnapshot`: both persisted snapshots
+    /// sit beside the sqlite file under the exact same "local data survives
+    /// sign-out" rule, and leaving them in place is what lets that same
+    /// later sign-in seed `currentLocation`/`callerRole` immediately rather
+    /// than spinning (or, for `callerRole`, reading as read-only) again.
+    /// Only the §13 erase paths (`switchAccountAndErase`/
+    /// `eraseDeviceAndSignOut`) ever call `clearLocationSnapshot`/
+    /// `clearRoleSnapshot`, matching exactly where they call
     /// `removeStoreFile`.
     ///
     /// `phase` is routed back to `.login` explicitly here — nothing else in
@@ -396,6 +501,7 @@ final class AppModel {
         boundLocationId = nil
         currentLocation = nil
         membership = nil
+        callerRole = nil
         pendingCount = 0
         syncState = .idle
         session.signOut()
@@ -435,14 +541,15 @@ final class AppModel {
     /// (`removeStoreFile`, review-round-1 fix — see this task's report for
     /// why this must never sweep every file for the userId: a second store
     /// file for a DIFFERENT org this identity also holds is data the
-    /// on-screen consent never covered), tears down whatever Kit objects
-    /// this session had attached (mirrors `signOut()`'s teardown, minus
-    /// `session.signOut()` itself — this is a SWITCH, not a sign-out), then
-    /// adopts the previously-parked new session (only non-nil on the
-    /// `completeReauth` path — `bindAndEnterMain`'s path already has its
-    /// session live) and restarts bootstrap from `.bootstrap` so a
-    /// brand-new store gets created and bound under the new identity,
-    /// exactly like a first-time sign-in.
+    /// on-screen consent never covered) plus that same identity's location
+    /// and role snapshots (`clearLocationSnapshot`/`clearRoleSnapshot`),
+    /// tears down whatever Kit objects this session had attached (mirrors
+    /// `signOut()`'s teardown, minus `session.signOut()` itself — this is a
+    /// SWITCH, not a sign-out), then adopts the previously-parked new
+    /// session (only non-nil on the `completeReauth` path —
+    /// `bindAndEnterMain`'s path already has its session live) and restarts
+    /// bootstrap from `.bootstrap` so a brand-new store gets created and
+    /// bound under the new identity, exactly like a first-time sign-in.
     func switchAccountAndErase() {
         guard mismatchedStore != nil else { return }
         try? mismatchedStore?.wipe()
@@ -460,6 +567,7 @@ final class AppModel {
         boundLocationId = nil
         currentLocation = nil
         membership = nil
+        callerRole = nil
         pendingCount = 0
         syncState = .idle
         self.mismatchedStore = nil
@@ -470,6 +578,7 @@ final class AppModel {
             Self.removeStoreFile(userId: oldMeta.user_id, orgId: oldMeta.org_id)
             Self.clearLocationSnapshot(
                 userId: oldMeta.user_id, orgId: oldMeta.org_id, locationId: oldMeta.location_id)
+            Self.clearRoleSnapshot(userId: oldMeta.user_id, orgId: oldMeta.org_id)
         }
         if let sessionToAdopt {
             session.adopt(sessionToAdopt)
@@ -500,8 +609,10 @@ final class AppModel {
     /// affordance and `wipe()` call both only ever touch the ONE org that
     /// was actually deleted server-side — a broader sweep would silently
     /// destroy that OTHER org's still-unexported pending queue, which the
-    /// on-screen consent never described or covered. Otherwise identical
-    /// to `signOut()`, which already wipes the Keychain (via
+    /// on-screen consent never described or covered. The same one-org
+    /// scoping applies to `clearLocationSnapshot`/`clearRoleSnapshot`
+    /// alongside it. Otherwise identical to `signOut()`, which already
+    /// wipes the Keychain (via
     /// `session.signOut()`) and routes `phase` back to `.login` — see that
     /// method's doc comment for why a bare `SessionController.signOut()`
     /// alone isn't enough.
@@ -513,6 +624,7 @@ final class AppModel {
             Self.removeStoreFile(userId: oldMeta.user_id, orgId: oldMeta.org_id)
             Self.clearLocationSnapshot(
                 userId: oldMeta.user_id, orgId: oldMeta.org_id, locationId: oldMeta.location_id)
+            Self.clearRoleSnapshot(userId: oldMeta.user_id, orgId: oldMeta.org_id)
         }
     }
 
@@ -549,8 +661,17 @@ final class AppModel {
         bindAndEnterMain(userId: authSession.userId, orgId: membership.orgId, location: location)
     }
 
+    /// The one `/me`-resolved-membership site inside this file (both
+    /// `runBootstrap`'s fresh fetch and `selectMembership`'s picker choice,
+    /// which was itself resolved from that same fetch, route through here)
+    /// — `callerRole`/`saveRoleSnapshot` are set alongside `self.membership`
+    /// for exactly that reason, mirroring `bindAndEnterMain` setting
+    /// `currentLocation`/`saveLocationSnapshot` together a few lines below
+    /// this method's own call to it.
     private func proceedWithMembership(_ membership: Membership, userId: String) async {
         self.membership = membership
+        callerRole = membership.role
+        Self.saveRoleSnapshot(membership.role, userId: userId, orgId: membership.orgId)
         bootstrapStep = .loading
         do {
             let locations = try await api.locations(orgId: membership.orgId)
@@ -620,9 +741,14 @@ final class AppModel {
     /// existed, taking this fast path offline for the very first time) —
     /// which is exactly `DashboardView`/`SettingsView`'s existing
     /// `currentLocation == nil` spinner case, not a new failure mode this
-    /// introduces. `refreshOnlineData()` below still runs and overwrites
-    /// both the in-memory value and the snapshot the moment a real fetch
-    /// lands.
+    /// introduces. `callerRole` is seeded the same way from
+    /// `loadRoleSnapshot`, for the identical `(userId, orgId)` pair — nil
+    /// reads as read-only (`canEditRecipes`'s doc comment), the safe
+    /// default for that same never-yet-saved edge case. `refreshOnlineData()`
+    /// below still runs and overwrites `currentLocation`/its snapshot the
+    /// moment a real fetch lands, but does NOT call `/me` — `callerRole`
+    /// only refreshes from a real fetch when the user visits a screen that
+    /// does (Settings, Members) or goes through bootstrap again.
     private func tryFastPathToMain() async -> Bool {
         guard case .active(let authSession) = session.state else { return false }
         guard let existingPath = Self.findExistingStorePath(userId: authSession.userId) else { return false }
@@ -632,6 +758,7 @@ final class AppModel {
         attachStore(existingStore, orgId: meta.org_id, locationId: meta.location_id)
         currentLocation = Self.loadLocationSnapshot(
             userId: meta.user_id, orgId: meta.org_id, locationId: meta.location_id)
+        callerRole = Self.loadRoleSnapshot(userId: meta.user_id, orgId: meta.org_id)
         phase = .main
         Task { [weak self] in
             await self?.refreshOnlineData()
@@ -698,6 +825,22 @@ final class AppModel {
             guard !Task.isCancelled else { return }
             await self?.syncEngine?.syncNow()
         }
+    }
+
+    /// Wraps `LocalStore.deleteOp` so views never write the store directly
+    /// — `PendingQueueView`'s discard action used to call `store?.deleteOp`
+    /// straight through a bare `try?`, silently swallowing any failure (a
+    /// 2a review follow-up). Refreshes `pendingCount` on success, same as
+    /// `syncSoon()`'s own refresh, so the chip/badge reflect the discard
+    /// immediately even for a caller that doesn't also call `syncSoon()`
+    /// right after. Throws `AppModelError.noStore` if called before a store
+    /// is attached — `PendingQueueView` can only reach this with a real op
+    /// in hand, which itself only ever came from a `store.pendingOps` read,
+    /// so that guard is defensive, not an expected path.
+    func discardOp(_ opId: String) throws {
+        guard let store else { throw AppModelError.noStore }
+        try store.deleteOp(opId: opId)
+        refreshPendingCount()
     }
 
     /// `scenePhase == .active`: refresh the session (if near expiry), kick

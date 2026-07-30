@@ -271,9 +271,14 @@ struct SettingsView: View {
         do {
             let response = try await appModel.api.me()
             meResponse = response
-            resolvedMembership =
-                response.memberships.first(where: { $0.orgId == appModel.boundOrgId })
-                ?? appModel.membership
+            if let orgId = appModel.boundOrgId,
+                let freshMembership = response.memberships.first(where: { $0.orgId == orgId })
+            {
+                resolvedMembership = freshMembership
+                appModel.recordCallerRole(freshMembership.role, orgId: orgId)
+            } else {
+                resolvedMembership = appModel.membership
+            }
             meLoadError = nil
         } catch let error as ApiError {
             meLoadError = error.message

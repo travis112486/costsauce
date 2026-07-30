@@ -315,6 +315,16 @@ struct OrgDeletedView: View {
 
     // MARK: - role resolution
 
+    /// Same `/me`-resolves-a-fresh-`Membership`-for-`boundOrgId` shape
+    /// `SettingsView`/`MembersView` use, found by the same grep for
+    /// `api.me()` across `ios/CostSauce/` that turned those two up — so it
+    /// gets the identical `AppModel.recordCallerRole` write-back on a
+    /// resolved match. In practice this rarely fires: this screen only
+    /// shows once the org has been deleted server-side, so `/me`'s
+    /// memberships list has usually already stopped including it by the
+    /// time this runs. During the §6.2 grace window it still could, and the
+    /// role snapshot's own rule is "every successful /me that resolves a
+    /// membership for boundOrgId," not "every one except this view."
     private func loadMembership() async {
         guard let orgId = appModel.boundOrgId else {
             resolvedMembership = appModel.membership
@@ -322,8 +332,12 @@ struct OrgDeletedView: View {
         }
         do {
             let response = try await appModel.api.me()
-            resolvedMembership =
-                response.memberships.first(where: { $0.orgId == orgId }) ?? appModel.membership
+            if let freshMembership = response.memberships.first(where: { $0.orgId == orgId }) {
+                resolvedMembership = freshMembership
+                appModel.recordCallerRole(freshMembership.role, orgId: orgId)
+            } else {
+                resolvedMembership = appModel.membership
+            }
         } catch {
             resolvedMembership = appModel.membership
         }

@@ -202,9 +202,12 @@ struct MembersView: View {
         do {
             members = try await appModel.api.members(orgId: orgId)
             let me = try await appModel.api.me()
-            let role = me.memberships.first(where: { $0.orgId == orgId })?.role
-                ?? appModel.membership?.role
-            isOwner = role == "owner"
+            if let freshMembership = me.memberships.first(where: { $0.orgId == orgId }) {
+                isOwner = freshMembership.role == "owner"
+                appModel.recordCallerRole(freshMembership.role, orgId: orgId)
+            } else {
+                isOwner = appModel.membership?.role == "owner"
+            }
             loadError = nil
         } catch let error as ApiError {
             loadError = error.message
@@ -268,7 +271,13 @@ struct MembersView: View {
     /// `acceptInvite` succeeding is the real action; the trailing `/me`
     /// refetch is best-effort (`try?`) per the brief's own
     /// "-> acceptInvite -> refetch /me" -- a failure there doesn't undo or
-    /// re-alert on top of an already-successful accept.
+    /// re-alert on top of an already-successful accept. When it succeeds
+    /// and resolves this org's fresh membership, it records the caller's
+    /// (possibly just-changed) role via `AppModel.recordCallerRole` --
+    /// redundant with the `load()` call right below doing the same thing a
+    /// moment later, but this IS a real `/me` resolving a membership for
+    /// `boundOrgId`, so per the role-snapshot's own "every one must save"
+    /// rule it gets wired in here too, not just in `load()`.
     private func acceptInviteTapped() async {
         let token = trimmedAcceptToken
         guard !token.isEmpty else { return }
@@ -278,7 +287,12 @@ struct MembersView: View {
         defer { acceptBusy = false }
         do {
             let result = try await appModel.api.acceptInvite(token: token)
-            _ = try? await appModel.api.me()
+            if let orgId = appModel.boundOrgId,
+                let response = try? await appModel.api.me(),
+                let freshMembership = response.memberships.first(where: { $0.orgId == orgId })
+            {
+                appModel.recordCallerRole(freshMembership.role, orgId: orgId)
+            }
             acceptToken = ""
             acceptSuccess = "Joined as \(result.role)."
             await load()
