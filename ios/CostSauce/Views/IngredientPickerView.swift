@@ -14,6 +14,23 @@
 // the FULL candidate list, never to the input candidate list: filtering the
 // pool before ranking could change which matches surface and in what
 // order; filtering the ranked result cannot.
+//
+// Fix round 1 (plan amendment, sanctioned by the controller): the initial
+// extraction only reported picks (`onPick`), which lost two pieces of
+// pre-refactor `PurchaseEntryView` behavior that depended on the picker's
+// selection being a LIVE value the parent could read every render, not a
+// one-shot event -- clearing the chip no longer hid the caller's
+// ingredient-gated content, and the caller's "Saved" banner no longer
+// cleared on the first keystroke of a new search. `onClear` and
+// `onQueryEdited` restore both: `onClear` mirrors `onPick`'s own trigger
+// (a transition of `effectiveSelectionId`, just to nil instead of to a new
+// id) so the caller can hide its ingredient-gated content the instant this
+// view would have; `onQueryEdited` fires on every user keystroke in the
+// name field (the exact trigger the old `nameBinding` setter's inlined
+// `savedMessage = nil` had), since that is a separate, keystroke-level
+// signal `onClear` cannot stand in for -- typing the FIRST characters of a
+// brand new search does not touch `effectiveSelectionId` at all (nil before
+// and after) until something actually matches.
 
 import SwiftUI
 import CostSauceKit
@@ -22,6 +39,20 @@ struct IngredientPickerView: View {
     let appModel: AppModel
     let excludedIngredientIds: Set<String>
     let onPick: (LocalIngredient) -> Void
+    /// Fired when the effective selection transitions from some id to none
+    /// -- the chip's "x" (which clears `manualSelection`/`nameQuery`
+    /// directly, not through `nameBinding`) or typing past what any
+    /// candidate matches. Lets a caller mirror the pre-extraction behavior
+    /// of reading a LIVE "is anything selected" value every render.
+    let onClear: () -> Void
+    /// Fired on every user keystroke in the name field (via `nameBinding`'s
+    /// setter) -- NOT tied to whether the selection actually changed. This
+    /// is what `PurchaseEntryView` used to do inline (clearing its "Saved"
+    /// banner the instant the user starts a new search), which `onClear`
+    /// alone cannot reproduce: the first several characters of a brand new
+    /// search typically match nothing yet, so `effectiveSelectionId` stays
+    /// nil the whole time and `onClear` never fires.
+    let onQueryEdited: () -> Void
 
     // Matching/candidate state -- `candidates` is `Kernel.Candidate(id:name:)`
     // over `store.liveIngredientsByCreation()`'s own (created_at, id) order
@@ -52,9 +83,12 @@ struct IngredientPickerView: View {
         .task(id: RefreshKey(appModel: appModel)) {
             loadCandidates()
         }
-        .onChange(of: effectiveSelectionId) { _, newId in
-            guard let newId, let ingredient = ingredientsById[newId] else { return }
-            onPick(ingredient)
+        .onChange(of: effectiveSelectionId) { oldId, newId in
+            if let newId, let ingredient = ingredientsById[newId] {
+                onPick(ingredient)
+            } else if oldId != nil {
+                onClear()
+            }
         }
         .sheet(isPresented: $createSheetPresented) {
             CreateIngredientSheet(appModel: appModel, name: trimmedQuery) { id, name in
@@ -153,6 +187,7 @@ struct IngredientPickerView: View {
                 if manualSelection?.name != newValue {
                     manualSelection = nil
                 }
+                onQueryEdited()
             }
         )
     }
