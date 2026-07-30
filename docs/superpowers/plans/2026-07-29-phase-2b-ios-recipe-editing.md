@@ -433,9 +433,57 @@ Environment facts (from the 2a acceptance, do not rediscover them):
 
 ---
 
+### Task 12: Park a stale/deleted push result instead of dropping the op
+
+**Added mid-execution (2026-07-29) after Task 5 discovered the gap. Execute immediately after Task 5 — before the
+editor UI tasks — so no disabled test lingers in the tree.**
+
+**Files:** Modify `Sources/CostSauceKit/Sync/SyncEngine.swift`; Test `Tests/CostSauceKitTests/SyncEngineTests.swift`
+(re-enable one disabled test).
+
+**Why this task exists:** the plan originally asserted that the 2a sync engine handled every 2b scenario
+unmodified. That was wrong. `SyncEngine.apply()` (`SyncEngine.swift:335-347`) handles `"applied"` and `"stale"`
+in one branch and **never inspects `result.reason`**, so a `stale`/`reason: "deleted"` result — the server
+refusing to re-mutate a tombstoned row (`CS423`) — is indistinguishable from a `stale`/`reason: "older"`
+silent-LWW loss, and the op is deleted. Spec §7 requires the opposite for `"deleted"`: the op **parks** as
+`needs_attention` so the user learns their edit did not apply, per §13 ("a server-side refusal never costs the
+user work without telling them"). This is the same defect class 2a's own Task 8 review caught for unrecognized
+statuses (park, don't delete) — it was simply never reachable while recipes were pull-only.
+
+**Interfaces (frozen):**
+```
+SyncEngine.apply(_:to:) — branch the existing "applied"/"stale" case on result.reason:
+
+  status "applied"                  → unchanged: delete the op (it landed)
+  status "stale", reason "older"    → unchanged: delete the op. This IS silent LWW; the server's row is
+                                     newer and the trailing pull brings truth. Do NOT park these.
+  status "stale", reason "deleted"  → NEW: park the op as needs_attention with the server's reason, exactly
+                                     as an unrecognized status already parks. Do NOT delete it.
+  status "stale", any other reason  → park as needs_attention (fail safe, consistent with §13 and with the
+                                     unrecognized-status default 2a already established)
+  everything else                   → unchanged
+
+  The stale-triggered full re-pull (baseline reset to cursor 0) must still fire for a "deleted" result exactly
+  as it does today for "older" — the trailing pull is what tombstones the row locally so the editor stops
+  showing a line the server has deleted. Do not couple the reset to whether the op was parked or deleted.
+```
+
+- [ ] **Step 1:** re-enable the test Task 5 left disabled — remove the `.disabled(...)` trait from
+  `quantityEditAgainstServerTombstonedLineParksAsNeedsAttention` in `SyncEngineTests.swift`. Run
+  `cd ios/CostSauceKit && swift test --filter SyncEngineTests` → that test FAILS (the op is deleted, not parked).
+  This is the RED that Task 5 already proved; you are re-establishing it as the gate.
+- [ ] **Step 2:** implement the `reason` branch above. **Step 3:** `swift test` → PASS, all tests, **zero skipped**.
+  Confirm specifically that `staleOlderUpdateSilentlyDropsOpWithoutNeedsAttention` still passes untouched — if
+  parking leaked into the `"older"` path, silent LWW is broken and that test is the tripwire. **Step 4:** commit
+  `fix(2b): park a stale/deleted push result instead of silently dropping the op`.
+
+---
+
 ## Notes for the executing controller
 
-- **Task order matters twice.** Task 5's scenarios (d)-(g) consume Tasks 1-3's `LocalEdits` methods, and Task 9 consumes Task 7's extracted picker. Everything else is independent.
+- **Task order matters three times.** Task 5's scenarios (d)-(g) consume Tasks 1-3's `LocalEdits` methods; Task 9
+  consumes Task 7's extracted picker; and **Task 12 runs immediately after Task 5**, out of numeric order, because
+  it clears the disabled test Task 5 had to leave behind. Everything else is independent.
 - **Carry these facts into briefs:** `KernelError` is a struct with `.message` (never switch it); Swift Testing is the framework (`@Test`/`#expect`/`#require`, not XCTest); the store-test idiom is `LocalStore.inMemory()` → `bind` → `applyPullPage`; `LocalStore.insertStub` already has working `recipes`/`recipe_items` branches, so no store plumbing is needed for the new inserts.
 - **There is no app unit-test target** (structural, known since 2a). Tasks 6-10 are proved by the build gate plus a recorded manual walk; Task 11 is the executable end-to-end proof. This is exactly why Tasks 1-4 pushed every rule into the Kit.
 - **Deferred 2a minors that this plan deliberately does NOT fix:** deterministic multi-org store-file selection, the duplicated `exportOrganizationData`/`signedPercent` helpers, the two-tap §13 export buttons. They stay on their own list unless a task lands in that code.
