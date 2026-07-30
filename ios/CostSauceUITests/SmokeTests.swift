@@ -41,8 +41,13 @@ final class SmokeTests: XCTestCase {
     // port 8401 (8400 is occupied by an unrelated long-running process on
     // this machine -- see that runbook's own note), and the reviewer
     // identity/credentials the runbook's `uv run uvicorn` invocation sets
-    // via REVIEWER_EMAIL/REVIEWER_CODE.
-    private let apiBaseURL = "http://127.0.0.1:8401"
+    // via REVIEWER_EMAIL/REVIEWER_CODE. Task 11 (2a deferred minor): reads
+    // `API_BASE_URL` from the environment, falling back to the same
+    // hardcoded default -- so a caller can point this suite at a different
+    // stack (e.g. a different port) without editing source, while every
+    // existing invocation (nothing sets this env var) behaves identically
+    // to before.
+    private let apiBaseURL = ProcessInfo.processInfo.environment["API_BASE_URL"] ?? "http://127.0.0.1:8401"
     private let reviewerEmail = "reviewer@example.com"
     private let reviewerCode = "123456"
 
@@ -60,6 +65,66 @@ final class SmokeTests: XCTestCase {
 
     override func setUpWithError() throws {
         continueAfterFailure = false
+    }
+
+    /// Reviewer login + bootstrap wait, shared by every test method in this
+    /// file (Task 11 factors this out of what was previously inlined once,
+    /// so the recipe journey below doesn't duplicate it a second time).
+    /// Returns once the tab bar is showing (bootstrap auto-picked the
+    /// seeded org/location, Task 7) and the initial pull has landed
+    /// (`"Synced ✓"`) -- the same precondition every journey in this file
+    /// needs before touching its own tab.
+    private func loginAndAwaitBootstrap(_ app: XCUIApplication) {
+        let emailField = app.textFields["Email"]
+        XCTAssertTrue(emailField.waitForExistence(timeout: 15), "reviewer email field never appeared")
+        emailField.tap()
+        emailField.typeText(reviewerEmail)
+
+        let codeField = app.textFields["Code"]
+        XCTAssertTrue(codeField.exists)
+        codeField.tap()
+        codeField.typeText(reviewerCode)
+
+        let signInButton = app.buttons["Sign In"]
+        XCTAssertTrue(signInButton.isEnabled)
+        signInButton.tap()
+
+        let addTab = app.tabBars.buttons["Add"]
+        XCTAssertTrue(addTab.waitForExistence(timeout: 20), "tab bar never appeared -- bootstrap did not complete")
+
+        let dashboardSyncedChip = app.buttons["Synced \u{2713}"]
+        XCTAssertTrue(dashboardSyncedChip.waitForExistence(timeout: 20), "initial pull never reached Synced state")
+    }
+
+    /// A real, reproduced quirk of `RecipeEditorView`'s CREATE-path
+    /// ingredient picker (`addIngredientDestination`'s `onPick: addLine`,
+    /// RecipeEditorView.swift:252-259/310-313): unlike `PurchaseEntryView`'s
+    /// picker (which only updates a chip in place), picking a candidate on
+    /// this path appends the line AND pops the pushed screen immediately --
+    /// and `Kernel.matchIngredient`'s fuzzy pass is a bidirectional
+    /// substring test with no minimum-length floor, so it is very common
+    /// for the FIRST character typed to already substring-match some live
+    /// candidate. Sending the whole name via one `typeText` call races
+    /// this: characters sent AFTER the pop land on whatever field the
+    /// parent screen's first responder happens to be next, corrupting it
+    /// -- reproduced live while writing this suite ("Ground Beef" left a
+    /// stray "round Beef" appended onto the Menu price field; "Onion" left
+    /// a stray "n" appended onto the just-added line's own Qty field, both
+    /// from characters typed after the picker had already popped). This is
+    /// disclosed as a genuine finding in this task's report, not silently
+    /// worked around in product code (Task 11's own discipline rule) --
+    /// this helper is the TEST's accommodation: it types one character at
+    /// a time and stops the INSTANT the picker screen is gone, so it never
+    /// sends a keystroke the app has nowhere correct to deliver. However
+    /// many characters that turns out to take is not fixed in advance and
+    /// is not asserted on here; only the caller's own post-condition (the
+    /// right ingredient ends up on the recipe) is.
+    private func typeIntoPickerUntilItPops(_ field: XCUIElement, _ name: String, app: XCUIApplication) {
+        for character in name {
+            guard field.exists else { return }
+            field.typeText(String(character))
+            if !field.exists { return }
+        }
     }
 
     /// `IngredientDetailView`'s `List` (Header / Price Drift / History
@@ -103,44 +168,27 @@ final class SmokeTests: XCTestCase {
         ]
         app.launch()
 
-        // MARK: - Reviewer login
+        // MARK: - Reviewer login + bootstrap
         // /config's supabase_url is null in this stack (no SUPABASE_URL/
         // SUPABASE_ANON_KEY exported -- runbook Sec. 2), so LoginView renders
         // only the reviewer-access "Sign In" section (LoginView.swift:48-54)
         // -- exactly one "Email" field and one "Code" field, no ambiguity
-        // with the GoTrue email/OTP section that's absent here.
-        let emailField = app.textFields["Email"]
-        XCTAssertTrue(emailField.waitForExistence(timeout: 15), "reviewer email field never appeared")
-        emailField.tap()
-        emailField.typeText(reviewerEmail)
-
-        let codeField = app.textFields["Code"]
-        XCTAssertTrue(codeField.exists)
-        codeField.tap()
-        codeField.typeText(reviewerCode)
-
-        let signInButton = app.buttons["Sign In"]
-        XCTAssertTrue(signInButton.isEnabled)
-        signInButton.tap()
-
-        // MARK: - Bootstrap auto-picks the seeded org/location
-        // The seed script creates exactly one membership and one location,
-        // so `pickDefaultMembership`/`pickDefaultLocation` (Task 7) resolve
+        // with the GoTrue email/OTP section that's absent here. The seed
+        // script creates exactly one membership and one location, so
+        // `pickDefaultMembership`/`pickDefaultLocation` (Task 7) resolve
         // straight through to `.main` with no picker screens -- the tab bar
         // appearing IS the assertion that both picks happened.
-        let addTab = app.tabBars.buttons["Add"]
-        XCTAssertTrue(addTab.waitForExistence(timeout: 20), "tab bar never appeared -- bootstrap did not complete")
+        loginAndAwaitBootstrap(app)
 
+        // MARK: - Add tab: fuzzy-pick the seeded ingredient
         // Let the initial pull land the seeded "Chicken Breast" ingredient
         // before navigating to Add -- PurchaseEntryView's candidate list is
         // read from the local store, refreshed only when `syncState`/
         // `pendingCount` change (its own `RefreshKey`), so waiting for the
-        // sync chip's caught-up state here (rather than racing it) is what
+        // sync chip's caught-up state (already done inside
+        // `loginAndAwaitBootstrap`, rather than racing it) is what
         // guarantees the fuzzy match below has something to find.
-        let dashboardSyncedChip = app.buttons["Synced \u{2713}"]
-        XCTAssertTrue(dashboardSyncedChip.waitForExistence(timeout: 20), "initial pull never reached Synced state")
-
-        // MARK: - Add tab: fuzzy-pick the seeded ingredient
+        let addTab = app.tabBars.buttons["Add"]
         addTab.tap()
 
         let nameField = app.textFields["Ingredient name"]
@@ -211,5 +259,243 @@ final class SmokeTests: XCTestCase {
             "no history row dated \(todayLocalISO)")
         let unitPriceRow = app.staticTexts.containing(successPredicate).firstMatch
         XCTAssertTrue(unitPriceRow.exists, "history row missing the $4.500000/lb unit price")
+    }
+
+    // MARK: - Task 11: recipe build -> edit -> delete, the sync fan-out proof
+
+    /// Phase 2b's own acceptance journey: build a two-line recipe entirely
+    /// through the real UI, edit one line's quantity, then delete the
+    /// recipe -- proving the sync protocol's delete FAN-OUT end to end. A
+    /// recipe tombstone does NOT cascade to its lines server-side the way
+    /// the REST route does (`LocalEdits.tombstoneRecipe`'s own doc comment,
+    /// LocalEdits.swift:289-299) -- skipping the fan-out would strand live
+    /// `recipe_items` rows pointing at a dead recipe, which is exactly what
+    /// this journey's final SQL assertion (recorded in
+    /// docs/runbooks/phase-2b-acceptance.md) rules out.
+    ///
+    /// Seeded ingredients (`scratch/seed_2b.py`) are ALREADY priced via a
+    /// direct `make_purchase` factory call, not through the Add tab --
+    /// "Ground Beef" ($5.00/lb) and "Onion" ($1.00/lb), distinct from
+    /// `testReviewerLoginToSyncedPurchase`'s own "Chicken Breast" (left
+    /// unpriced there on purpose, since THAT test creates its own
+    /// purchase). The two tests never touch the same ingredient or recipe,
+    /// so they run correctly regardless of which order `xcodebuild test`
+    /// picks between them in the same invocation.
+    ///
+    /// Deliberate `Thread.sleep` pauses after the create-sync and
+    /// edit-sync checkpoints below: `Process`/`NSTask` is unavailable on
+    /// the iOS SDK (even for a Simulator-hosted UI test runner), so this
+    /// file cannot shell out to `psql` itself. The runbook's own SQL
+    /// assertions -- which must observe "2 LIVE recipe_items rows" and
+    /// "the row's qty CHANGED, no duplicate" as real, still-live states,
+    /// not reconstructed after the recipe is later tombstoned -- run from
+    /// OUTSIDE this process, against the exact same server this test just
+    /// synced to, during these windows. Each pause is announced with a
+    /// `print()` (visible in `xcodebuild test`'s own streamed output) so
+    /// the acceptance run knows exactly when to fire its query.
+    func testRecipeCreateEditDeleteReconciles() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment = [
+            "API_BASE_URL": apiBaseURL,
+            "UITEST": "1",
+            "REVIEWER_EMAIL": reviewerEmail,
+            "REVIEWER_CODE": reviewerCode,
+        ]
+        app.launch()
+        loginAndAwaitBootstrap(app)
+
+        // MARK: - Create: "Acceptance Bowl" -- Ground Beef x1 lb + Onion x2 lb
+        // `MenuSection`'s "+" (DashboardView.swift:273-280) is hidden for a
+        // bookkeeper; the reviewer seed is an owner, so it's present.
+        let addRecipeButton = app.buttons["Add Recipe"]
+        XCTAssertTrue(addRecipeButton.waitForExistence(timeout: 10), "Menu section's + never appeared")
+        addRecipeButton.tap()
+
+        let nameField = app.textFields["Name"]
+        XCTAssertTrue(nameField.waitForExistence(timeout: 10))
+        nameField.tap()
+        nameField.typeText("Acceptance Bowl")
+
+        let menuPriceField = app.textFields["Menu price"]
+        XCTAssertTrue(menuPriceField.exists)
+        menuPriceField.tap()
+        menuPriceField.typeText("20.00")
+        // Target food cost % keeps `RecipeDraft`'s own "30.00" default --
+        // never touched, exactly like `PurchaseEntryView`'s unit Picker
+        // needing no interaction when there's only one sensible default.
+
+        let addIngredientButton = app.buttons["Add ingredient"]
+        XCTAssertTrue(addIngredientButton.exists)
+        addIngredientButton.tap()
+
+        var ingredientNameField = app.textFields["Ingredient name"]
+        XCTAssertTrue(ingredientNameField.waitForExistence(timeout: 10))
+        ingredientNameField.tap()
+        typeIntoPickerUntilItPops(ingredientNameField, "Ground Beef", app: app)
+        // The pushed Form is a `List` under the hood -- once the keyboard
+        // comes up for the newly-added line's own Qty field, the list can
+        // auto-scroll enough that "Name" (several rows above) is no longer
+        // instantiated in the accessibility tree at all (the exact same
+        // lazy-List gap `scrollToReveal`'s own doc comment describes for
+        // `IngredientDetailView`), so checking for IT is unreliable here.
+        // The line's own ingredient name text is what's actually visible
+        // right after a pick, and is the more meaningful assertion anyway
+        // -- it proves the RIGHT ingredient landed, not just "some screen
+        // popped".
+        XCTAssertTrue(app.staticTexts["Ground Beef"].waitForExistence(timeout: 10), "picking Ground Beef never returned to the recipe form")
+
+        let firstQtyField = app.textFields["Qty"]
+        XCTAssertTrue(firstQtyField.waitForExistence(timeout: 5), "Ground Beef line never appeared")
+        firstQtyField.tap()
+        firstQtyField.typeText("1")
+
+        addIngredientButton.tap()
+        ingredientNameField = app.textFields["Ingredient name"]
+        XCTAssertTrue(ingredientNameField.waitForExistence(timeout: 10))
+        ingredientNameField.tap()
+        typeIntoPickerUntilItPops(ingredientNameField, "Onion", app: app)
+        XCTAssertTrue(app.staticTexts["Onion"].waitForExistence(timeout: 10), "picking Onion never returned to the recipe form")
+
+        // Two lines now share the "Qty" label -- `boundBy: 1` is the
+        // SECOND row, appended after Ground Beef's, matching
+        // `draft.lines`' own insertion order (LineRow's `ForEach` iterates
+        // `draft.lines` directly, RecipeEditorView.swift:216).
+        let secondQtyField = app.textFields.matching(identifier: "Qty").element(boundBy: 1)
+        XCTAssertTrue(secondQtyField.waitForExistence(timeout: 5), "Onion line never appeared")
+        secondQtyField.tap()
+        secondQtyField.typeText("2")
+
+        // MARK: - Preview: Ground Beef 1 lb * $5.00 + Onion 2 lb * $1.00 = $7.00
+        let plateCostPredicate = NSPredicate(format: "label CONTAINS[c] %@", "Plate $7.00")
+        let editorPlateCost = app.staticTexts.containing(plateCostPredicate).firstMatch
+        XCTAssertTrue(editorPlateCost.waitForExistence(timeout: 5), "editor preview never showed Plate $7.00")
+
+        let saveButton = app.buttons["Save"]
+        XCTAssertTrue(saveButton.isEnabled, "Save stayed disabled -- canEditRecipes gate or validation didn't clear")
+        saveButton.tap()
+
+        // MARK: - Dashboard: the new recipe shows the SAME plate cost
+        // `save()` calls `dismiss()` synchronously (RecipeEditorView.swift:456)
+        // after the local write, popping straight back to the Dashboard
+        // tab's root -- no extra tab tap needed.
+        XCTAssertTrue(app.staticTexts["Acceptance Bowl"].waitForExistence(timeout: 10), "Dashboard menu never listed the new recipe")
+        let dashboardPlateCost = app.staticTexts.containing(plateCostPredicate).firstMatch
+        XCTAssertTrue(dashboardPlateCost.waitForExistence(timeout: 5), "Dashboard menu row never showed Plate $7.00")
+
+        // MARK: - Sync: 3 ops pushed (1 recipe insert + 2 recipe_items inserts)
+        let syncedAfterCreate = app.buttons["Synced \u{2713}"]
+        XCTAssertTrue(syncedAfterCreate.waitForExistence(timeout: 20), "sync chip never returned to Synced after the recipe create")
+
+        print("CHECKPOINT 1 (create+sync complete): pausing 10s -- docs/runbooks/phase-2b-acceptance.md's SQL asserts 1 recipes row + 2 LIVE recipe_items rows here, before the edit below changes anything")
+        Thread.sleep(forTimeInterval: 10)
+
+        // MARK: - Edit: Onion's quantity "2.0000" -> "2.0005" (backspace one digit, retype)
+        // Task 9's own report: three separate clear-then-retype techniques
+        // on this exact right-aligned Qty field proved unreliable in this
+        // simulator/iOS build, so this edit avoids a full clear too -- but
+        // TWO append-only attempts while writing this test both failed to
+        // produce a SERVER-observable change, for two different reasons,
+        // both confirmed live (not theorized) via the SQL in
+        // docs/runbooks/phase-2b-acceptance.md:
+        //   1. Appending ".5" onto the pre-filled "2.0000" (the field
+        //      loads the SERVER-canonical value, the pull half of
+        //      checkpoint 1's sync already echoed it back -- not the "2"
+        //      this suite originally typed) produces the invalid
+        //      two-decimal-point string "2.0000.5", which
+        //      `Rational.parseDec` correctly rejects, leaving the stored
+        //      value silently unchanged.
+        //   2. Appending a single valid trailing digit ("2.0000" + "1" =
+        //      "2.00001") parses fine and DOES commit and push -- but lands
+        //      in the column's 5th decimal place, and `recipe_items
+        //      .qty_base_units` is `numeric(14,4)` (0012_business_tables
+        //      .sql:77): the server rounds it straight back down to
+        //      "2.0000" on write, indistinguishable from a no-op. This is
+        //      the EXACT pitfall Task 9's own report already flagged for
+        //      its own "111"-appended qty edit ("an artifact of this
+        //      walk's own arbitrarily-chosen test value, not a bug") --
+        //      that task only needed the CLIENT op count, not a
+        //      server-observable value, so it could shrug the rounding off;
+        //      this task's brief explicitly needs the server row itself to
+        //      read as changed, so the same shortcut does not work here.
+        // The fix: delete the trailing digit (one backspace, landing on the
+        // 4th decimal place, not a 5th) before typing its replacement --
+        // still never a full clear, and the result stays within the
+        // column's own precision.
+        app.staticTexts["Acceptance Bowl"].tap()
+        // Which "Qty" field is Onion's is NOT `boundBy: 1` reliably here --
+        // `editLinesSection`'s `ForEach(lines, ...)` is fed by
+        // `LocalStore.liveRecipeItems(recipeId:)`'s `ORDER BY id`
+        // (LocalStore.swift:385-391), and `UUIDv7.generate` mixes in
+        // CSPRNG-random bits for same-millisecond ties (UUIDv7.swift:19-23,
+        // no monotonic counter) -- `saveNewRecipe` mints both lines' row
+        // ids from the SAME `now`, so which of Ground Beef's/Onion's ids
+        // sorts first is effectively a coin flip per run (reproduced live:
+        // an earlier full-suite run silently edited the wrong row this
+        // way, and the SQL after it showed Onion's qty unchanged). Locating
+        // by the row's own visible ingredient name, not position, is
+        // robust to that.
+        let onionLabel = app.staticTexts["Onion"]
+        XCTAssertTrue(scrollToReveal(onionLabel, in: app), "Onion's line never scrolled into view on the edit screen")
+        let onionRowY = onionLabel.frame.midY
+        let onionQtyField = app.textFields.matching(identifier: "Qty").allElementsBoundByIndex
+            .min { abs($0.frame.midY - onionRowY) < abs($1.frame.midY - onionRowY) }
+        guard let onionQtyField else {
+            XCTFail("no Qty field found on Onion's row")
+            return
+        }
+        onionQtyField.tap()
+        onionQtyField.typeText("\u{8}5")
+
+        // `commitQty`'s own 500ms debounce (RecipeEditorView.swift:747-754)
+        // runs independently of this view's lifecycle -- wait it out HERE,
+        // still on the edit screen, before navigating away, so the local
+        // write and `syncSoon()` call are unambiguously already in flight.
+        Thread.sleep(forTimeInterval: 1.2)
+
+        // The sync chip only lives in each tab's own root toolbar, not on a
+        // screen pushed on top of it (Task 9's own finding) -- pop back to
+        // it via the navigation bar's own back button (its accessibility
+        // label mirrors the PREVIOUS screen's title, "Dashboard", since
+        // this editor was pushed directly off the Dashboard tab's root).
+        // The decimal-pad keyboard is still up from the qty edit and
+        // covers the tab bar at the bottom of the screen entirely
+        // (reproduced live: tapping `app.tabBars.buttons["Dashboard"]`
+        // while the keyboard was showing computed an off-screen {-1, -1}
+        // hit point and silently failed to navigate) -- the nav bar back
+        // button sits at the TOP, never covered by the keyboard.
+        app.navigationBars.buttons["Dashboard"].tap()
+        XCTAssertTrue(app.staticTexts["Acceptance Bowl"].waitForExistence(timeout: 10), "never returned to the Dashboard menu after the qty edit")
+
+        let syncedAfterEdit = app.buttons["Synced \u{2713}"]
+        XCTAssertTrue(syncedAfterEdit.waitForExistence(timeout: 20), "sync chip never returned to Synced after the quantity edit")
+
+        print("CHECKPOINT 2 (edit+sync complete): pausing 10s -- docs/runbooks/phase-2b-acceptance.md's SQL asserts Onion's changed qty_base_units and no duplicate line here, before the delete below tombstones both lines")
+        Thread.sleep(forTimeInterval: 10)
+
+        // MARK: - Delete: tombstones the recipe AND both lines (the fan-out proof)
+        app.staticTexts["Acceptance Bowl"].tap()
+        let deleteRecipeButton = app.buttons["Delete Recipe"]
+        // Below the fold on this two-line recipe's Form (the same lazy-List
+        // gap as the "Name" field earlier) -- `scrollToReveal` (this file's
+        // own helper) drags in small steps rather than a single swipe that
+        // could jump clean over it.
+        XCTAssertTrue(scrollToReveal(deleteRecipeButton, in: app), "Delete Recipe button never scrolled into view")
+        deleteRecipeButton.tap()
+
+        let confirmDeleteButton = app.buttons["Delete"]
+        XCTAssertTrue(confirmDeleteButton.waitForExistence(timeout: 5), "delete confirmation dialog never appeared")
+        confirmDeleteButton.tap()
+
+        // `deleteRecipe()` calls `dismiss()` synchronously right after
+        // `tombstoneRecipe` (RecipeEditorView.swift:849-861) -- straight
+        // back to the Dashboard root, same as Save above.
+        XCTAssertTrue(
+            app.staticTexts["No recipes yet. Tap + to build your first one."].waitForExistence(timeout: 10),
+            "Acceptance Bowl still listed (or menu section didn't fall back to its empty state) after delete")
+
+        let syncedAfterDelete = app.buttons["Synced \u{2713}"]
+        XCTAssertTrue(syncedAfterDelete.waitForExistence(timeout: 20), "sync chip never returned to Synced after the recipe delete")
+
+        print("CHECKPOINT 3 (delete+sync complete): docs/runbooks/phase-2b-acceptance.md's final SQL asserts the recipe AND both lines are tombstoned server-side -- no fixed pause needed, this state is stable for the rest of the run")
     }
 }
