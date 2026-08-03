@@ -29,6 +29,17 @@ final class BackgroundUploader: NSObject, URLSessionTaskDelegate {
     private var isPumping = false
 
     private lazy var session: URLSession = {
+        // UITEST substitutes a foreground session: the simulator's
+        // background-transfer daemon fails loopback PUTs outright with a
+        // bare NSURLErrorUnknown before any request leaves the process
+        // (reproduced in the 3a acceptance run), so the headless walk
+        // cannot exist over the real config. Same seam rule as
+        // AppModel.pageSource -- substitute exactly the piece the simulator
+        // cannot run, keep every other line of this file identical. The
+        // true background path is the runbook's manual device pass.
+        if ProcessInfo.processInfo.environment["UITEST"] == "1" {
+            return URLSession(configuration: .ephemeral, delegate: self, delegateQueue: nil)
+        }
         let config = URLSessionConfiguration.background(
             withIdentifier: Self.sessionIdentifier)
         // A kitchen phone leaves the building mid-upload constantly; let

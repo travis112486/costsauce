@@ -133,7 +133,13 @@ class MergeIn(BaseModel):
 
 class SyncOpIn(BaseModel):
     op_id: uuid.UUID
-    table: Literal["ingredients", "recipes", "recipe_items", "purchases"]
+    # Must track api/services/sync.py's TABLE_ORDER exactly -- this Literal
+    # is a second allowlist in FRONT of the service's own, and the 3a
+    # acceptance walk caught it lagging (422 on every invoice push before
+    # the service constants were ever consulted). test_sync_service.py pins
+    # the two together now.
+    table: Literal["ingredients", "recipes", "recipe_items",
+                   "invoices", "invoice_pages", "purchases"]
     row_id: uuid.UUID
     location_id: uuid.UUID
     # AwareDatetime, not datetime: pydantic v2's plain `datetime` silently

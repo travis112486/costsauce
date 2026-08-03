@@ -430,3 +430,19 @@ def test_invoice_field_allowlists_exclude_identity_and_server_owned_columns():
     # invoice_id and page_no identify the page; repointing is not sync's job.
     assert "invoice_id" not in UPDATE_FIELDS["invoice_pages"]
     assert "page_no" not in UPDATE_FIELDS["invoice_pages"]
+
+
+def test_sync_op_wire_model_accepts_every_table_in_table_order():
+    """SyncOpIn.table is a Literal -- a SECOND allowlist sitting in FRONT of
+    this module's own constants, and the 3a acceptance walk caught it
+    lagging TABLE_ORDER: every push carrying an invoice op 422'd at the wire
+    model before the service was ever consulted. Pinning the two together
+    makes the next new table fail HERE, in a unit test, not in an end-to-end
+    walk an hour into an acceptance run."""
+    from typing import get_args
+
+    from api.models import SyncOpIn
+
+    allowed = set(get_args(SyncOpIn.model_fields["table"].annotation))
+    assert allowed == set(TABLE_ORDER), (
+        "api/models.py's SyncOpIn.table Literal and TABLE_ORDER disagree")

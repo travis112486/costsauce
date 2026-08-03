@@ -34,6 +34,11 @@ struct MainTabView: View {
                     PurchaseEntryView(appModel: appModel)
                 }
             }
+            Tab("Invoices", systemImage: "doc.viewfinder") {
+                TabRootView(title: "Invoices", appModel: appModel, reauthPresented: $reauthPresented) {
+                    InvoiceListView(appModel: appModel)
+                }
+            }
             Tab("Settings", systemImage: "gearshape") {
                 TabRootView(title: "Settings", appModel: appModel, reauthPresented: $reauthPresented) {
                     SettingsView(appModel: appModel)

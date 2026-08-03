@@ -495,6 +495,114 @@ final class SmokeTests: XCTestCase {
         print("CHECKPOINT 3 (delete+sync complete): docs/runbooks/phase-2b-acceptance.md's final SQL asserts the recipe AND both lines are tombstoned server-side -- no fixed pause needed, this state is stable for the rest of the run")
     }
 
+    // MARK: - Phase 3a: capture -> upload -> photo-assisted purchase
+
+    /// Capture -> upload -> photo-assisted purchase -> synced, against a
+    /// real local stack (plus the runbook's storage stub for the signed
+    /// PUT). Runs headless because Task 6's `ScannedPageSource` seam feeds
+    /// a fixture page where the scanner's output would land -- the
+    /// simulator has no camera, so without that seam this test could not
+    /// exist at all. The real `VNDocumentCameraViewController` path is
+    /// therefore NEVER exercised by automation; the runbook's coverage-gap
+    /// section owns that manual pass.
+    func testInvoiceCaptureUploadAndPhotoAssistedPurchase() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment = [
+            "API_BASE_URL": apiBaseURL,
+            "UITEST": "1",
+            "REVIEWER_EMAIL": reviewerEmail,
+            "REVIEWER_CODE": reviewerCode,
+        ]
+        app.launch()
+        loginAndAwaitBootstrap(app)
+
+        // MARK: - Invoices tab -> capture a fixture page
+        let invoicesTab = app.tabBars.buttons["Invoices"]
+        XCTAssertTrue(invoicesTab.waitForExistence(timeout: 10), "Invoices tab never appeared")
+        invoicesTab.tap()
+
+        let captureButton = app.buttons["Capture Invoice"]
+        XCTAssertTrue(captureButton.waitForExistence(timeout: 10), "capture entry point never appeared")
+        captureButton.tap()
+
+        let scanButton = app.buttons["Scan Invoice"]
+        XCTAssertTrue(scanButton.waitForExistence(timeout: 10), "capture screen never appeared")
+        scanButton.tap()
+
+        // The fixture page passes both quality gates, so it is accepted
+        // without a retake prompt and the invoice is minted.
+        XCTAssertTrue(
+            app.staticTexts["1 page"].waitForExistence(timeout: 10),
+            "the captured page never landed on an invoice")
+
+        // Done pops to the list root -- the sync chip only lives in each
+        // tab's own root toolbar (2b's finding).
+        app.buttons["Done"].tap()
+
+        let syncedChip = app.buttons["Synced \u{2713}"]
+        XCTAssertTrue(
+            syncedChip.waitForExistence(timeout: 30),
+            "sync chip never reached Synced -- the invoice/page ops did not push")
+
+        // The chip's "Synced ✓" is `syncState` alone -- it says nothing
+        // about the upload outbox (the first acceptance run passed the chip
+        // wait while the PUT was failing). The row's own indicator is the
+        // §9-visible signal that flips only when the bytes landed AND the
+        // confirm endpoint recorded them, so THIS is the upload assertion.
+        XCTAssertTrue(
+            app.images["Uploaded"].waitForExistence(timeout: 30),
+            "the page never reached the uploaded state -- the PUT or the confirm did not complete")
+
+        // MARK: - photo-assisted purchase against the visible page
+        let invoiceRow = app.staticTexts["1 page"]
+        XCTAssertTrue(invoiceRow.waitForExistence(timeout: 10), "the invoice list never showed the captured invoice")
+        invoiceRow.tap()
+
+        let addFromPage = app.buttons["Add purchase from this page"]
+        XCTAssertTrue(addFromPage.waitForExistence(timeout: 10), "the page view never offered photo-assisted entry")
+        addFromPage.tap()
+
+        let nameField = app.textFields["Ingredient name"]
+        XCTAssertTrue(nameField.waitForExistence(timeout: 10))
+        nameField.tap()
+        nameField.typeText("chicken br")
+
+        // Same fuzzy-pick as the Add tab: the chip appearing IS the pick.
+        let selectedChip = app.staticTexts["Chicken Breast"]
+        XCTAssertTrue(selectedChip.waitForExistence(timeout: 10), "fuzzy match never surfaced Chicken Breast")
+
+        let qtyField = app.textFields["Quantity"]
+        XCTAssertTrue(qtyField.waitForExistence(timeout: 5))
+        qtyField.tap()
+        qtyField.typeText("10")
+
+        let totalField = app.textFields["Total price"]
+        XCTAssertTrue(totalField.exists)
+        totalField.tap()
+        totalField.typeText("32.00")
+
+        let saveButton = app.buttons["Save Purchase"]
+        XCTAssertTrue(saveButton.isEnabled, "Save Purchase stayed disabled")
+        saveButton.tap()
+
+        // Success banner: 32.00 / 10 lb = $3.200000/lb.
+        let successPredicate = NSPredicate(format: "label CONTAINS[c] %@", "3.200000")
+        XCTAssertTrue(
+            app.staticTexts.containing(successPredicate).firstMatch.waitForExistence(timeout: 10),
+            "save succeeded but no 3.200000 unit price shown")
+
+        // Pop back to the Invoices root for the chip -- nav-bar back
+        // buttons mirror the PREVIOUS screen's title and sit at the top,
+        // never covered by the decimal keyboard (2b's finding).
+        app.navigationBars.buttons["Invoice"].tap()
+        app.navigationBars.buttons["Invoices"].tap()
+        XCTAssertTrue(
+            syncedChip.waitForExistence(timeout: 30),
+            "sync chip never returned to Synced after the photo-assisted purchase")
+
+        print("CHECKPOINT 1 (capture+purchase synced): the runbook's SQL asserts one invoices row, one invoice_pages row with a non-null sha256, and a purchase whose invoice_page_id matches that page")
+    }
+
     /// The negative case for the create path's staged pick -- the coverage
     /// gap the final review named, and a direct regression test for the bug
     /// `addStagedIngredient`'s doc comment describes.
