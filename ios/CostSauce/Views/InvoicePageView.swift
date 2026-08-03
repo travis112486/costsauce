@@ -5,9 +5,10 @@
 //
 // The image comes off the local file when it exists. When it does not --
 // eviction removes the file, never the row, and a page pulled from another
-// device never had one here -- the view says so plainly rather than
-// spinning: re-downloading an uploaded page from storage is 3b's, arriving
-// with the signed-download endpoint the parser work introduces.
+// device never had one here -- the view re-downloads it from storage via
+// the signed-download endpoint and holds the bytes in memory only: writing
+// them back to disk would just have the age-based eviction sweep delete
+// them again on the next foreground pass.
 
 import SwiftUI
 import UIKit
@@ -22,12 +23,27 @@ struct InvoicePageView: View {
     @State private var steadyZoom: CGFloat = 1
     @GestureState private var gestureZoom: CGFloat = 1
 
+    /// Re-downloaded bytes live HERE and never touch disk. Writing them back
+    /// would thrash: the age rule evicts any uploaded page past 90 days
+    /// regardless of size, so a restored old page would be deleted again on
+    /// the very next foreground sweep -- and old invoices are exactly the
+    /// ones people reopen during a dispute.
+    @State private var downloaded: [String: UIImage] = [:]
+    @State private var downloadFailure: DownloadFailure?
+    @State private var isDownloading = false
+
+    private enum DownloadFailure: Equatable { case offline, failed }
+
     var body: some View {
         content
             .navigationTitle("Invoice")
             .navigationBarTitleDisplayMode(.inline)
             .task {
                 load()
+                if let pages, let page = selectedPage(in: pages),
+                   localImage(for: page) == nil, downloaded[page.id] == nil {
+                    await download(page)
+                }
             }
     }
 
@@ -59,22 +75,13 @@ struct InvoicePageView: View {
             }
 
             if let image = localImage(for: page) {
-                GeometryReader { proxy in
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: proxy.size.width, height: proxy.size.height)
-                        .scaleEffect(zoom)
-                        .clipped()
-                        .contentShape(Rectangle())
-                        .gesture(magnification)
-                        .accessibilityLabel("Invoice page \(page.page_no)")
-                }
+                pageImage(image, page: page)
+            } else if let image = downloaded[page.id] {
+                pageImage(image, page: page)
+            } else if isDownloading {
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ContentUnavailableView(
-                    "Photo Not on This Device", systemImage: "icloud",
-                    description: Text(
-                        "This page was uploaded and its local copy is no longer cached here."))
+                unavailable(page)
             }
 
             NavigationLink {
@@ -88,6 +95,25 @@ struct InvoicePageView: View {
             .buttonStyle(.borderedProminent)
             .padding([.horizontal, .bottom])
             .accessibilityLabel("Add purchase from this page")
+        }
+    }
+
+    /// One definition of the zoom and accessibility behaviour for a rendered
+    /// page image, called by both the local-file branch and the
+    /// re-downloaded branch -- so a future change to either can't land on
+    /// only one copy.
+    @ViewBuilder
+    private func pageImage(_ image: UIImage, page: LocalInvoicePage) -> some View {
+        GeometryReader { proxy in
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFit()
+                .frame(width: proxy.size.width, height: proxy.size.height)
+                .scaleEffect(zoom)
+                .clipped()
+                .contentShape(Rectangle())
+                .gesture(magnification)
+                .accessibilityLabel("Invoice page \(page.page_no)")
         }
     }
 
@@ -136,5 +162,61 @@ struct InvoicePageView: View {
               let fileURL = try? InvoiceFiles.url(invoiceId: page.invoice_id, pageNo: pageNo)
         else { return nil }
         return UIImage(contentsOfFile: fileURL.path)
+    }
+
+    // MARK: - download
+
+    /// Offline and broken get DIFFERENT copy: someone in a walk-in cooler
+    /// needs to know whether waiting will help. Everything that is not a
+    /// transport failure -- including the endpoint's 409 -- is the generic
+    /// error, because a 409 is unreachable for a page this device evicted
+    /// and a third message for an unactionable case is not worth the string.
+    @ViewBuilder
+    private func unavailable(_ page: LocalInvoicePage) -> some View {
+        VStack(spacing: 12) {
+            if downloadFailure == .offline {
+                ContentUnavailableView(
+                    "Photo Needs a Connection", systemImage: "icloud.slash",
+                    description: Text("It's stored safely — reconnect to view it."))
+            } else {
+                ContentUnavailableView(
+                    "Photo Couldn't Be Loaded", systemImage: "icloud",
+                    description: Text("This page's photo isn't on this device."))
+            }
+            Button("Retry") {
+                Task { await download(page) }
+            }
+            .buttonStyle(.bordered)
+            .accessibilityIdentifier("retryPageDownload")
+        }
+    }
+
+    private func download(_ page: LocalInvoicePage) async {
+        guard let pageNo = Int(page.page_no) else {
+            downloadFailure = .failed
+            return
+        }
+        isDownloading = true
+        downloadFailure = nil
+        defer { isDownloading = false }
+        do {
+            let signed = try await appModel.api.downloadURL(
+                invoiceId: page.invoice_id, pageNo: pageNo)
+            guard let url = URL(string: signed.url) else {
+                downloadFailure = .failed
+                return
+            }
+            let (data, _) = try await URLSession.shared.data(from: url)
+            guard let image = UIImage(data: data) else {
+                downloadFailure = .failed
+                return
+            }
+            downloaded[page.id] = image
+        } catch let error as URLError where
+            error.code == .notConnectedToInternet || error.code == .networkConnectionLost {
+            downloadFailure = .offline
+        } catch {
+            downloadFailure = .failed
+        }
     }
 }
