@@ -29,6 +29,7 @@ TENANT_TABLES = (
     "profiles", "email_verifications", "apple_link_requests",
     "ingredients", "purchases", "recipes", "recipe_items",
     "sync_ops",
+    "invoices", "invoice_pages",
 )
 
 

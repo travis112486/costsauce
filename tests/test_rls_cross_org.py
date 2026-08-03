@@ -78,6 +78,21 @@ async def two_orgs(raw_conn):
         ids[f"{side}_recipe"] = recipe
         ids[f"{side}_item"] = await add_recipe_item(raw_conn, loc, recipe, ing, 1)
 
+        # Phase 3a's two capture tables. No factory yet -- these rows are
+        # minted by the device, not by any server-side helper, so there is
+        # nothing in tests/factories.py to reuse.
+        cur = await raw_conn.execute(
+            "INSERT INTO invoices (location_id, captured_at, client_mutated_at)"
+            " VALUES (%s, now(), now()) RETURNING id", (loc,))
+        (invoice,) = await cur.fetchone()
+        ids[f"{side}_invoice"] = invoice
+        cur = await raw_conn.execute(
+            "INSERT INTO invoice_pages (invoice_id, location_id, page_no,"
+            " storage_path, client_mutated_at)"
+            " VALUES (%s, %s, 1, %s, now()) RETURNING id",
+            (invoice, loc, f"{side}/{invoice}/1.jpg"))
+        (ids[f"{side}_invoice_page"],) = await cur.fetchone()
+
     for side, org, user in (("acme", acme, alice), ("bistro", bistro, bob)):
         cur = await raw_conn.execute(
             "INSERT INTO invites (org_id, email, role, token_hash, invited_by, expires_at)"
@@ -193,6 +208,23 @@ def spec(two_orgs):
             insert=("INSERT INTO sync_ops (op_id, org_id, batch_id, result_json)"
                     " VALUES (uuid_generate_v7(), %s, uuid_generate_v7(), '{}')",
                     (t["bistro"],)),
+        ),
+        "invoices": dict(
+            key="id", mine=t["acme_invoice"], theirs=t["bistro_invoice"],
+            col="parse_status", val="failed",
+            insert=("INSERT INTO invoices (location_id, captured_at, client_mutated_at)"
+                    " VALUES (%s, now(), now())", (t["bistro_loc"],)),
+        ),
+        "invoice_pages": dict(
+            key="id", mine=t["acme_invoice_page"], theirs=t["bistro_invoice_page"],
+            col="storage_path", val="pwned/1.jpg",
+            # page_no 2, not 1: the cross-org insert must be refused by the
+            # POLICY, and reusing page 1 would collide with the seeded row on
+            # invoice_pages_live_uq first -- passing for the wrong reason.
+            insert=("INSERT INTO invoice_pages (invoice_id, location_id, page_no,"
+                    " storage_path, client_mutated_at)"
+                    " VALUES (%s, %s, 2, 'trojan/2.jpg', now())",
+                    (t["bistro_invoice"], t["bistro_loc"])),
         ),
     }
 
