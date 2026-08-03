@@ -612,12 +612,66 @@ async def confirm_upload(invoice_id: str, page_no: int, body: ConfirmBody,
     return Response(status_code=204)
 ```
 
-`sign_put(path)` is the Supabase Storage signing call; implement it beside this
-router using the same service-role client the codebase already configures, and
-have it return `(url, expires_at_iso)`. If no such client exists yet, add it
-here — it is this task's deliverable, not a later one's.
+- [ ] **Step 4: Write the signing call**
 
-- [ ] **Step 4: Register the router**
+Nothing in the codebase talks to Supabase Storage yet, so this is new and
+belongs to this task. Supabase mints an upload token via
+`POST /storage/v1/object/upload/sign/{bucket}/{path}` with the service-role
+key, returning `{"url": "/object/upload/sign/<bucket>/<path>?token=..."}` —
+a relative path that must be joined onto the storage origin before it is
+usable by a client.
+
+```python
+# api/routes/invoices.py -- above the router definition
+import os
+from datetime import datetime, timedelta, timezone
+
+import httpx
+
+BUCKET = "invoices"
+UPLOAD_URL_TTL_SECONDS = 3600
+
+
+async def sign_put(path: str) -> tuple[str, str]:
+    """A pre-signed upload URL for `path`, and when it expires.
+
+    Service-role, never the anon key: this signs a write into a PRIVATE
+    bucket, and the anon key cannot. The token is scoped to this exact
+    object path, so it grants nothing beyond the one page it was minted for.
+
+    Minted per attempt rather than cached -- the client uploads over a
+    background session that may not run until hours later (a phone that left
+    the building), by which point a cached URL has expired.
+    """
+    base = os.environ["SUPABASE_URL"].rstrip("/")
+    key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.post(
+            f"{base}/storage/v1/object/upload/sign/{BUCKET}/{path}",
+            headers={"Authorization": f"Bearer {key}"},
+            json={"expiresIn": UPLOAD_URL_TTL_SECONDS},
+        )
+    if response.status_code != 200:
+        raise HTTPException(
+            status_code=502, detail="could not sign the upload URL")
+    signed = response.json()["url"]
+    expires_at = (
+        datetime.now(timezone.utc) + timedelta(seconds=UPLOAD_URL_TTL_SECONDS)
+    ).isoformat()
+    return f"{base}/storage/v1{signed}", expires_at
+```
+
+The bucket itself is created once, out of band, as a **private** bucket named
+`invoices`. Record that in the Task 10 runbook as a deployment prerequisite —
+it is not created by a migration, so a fresh environment silently 502s on
+every upload until someone makes it.
+
+For the tests, monkeypatch `sign_put` to return a fixed
+`("https://storage.test/put/abc", "2026-08-03T12:00:00+00:00")` rather than
+reaching a real Supabase — these tests assert this API's behaviour, not
+Supabase's.
+
+- [ ] **Step 5: Register the router**
 
 ```python
 # api/main.py -- beside the existing router registrations
@@ -625,12 +679,12 @@ from api.routes import invoices
 app.include_router(invoices.router)
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+- [ ] **Step 6: Run test to verify it passes**
 
 Run: `uv run pytest tests/test_invoices.py -v`
 Expected: PASS, 11 tests
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add api/routes/invoices.py api/main.py tests/test_invoices.py
@@ -652,6 +706,7 @@ git commit -m "feat(3a): pre-signed page upload URLs and their confirmation"
 **Interfaces:**
 - Consumes: Task 3's `storage_path` definition.
 - Produces: `StoragePath.forPage(orgId:invoiceId:pageNo:) -> String`; records `LocalInvoice(id:location_id:captured_at:parse_status:client_mutated_at:server_seq:updated_at:deleted_at:created_at:)`, `LocalInvoicePage(id:invoice_id:location_id:page_no:storage_path:width:height:sha256:client_mutated_at:server_seq:updated_at:deleted_at:created_at:)` (all columns `String`/`String?` except `server_seq: Int64`, per Global Constraints — `page_no`, `width`, `height` are TEXT locally), and `PendingUpload(page_id:local_path:state:attempts:last_error:created_at:)`.
+- Also produces the upload-queue store accessors, because they belong with the table this task creates and **Task 6 calls `enqueueUpload` before Task 7 exists**: `LocalStore.enqueueUpload(pageId:localPath:now:) throws`, `LocalStore.pendingUploads() throws -> [PendingUpload]`, `LocalStore.updateUpload(_ upload: PendingUpload) throws`, `LocalStore.pendingUploadCount() throws -> Int`.
 - `LocalStore.knownTables` gains both table names.
 
 **Four dispatch points must all be updated, or the failure is silent:** `knownTables` (`LocalStore.swift:22`), `upsert` (`:137`), `insertStub` (`:219`), and the wipe (`:442-445`). A missed `insertStub` case throws `unknownTable` only when an offline insert is first enqueued — not at build time.
@@ -1233,8 +1288,1072 @@ git commit -m "feat(3a): LocalEdits invoice helpers and offline invoice converge
 
 ---
 
-### Tasks 6–10
+### Task 6: Capture UI, the quality gates, and the test seam
 
-Written in the continuation of this plan. Boundaries, files, and interfaces
-are fixed in the File Structure and Task List above; Tasks 1–5 establish
-every type and signature they consume.
+**Files:**
+- Create: `ios/CostSauce/Views/InvoiceCaptureView.swift`
+- Create: `ios/CostSauce/Capture/ScannedPageSource.swift`
+- Create: `ios/CostSauceKit/Sources/CostSauceKit/Capture/PageQuality.swift`
+- Create: `ios/CostSauceKit/Tests/CostSauceKitTests/PageQualityTests.swift`
+
+**Interfaces:**
+- Consumes: Task 5's `createInvoice` / `addInvoicePage`.
+- Produces: `PageQuality.assess(width:height:laplacianVariance:) -> PageQuality.Verdict` where `Verdict` is `.accept` or `.retake(reason: String)`; `PageQuality.minimumLongEdge: Int` and `PageQuality.minimumSharpness: Double`; `PageQuality.laplacianVariance(of: CGImage) -> Double` (the Accelerate measurement, kept separate from the pure judgement so thresholds stay testable without an image); protocol `ScannedPageSource` with `func pages(presentingFrom: UIViewController) async -> [CGImage]`, implemented by `DocumentScannerSource` (real) and `FixturePageSource` (UITEST); `InvoiceFiles.write(_:invoiceId:pageNo:) throws -> String`.
+
+**This task carries the acceptance test's only viable seam.** `VNDocumentCameraViewController` cannot run in the simulator — there is no camera — so if capture reaches the scanner directly, Task 10's walk is impossible and 3a ships with its central flow unautomatable, exactly as 2b did with swipe-to-remove. `InvoiceCaptureView` therefore depends on the `ScannedPageSource` protocol, never on VisionKit directly, and `AppModel` picks the implementation from the `UITEST` environment variable it already reads.
+
+**Setting the two thresholds is part of this task, and must be recorded.** The spec deliberately gives no values: a sharpness cutoff picked from intuition either passes blurry pages or rejects good ones. Calibrate against real photographs — if Travis's bad-photo fixture set (which gates 3b) has arrived, use it; otherwise photograph a handful of invoices deliberately badly. Write the chosen numbers and the sample they came from into `PageQuality`'s doc comment. A threshold with no recorded provenance cannot be re-tuned by anyone later.
+
+The variance-of-Laplacian is computed on a grayscale downscale of the page and is plain image processing, never text recognition — the parent spec's D4 bars on-device OCR, not on-device image statistics.
+
+- [ ] **Step 1: Write the failing test**
+
+```swift
+// ios/CostSauceKit/Tests/CostSauceKitTests/PageQualityTests.swift
+import Testing
+@testable import CostSauceKit
+
+@Suite struct PageQualityTests {
+
+    @Test func acceptsASharpFullResolutionPage() {
+        let verdict = PageQuality.assess(
+            width: 1700, height: 2200,
+            laplacianVariance: PageQuality.minimumSharpness + 1)
+        #expect(verdict == .accept)
+    }
+
+    /// Long edge, not width: an invoice photographed in landscape is still
+    /// the same number of pixels across its longest dimension.
+    @Test func measuresTheLongEdgeRegardlessOfOrientation() {
+        let portrait = PageQuality.assess(
+            width: 100, height: PageQuality.minimumLongEdge,
+            laplacianVariance: PageQuality.minimumSharpness + 1)
+        let landscape = PageQuality.assess(
+            width: PageQuality.minimumLongEdge, height: 100,
+            laplacianVariance: PageQuality.minimumSharpness + 1)
+        #expect(portrait == .accept)
+        #expect(landscape == .accept)
+    }
+
+    @Test func refusesAPageBelowTheResolutionFloor() {
+        let verdict = PageQuality.assess(
+            width: PageQuality.minimumLongEdge - 1,
+            height: PageQuality.minimumLongEdge - 1,
+            laplacianVariance: PageQuality.minimumSharpness + 1)
+        #expect(verdict != .accept)
+    }
+
+    @Test func refusesABlurryPage() {
+        let verdict = PageQuality.assess(
+            width: 1700, height: 2200,
+            laplacianVariance: PageQuality.minimumSharpness - 0.01)
+        #expect(verdict != .accept)
+    }
+
+    /// The reason is shown to a cook holding a phone over a delivery, so it
+    /// has to say which problem to fix -- "retake" alone is useless when the
+    /// page is sharp but too small, or large but blurred.
+    @Test func namesWhichGateFailed() {
+        guard case .retake(let blurReason) = PageQuality.assess(
+            width: 1700, height: 2200,
+            laplacianVariance: PageQuality.minimumSharpness - 0.01)
+        else { Issue.record("expected a retake verdict"); return }
+        #expect(blurReason.lowercased().contains("blur"))
+
+        guard case .retake(let sizeReason) = PageQuality.assess(
+            width: 10, height: 10,
+            laplacianVariance: PageQuality.minimumSharpness + 1)
+        else { Issue.record("expected a retake verdict"); return }
+        #expect(sizeReason.lowercased().contains("close"))
+    }
+}
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd ios/CostSauceKit && swift test --filter PageQualityTests`
+Expected: FAIL to build — `cannot find 'PageQuality' in scope`
+
+- [ ] **Step 3: Write `PageQuality`**
+
+```swift
+// ios/CostSauceKit/Sources/CostSauceKit/Capture/PageQuality.swift
+// The two gates a scanned page must pass before it is accepted (parent spec
+// §12 step 2). Pure arithmetic over measurements the caller supplies, so it
+// is testable without an image, a camera, or a simulator.
+//
+// This is image STATISTICS, not text recognition: the parent spec's D4 bars
+// on-device OCR and nothing else. The caller computes the variance of the
+// Laplacian over a grayscale downscale (Accelerate) and passes the number in.
+
+import Foundation
+
+public enum PageQuality: Equatable {
+
+    public enum Verdict: Equatable {
+        case accept
+        case retake(reason: String)
+    }
+
+    /// CALIBRATION: replace both numbers, and this note, with the values you
+    /// measured and the sample you measured them against, before this task is
+    /// considered done. A threshold whose provenance is not written down
+    /// cannot be re-tuned by anyone later -- they will not know whether it
+    /// was measured or guessed.
+    public static let minimumLongEdge: Int = 1600
+    public static let minimumSharpness: Double = 100.0
+
+    public static func assess(
+        width: Int, height: Int, laplacianVariance: Double
+    ) -> Verdict {
+        // Long edge, not width: a landscape invoice has the same detail.
+        guard max(width, height) >= minimumLongEdge else {
+            return .retake(reason: "Move closer — this page is too small to read.")
+        }
+        guard laplacianVariance >= minimumSharpness else {
+            return .retake(reason: "That came out blurry — hold still and try again.")
+        }
+        return .accept
+    }
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd ios/CostSauceKit && swift test --filter PageQualityTests`
+Expected: PASS, 5 tests
+
+- [ ] **Step 5: Write the page source and its fixture twin**
+
+```swift
+// ios/CostSauce/Capture/ScannedPageSource.swift
+// Capture's seam. InvoiceCaptureView depends on THIS, never on VisionKit
+// directly, because VNDocumentCameraViewController cannot run in the
+// simulator -- there is no camera. Without this protocol the acceptance
+// walk in Task 10 is impossible to write, and 3a would ship its central
+// flow permanently unautomatable, exactly as Phase 2b shipped
+// swipe-to-remove.
+
+import CoreGraphics
+import UIKit
+import VisionKit
+
+@MainActor
+protocol ScannedPageSource {
+    /// The scanned pages, in order, or an empty array if the user cancelled.
+    func pages(presentingFrom presenter: UIViewController) async -> [CGImage]
+}
+
+@MainActor
+struct DocumentScannerSource: ScannedPageSource {
+    func pages(presentingFrom presenter: UIViewController) async -> [CGImage] {
+        await withCheckedContinuation { continuation in
+            let controller = VNDocumentCameraViewController()
+            let delegate = ScannerDelegate(continuation: continuation)
+            controller.delegate = delegate
+            // The delegate is retained by the controller's coordinator box
+            // below; VNDocumentCameraViewController does not retain it.
+            objc_setAssociatedObject(
+                controller, &ScannerDelegate.associationKey, delegate, .OBJC_ASSOCIATION_RETAIN)
+            presenter.present(controller, animated: true)
+        }
+    }
+}
+
+/// Supplies fixture pages where the scanner's output would land, so the
+/// whole capture -> upload -> entry walk runs headless.
+@MainActor
+struct FixturePageSource: ScannedPageSource {
+    let images: [CGImage]
+
+    func pages(presentingFrom presenter: UIViewController) async -> [CGImage] {
+        images
+    }
+}
+```
+
+```swift
+// ios/CostSauce/Capture/ScannedPageSource.swift -- continued
+
+/// VisionKit's delegate, bridged to one `async` call.
+///
+/// `hasResumed` is not defensive clutter: this delegate has THREE terminal
+/// callbacks (finish, cancel, fail) and a continuation resumed twice traps
+/// the process, while one never resumed hangs capture forever with no error.
+/// Dismissal happens here rather than at the call site because all three
+/// paths must dismiss, and only this type sees all three.
+@MainActor
+final class ScannerDelegate: NSObject, VNDocumentCameraViewControllerDelegate {
+    nonisolated(unsafe) static var associationKey: UInt8 = 0
+
+    private var continuation: CheckedContinuation<[CGImage], Never>?
+
+    init(continuation: CheckedContinuation<[CGImage], Never>) {
+        self.continuation = continuation
+    }
+
+    private func finish(_ controller: VNDocumentCameraViewController, with pages: [CGImage]) {
+        guard let continuation else { return }
+        self.continuation = nil
+        controller.dismiss(animated: true)
+        continuation.resume(returning: pages)
+    }
+
+    func documentCameraViewController(
+        _ controller: VNDocumentCameraViewController, didFinishWith scan: VNDocumentCameraScan
+    ) {
+        let pages = (0..<scan.pageCount).compactMap { scan.imageOfPage(at: $0).cgImage }
+        finish(controller, with: pages)
+    }
+
+    func documentCameraViewControllerDidCancel(_ controller: VNDocumentCameraViewController) {
+        finish(controller, with: [])
+    }
+
+    func documentCameraViewController(
+        _ controller: VNDocumentCameraViewController, didFailWithError error: Error
+    ) {
+        // Empty, not a thrown error: a failed scan is indistinguishable from
+        // a cancelled one as far as this screen is concerned -- nothing was
+        // captured either way, and nothing has been minted yet to roll back.
+        finish(controller, with: [])
+    }
+}
+```
+
+In `AppModel`, expose the source, chosen the same way the existing `UITEST`
+flag is read:
+
+```swift
+/// UITEST substitutes a fixture page for the camera the simulator does not
+/// have. Same environment flag AppModel already consults to wipe the
+/// Keychain and store on launch.
+var pageSource: any ScannedPageSource {
+    ProcessInfo.processInfo.environment["UITEST"] == "1"
+        ? FixturePageSource(images: [Self.fixtureInvoicePage()])
+        : DocumentScannerSource()
+}
+```
+
+`fixtureInvoicePage()` renders a legible synthetic invoice into a `CGImage`
+at a resolution and sharpness that pass both gates — draw it with Core
+Graphics rather than bundling an asset, so the fixture cannot drift out of
+sync with the thresholds.
+
+- [ ] **Step 6: Write the capture view's ingest**
+
+The ordering below is the whole point of this method and is fixed by the
+parent spec §12 step 3 — row and bytes on disk before any network call.
+
+```swift
+// ios/CostSauce/Views/InvoiceCaptureView.swift -- the ingest
+
+/// Turns scanned images into a live invoice. Order is load-bearing:
+///  1. assess quality -- a refused page mints NOTHING, so a retake does not
+///     leave an orphan row or a stray file behind;
+///  2. mint the invoice, but only once the FIRST page has been accepted --
+///     minting it up front would leave an empty invoice behind whenever
+///     every page is refused or the user backs out;
+///  3. mint the page row, which hands back the storage key;
+///  4. write the JPEG;
+///  5. enqueue the upload;
+///  6. only now, touch the network.
+@MainActor
+private func ingest(_ images: [CGImage]) async {
+    guard let edits = appModel.edits, let orgId = appModel.orgId else { return }
+    var pageNo = 1
+    do {
+        for image in images {
+            let variance = PageQuality.laplacianVariance(of: image)
+            switch PageQuality.assess(
+                width: image.width, height: image.height, laplacianVariance: variance
+            ) {
+            case .retake(let reason):
+                retakeMessage = reason
+                continue  // Nothing minted, nothing written.
+            case .accept:
+                break
+            }
+
+            if invoiceId == nil {
+                invoiceId = try edits.createInvoice()
+            }
+            guard let invoiceId else { return }
+
+            let (pageId, _) = try edits.addInvoicePage(
+                invoiceId: invoiceId, pageNo: pageNo, orgId: orgId)
+            let localPath = try InvoiceFiles.write(image, invoiceId: invoiceId, pageNo: pageNo)
+            try appModel.store?.enqueueUpload(pageId: pageId, localPath: localPath)
+            pageNo += 1
+        }
+        appModel.syncSoon()
+    } catch let error as KernelError {
+        captureErrorMessage = error.message
+    } catch {
+        captureErrorMessage = error.localizedDescription
+    }
+}
+```
+
+`InvoiceFiles.write(_:invoiceId:pageNo:)` JPEG-encodes into
+`Application Support/invoices/{invoice}/{page}.jpg`, creating the directory
+with `NSFileProtectionComplete` (§13) exactly as `LocalStore.protectDirectory`
+already does for the database, and returns the absolute path.
+`PageQuality.laplacianVariance(of:)` is the Accelerate convolution feeding
+Step 3's pure `assess` — keep the measurement and the judgement separate, so
+the thresholds stay testable without an image.
+
+- [ ] **Step 7: Run the Kit suite and build the app**
+
+Run: `cd ios/CostSauceKit && swift test`
+Then: `cd ios && xcodebuild build -project CostSauce.xcodeproj -scheme CostSauce -destination 'platform=iOS Simulator,id=F71924C7-9272-4A35-AA66-82061A1E4A9D'`
+Expected: PASS, 185; `BUILD SUCCEEDED` with no new warnings
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add ios/CostSauceKit/Sources/CostSauceKit/Capture ios/CostSauceKit/Tests ios/CostSauce
+git commit -m "feat(3a): document-scanner capture, quality gates, and the fixture seam"
+```
+
+---
+
+### Task 7: The upload queue and the background uploader
+
+**Files:**
+- Create: `ios/CostSauceKit/Sources/CostSauceKit/Upload/UploadQueue.swift`
+- Create: `ios/CostSauceKit/Tests/CostSauceKitTests/UploadQueueTests.swift`
+- Create: `ios/CostSauce/Upload/BackgroundUploader.swift`
+
+**Interfaces:**
+- Consumes: Task 4's `PendingUpload` record and its four store accessors, Task 3's two endpoints.
+- Produces: `UploadQueue.next(from: [PendingUpload]) -> PendingUpload?`; `UploadQueue.backoffSeconds(attempts:) -> Double`; `UploadQueue.transition(_:on:) -> PendingUpload` where the event is `.started`, `.succeeded`, or `.failed(String)`; `ApiClient.uploadURL(forPage:)` and `ApiClient.confirmPage(_:sha256:width:height:)`.
+
+**Two member names to verify before writing this, not assume:** the uploader below reaches `appModel.api` and `appModel.orgId` (Task 6's ingest also uses `orgId`). Check what `AppModel` actually calls its `ApiClient` and its bound org id, and use those names — the store binds `(user_id, org_id, location_id)`, so the org id exists, but possibly reached via `store.meta()` rather than as a property.
+
+- [ ] **Step 1: Write the failing test**
+
+```swift
+// ios/CostSauceKit/Tests/CostSauceKitTests/UploadQueueTests.swift
+import Testing
+import Foundation
+@testable import CostSauceKit
+
+@Suite struct UploadQueueTests {
+
+    private func upload(
+        _ id: String, state: PendingUpload.State, attempts: Int = 0, createdAt: String = "1"
+    ) -> PendingUpload {
+        PendingUpload(page_id: id, local_path: "/tmp/\(id).jpg", state: state,
+                      attempts: attempts, last_error: nil, created_at: createdAt)
+    }
+
+    @Test func takesTheOldestQueuedUploadFirst() {
+        let next = UploadQueue.next(from: [
+            upload("b", state: .queued, createdAt: "2"),
+            upload("a", state: .queued, createdAt: "1"),
+        ])
+        #expect(next?.page_id == "a")
+    }
+
+    /// One at a time: a background session uploading four 12MB pages at once
+    /// on kitchen Wi-Fi is slower than four in sequence, and starves the op
+    /// push sharing the connection.
+    @Test func skipsAnUploadAlreadyInFlight() {
+        let next = UploadQueue.next(from: [
+            upload("a", state: .uploading),
+            upload("b", state: .queued),
+        ])
+        #expect(next == nil)
+    }
+
+    @Test func neverReturnsAnAlreadyUploadedPage() {
+        #expect(UploadQueue.next(from: [upload("a", state: .uploaded)]) == nil)
+    }
+
+    @Test func backoffGrowsWithAttemptsAndIsCapped() {
+        let first = UploadQueue.backoffSeconds(attempts: 1)
+        let later = UploadQueue.backoffSeconds(attempts: 5)
+        #expect(first < later)
+        // A page must not become unreachable because it failed all night.
+        #expect(UploadQueue.backoffSeconds(attempts: 99) <= 3600)
+    }
+
+    @Test func failureRecordsTheReasonAndCountsTheAttempt() {
+        let after = UploadQueue.transition(
+            upload("a", state: .uploading, attempts: 1), on: .failed("503"))
+        #expect(after.state == PendingUpload.State.failed.rawValue)
+        #expect(after.attempts == 2)
+        #expect(after.last_error == "503")
+    }
+
+    /// A failed upload returns to the queue rather than dying: the local
+    /// file is still the only copy, so giving up would strand it (§13).
+    @Test func aFailedUploadIsRetryableNotTerminal() {
+        let failed = UploadQueue.transition(
+            upload("a", state: .uploading, attempts: 1), on: .failed("timeout"))
+        #expect(UploadQueue.next(from: [failed])?.page_id == "a")
+    }
+
+    @Test func successIsTerminal() {
+        let done = UploadQueue.transition(upload("a", state: .uploading), on: .succeeded)
+        #expect(done.state == PendingUpload.State.uploaded.rawValue)
+        #expect(UploadQueue.next(from: [done]) == nil)
+    }
+}
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd ios/CostSauceKit && swift test --filter UploadQueueTests`
+Expected: FAIL to build — `cannot find 'UploadQueue' in scope`
+
+- [ ] **Step 3: Write `UploadQueue`**
+
+```swift
+// ios/CostSauceKit/Sources/CostSauceKit/Upload/UploadQueue.swift
+// The upload outbox's decisions, as pure functions over rows -- no network,
+// no filesystem, no URLSession -- so every rule below is unit-testable.
+// BackgroundUploader (app target) performs the transfers; this decides what
+// to send next and what a result means.
+//
+// Separate from pending_ops on purpose (spec 3a-D2): a stalled 12MB page
+// must never block the JSON op batch behind it.
+
+import Foundation
+
+public enum UploadQueue {
+
+    public enum Event: Equatable {
+        case started
+        case succeeded
+        case failed(String)
+    }
+
+    /// The oldest queued or previously-failed upload, or nil when one is
+    /// already in flight. One at a time: parallel large uploads on kitchen
+    /// Wi-Fi finish later than sequential ones and starve the op push
+    /// sharing the connection.
+    public static func next(from uploads: [PendingUpload]) -> PendingUpload? {
+        if uploads.contains(where: { $0.state == PendingUpload.State.uploading.rawValue }) {
+            return nil
+        }
+        return uploads
+            .filter {
+                $0.state == PendingUpload.State.queued.rawValue
+                    || $0.state == PendingUpload.State.failed.rawValue
+            }
+            .min { ($0.created_at, $0.page_id) < ($1.created_at, $1.page_id) }
+    }
+
+    /// Exponential, capped at an hour. The cap matters: the local file is
+    /// still the only copy of that page, so a page that failed all night
+    /// must not back off into never being retried at all.
+    public static func backoffSeconds(attempts: Int) -> Double {
+        min(pow(2.0, Double(max(attempts, 1))), 3600)
+    }
+
+    /// `.failed` returns the row to the retryable set rather than ending it
+    /// -- giving up would strand the only copy of the page (§13).
+    public static func transition(_ upload: PendingUpload, on event: Event) -> PendingUpload {
+        var next = upload
+        switch event {
+        case .started:
+            next.state = PendingUpload.State.uploading.rawValue
+        case .succeeded:
+            next.state = PendingUpload.State.uploaded.rawValue
+            next.last_error = nil
+        case .failed(let reason):
+            next.state = PendingUpload.State.failed.rawValue
+            next.attempts = upload.attempts + 1
+            next.last_error = reason
+        }
+        return next
+    }
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd ios/CostSauceKit && swift test --filter UploadQueueTests`
+Expected: PASS, 7 tests
+
+- [ ] **Step 5: Write `BackgroundUploader`**
+
+```swift
+// ios/CostSauce/Upload/BackgroundUploader.swift
+// Performs the transfers UploadQueue selects. All policy lives in the Kit's
+// pure UploadQueue; this owns only the URLSession and the ordering below.
+
+import CryptoKit
+import Foundation
+import CostSauceKit
+
+@MainActor
+final class BackgroundUploader: NSObject, URLSessionTaskDelegate {
+    private let appModel: AppModel
+    /// Set by the app delegate's
+    /// handleEventsForBackgroundURLSession and called once the session
+    /// reports it has finished delivering events. WITHOUT this, iOS treats
+    /// the app as unresponsive and kills uploads that complete while it is
+    /// suspended -- which is most of them, since these are large files on
+    /// slow connections.
+    var backgroundCompletionHandler: (() -> Void)?
+
+    private lazy var session: URLSession = {
+        let config = URLSessionConfiguration.background(
+            withIdentifier: "sauce.invoice.upload")
+        // A kitchen phone leaves the building mid-upload constantly; let the
+        // system retry when connectivity returns rather than failing now.
+        config.waitsForConnectivity = true
+        return URLSession(configuration: config, delegate: self, delegateQueue: nil)
+    }()
+
+    init(appModel: AppModel) {
+        self.appModel = appModel
+        super.init()
+    }
+
+    /// Uploads the single page `UploadQueue.next` selects, if any.
+    func pumpOnce() async {
+        guard let store = appModel.store,
+              let queued = try? store.pendingUploads(),
+              let upload = UploadQueue.next(from: queued) else { return }
+        do {
+            // Minted per attempt, never cached: a URL signed before a night
+            // offline has long expired by the time the session runs.
+            let signed = try await appModel.api.uploadURL(forPage: upload.page_id)
+            try store.updateUpload(UploadQueue.transition(upload, on: .started))
+
+            let fileURL = URL(fileURLWithPath: upload.local_path)
+            var request = URLRequest(url: signed.url)
+            request.httpMethod = "PUT"
+            // fromFile, never fromData: a background session rejects a body
+            // held in memory, and these files are megabytes.
+            let (_, response) = try await session.upload(for: request, fromFile: fileURL)
+
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode)
+            else {
+                throw KernelError("upload rejected")
+            }
+
+            let bytes = try Data(contentsOf: fileURL)
+            try await appModel.api.confirmPage(
+                upload.page_id,
+                sha256: SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined(),
+                width: signed.width, height: signed.height)
+
+            try store.updateUpload(UploadQueue.transition(upload, on: .succeeded))
+            appModel.refreshPendingCount()
+        } catch {
+            // Retryable, never terminal: the local file is still the only
+            // copy of this page (§13), so giving up would strand it.
+            try? store.updateUpload(
+                UploadQueue.transition(upload, on: .failed(error.localizedDescription)))
+            try? await Task.sleep(
+                for: .seconds(UploadQueue.backoffSeconds(attempts: upload.attempts + 1)))
+        }
+    }
+
+    nonisolated func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        Task { @MainActor in
+            backgroundCompletionHandler?()
+            backgroundCompletionHandler = nil
+        }
+    }
+}
+```
+
+Add `ApiClient.uploadURL(forPage:)` and `ApiClient.confirmPage(_:sha256:width:height:)`
+calling Task 3's two endpoints, following the existing client's request-building
+and error-mapping conventions. In the app delegate:
+
+```swift
+func application(
+    _ application: UIApplication,
+    handleEventsForBackgroundURLSession identifier: String,
+    completionHandler: @escaping () -> Void
+) {
+    uploader.backgroundCompletionHandler = completionHandler
+}
+```
+
+**The local file is deleted here under no circumstances.** Eviction is Task
+8's, and only ever for pages already uploaded.
+
+- [ ] **Step 6: Run the Kit suite and build**
+
+Run: `cd ios/CostSauceKit && swift test` then the Task 6 `xcodebuild build` command
+Expected: PASS, 192; `BUILD SUCCEEDED`
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add ios/CostSauceKit/Sources/CostSauceKit/Upload ios/CostSauceKit/Tests ios/CostSauce/Upload
+git commit -m "feat(3a): the upload outbox and its background uploader"
+```
+
+---
+
+### Task 8: Eviction and the unsynced badge
+
+**Files:**
+- Create: `ios/CostSauceKit/Sources/CostSauceKit/Upload/ImageEviction.swift`
+- Create: `ios/CostSauceKit/Tests/CostSauceKitTests/ImageEvictionTests.swift`
+- Modify: `ios/CostSauce/AppModel.swift`
+
+**Interfaces:**
+- Consumes: Task 4's `PendingUpload`.
+- Produces: `ImageEviction.evictable(candidates:now:) -> [String]` taking `[ImageEviction.Candidate]` (`pageId`, `bytes`, `capturedAt`, `isUploaded`) and returning page ids to delete, oldest first; `ImageEviction.maximumBytes` and `ImageEviction.maximumAge`; `AppModel.pendingCount` includes pending uploads.
+
+- [ ] **Step 1: Write the failing test**
+
+```swift
+// ios/CostSauceKit/Tests/CostSauceKitTests/ImageEvictionTests.swift
+import Testing
+import Foundation
+@testable import CostSauceKit
+
+@Suite struct ImageEvictionTests {
+
+    private func candidate(
+        _ id: String, bytes: Int, ageDays: Int, uploaded: Bool = true
+    ) -> ImageEviction.Candidate {
+        ImageEviction.Candidate(
+            pageId: id, bytes: bytes,
+            capturedAt: Date(timeIntervalSince1970: 1_800_000_000)
+                .addingTimeInterval(-Double(ageDays) * 86_400),
+            isUploaded: uploaded)
+    }
+
+    private let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+    /// THE load-bearing rule (spec 3a-D4). The local file is the only copy
+    /// until storage acknowledges, so evicting it would destroy the page.
+    @Test func neverEvictsAnUnuploadedPageEvenWhenHugeAndAncient() {
+        let evicted = ImageEviction.evictable(
+            candidates: [candidate("a", bytes: 500_000_000, ageDays: 3650, uploaded: false)],
+            now: now)
+        #expect(evicted.isEmpty)
+    }
+
+    @Test func keepsEverythingWhenUnderBothBounds() {
+        let evicted = ImageEviction.evictable(
+            candidates: [candidate("a", bytes: 1_000, ageDays: 1)], now: now)
+        #expect(evicted.isEmpty)
+    }
+
+    @Test func evictsPagesPastTheAgeBound() {
+        let evicted = ImageEviction.evictable(
+            candidates: [
+                candidate("old", bytes: 1_000, ageDays: 400),
+                candidate("new", bytes: 1_000, ageDays: 1),
+            ], now: now)
+        #expect(evicted == ["old"])
+    }
+
+    @Test func evictsOldestFirstUntilUnderTheByteBound() {
+        let big = ImageEviction.maximumBytes / 2 + 1
+        let evicted = ImageEviction.evictable(
+            candidates: [
+                candidate("oldest", bytes: big, ageDays: 3),
+                candidate("middle", bytes: big, ageDays: 2),
+                candidate("newest", bytes: big, ageDays: 1),
+            ], now: now)
+        #expect(evicted.first == "oldest")
+        #expect(!evicted.contains("newest"))
+    }
+
+    /// An un-uploaded page still counts toward the total -- it occupies the
+    /// disk -- but can never be the thing evicted to get under it.
+    @Test func anUnuploadedPageIsNotSacrificedToGetUnderTheBound() {
+        let big = ImageEviction.maximumBytes
+        let evicted = ImageEviction.evictable(
+            candidates: [
+                candidate("pending", bytes: big, ageDays: 10, uploaded: false),
+                candidate("done", bytes: big, ageDays: 1),
+            ], now: now)
+        #expect(!evicted.contains("pending"))
+        #expect(evicted.contains("done"))
+    }
+}
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd ios/CostSauceKit && swift test --filter ImageEvictionTests`
+Expected: FAIL to build — `cannot find 'ImageEviction' in scope`
+
+- [ ] **Step 3: Write `ImageEviction`**
+
+```swift
+// ios/CostSauceKit/Sources/CostSauceKit/Upload/ImageEviction.swift
+// Which cached page images may be deleted. Pure: it takes measurements and
+// returns page ids, touching no filesystem, so every rule is testable.
+//
+// Spec 3a-D4: deleting on upload-ack would break photo-assisted entry in
+// exactly the walk-in-cooler dead spot the product exists for; keeping
+// everything grows without ceiling on the owner's phone.
+
+import Foundation
+
+public enum ImageEviction {
+
+    public struct Candidate: Equatable, Sendable {
+        public let pageId: String
+        public let bytes: Int
+        public let capturedAt: Date
+        public let isUploaded: Bool
+
+        public init(pageId: String, bytes: Int, capturedAt: Date, isUploaded: Bool) {
+            self.pageId = pageId
+            self.bytes = bytes
+            self.capturedAt = capturedAt
+            self.isUploaded = isUploaded
+        }
+    }
+
+    /// CALIBRATION, same rule as PageQuality's: replace these with measured
+    /// values and record what you measured, before this task is done.
+    public static let maximumBytes: Int = 500 * 1_024 * 1_024
+    public static let maximumAge: TimeInterval = 90 * 86_400
+
+    /// Page ids safe to delete, oldest first. An un-uploaded page is never
+    /// returned, at any age or size: until storage acknowledges, the local
+    /// file is the only copy in existence (§13).
+    public static func evictable(candidates: [Candidate], now: Date) -> [String] {
+        let evictableCandidates = candidates
+            .filter(\.isUploaded)
+            .sorted { ($0.capturedAt, $0.pageId) < ($1.capturedAt, $1.pageId) }
+
+        var evicted: [String] = []
+        // Un-uploaded pages still occupy the disk, so they count toward the
+        // total -- they simply cannot be what gets sacrificed to get under it.
+        var total = candidates.reduce(0) { $0 + $1.bytes }
+
+        for candidate in evictableCandidates {
+            let tooOld = now.timeIntervalSince(candidate.capturedAt) > maximumAge
+            if tooOld || total > maximumBytes {
+                evicted.append(candidate.pageId)
+                total -= candidate.bytes
+            }
+        }
+        return evicted
+    }
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd ios/CostSauceKit && swift test --filter ImageEvictionTests`
+Expected: PASS, 5 tests
+
+- [ ] **Step 5: Fold pending uploads into the badge**
+
+In `AppModel.refreshPendingCount()`, add the count of `pending_uploads` rows
+not in state `uploaded` to the existing `pending_ops` count.
+
+```swift
+// AppModel.swift, inside refreshPendingCount()
+// §9: a captured-but-unuploaded page is unsynced data living only in the
+// app container. Counting only pending_ops would make the app read as safe
+// in precisely the delete-and-reinstall situation §13 exists to prevent.
+pendingCount = try store.pendingCount() + store.pendingUploadCount()
+```
+
+Add `LocalStore.pendingUploadCount()` returning
+`SELECT count(*) FROM pending_uploads WHERE state != 'uploaded'`.
+
+- [ ] **Step 6: Erase image FILES on identity switch and wipe**
+
+Spec §11: on an identity switch the local store binds to `(user_id, org_id)`
+and refuses to flush, and image files are part of what must be erased.
+`LocalStore.wipeSyncedData()` (extended in Task 4) clears the `invoice_pages`
+and `pending_uploads` *rows*, but the JPEGs live on the filesystem and would
+survive it — leaving another org's invoice photographs in the container on a
+shared or resold phone. That is the same class of problem
+`NSFileProtectionComplete` exists to prevent, and rows-only cleanup does not
+address it.
+
+```swift
+// ios/CostSauceKit/Tests/CostSauceKitTests/StoreTests.swift -- append
+
+/// §11: wiping for an identity switch must take the IMAGES, not just the
+/// rows. A rows-only wipe leaves another org's invoice photographs sitting
+/// in the app container.
+@Test func wipeReturnsEveryLocalImagePathSoTheFilesCanBeDeleted() throws {
+    let store = try LocalStore.inMemory()
+    try store.bind(userId: "user-1", orgId: "org-1", locationId: "loc-1")
+    try store.enqueueUpload(pageId: "pg-1", localPath: "/tmp/a.jpg")
+    try store.enqueueUpload(pageId: "pg-2", localPath: "/tmp/b.jpg")
+
+    let orphanedPaths = try store.wipeSyncedData()
+
+    #expect(Set(orphanedPaths) == ["/tmp/a.jpg", "/tmp/b.jpg"])
+    #expect(try store.pendingUploadCount() == 0)
+}
+```
+
+Change `wipeSyncedData()` to return `[String]` — the `local_path` of every
+row it is about to delete, collected *before* the `DELETE`, inside the same
+transaction:
+
+```swift
+// LocalStore.swift, in wipeSyncedData(), before the DELETE statements
+let orphanedPaths = try String.fetchAll(
+    db, sql: "SELECT local_path FROM pending_uploads")
+// ... existing DELETEs, plus the three added in Task 4 ...
+return orphanedPaths
+```
+
+Its caller in `AppModel` deletes each returned path, then removes the now-empty
+`Application Support/invoices` directory. Returning the paths rather than
+deleting inside the Kit keeps `LocalStore` free of filesystem concerns beyond
+the database file it already owns, and keeps this testable without touching a
+real disk.
+
+- [ ] **Step 7: Run the Kit suite and build**
+
+Run: `cd ios/CostSauceKit && swift test` then the Task 6 `xcodebuild build` command
+Expected: PASS, 198; `BUILD SUCCEEDED`. Every existing `wipeSyncedData()` call
+site must be updated for the new return value — `_ = try store.wipeSyncedData()`
+where the paths are not wanted.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add ios/CostSauceKit ios/CostSauce/AppModel.swift
+git commit -m "feat(3a): bounded image cache, upload-aware badge, and image erasure on wipe"
+```
+
+---
+
+### Task 9: Photo-assisted manual entry
+
+**Files:**
+- Create: `ios/CostSauce/Views/InvoiceListView.swift`
+- Create: `ios/CostSauce/Views/InvoicePageView.swift`
+- Modify: `ios/CostSauce/Views/PurchaseEntryView.swift`
+- Modify: `ios/CostSauceKit/Sources/CostSauceKit/Store/LocalEdits.swift`
+- Modify: `ios/CostSauceKit/Tests/CostSauceKitTests/LocalEditsTests.swift`
+
+**Interfaces:**
+- Consumes: Tasks 4–6.
+- Produces: `LocalEdits.createPurchase(...)` gains a trailing `invoicePageId: String? = nil` parameter; `PurchaseEntryView.init(appModel:invoicePageId:)` with `invoicePageId` defaulting to `nil`.
+
+The defaulted parameter matters: every existing `createPurchase` and
+`PurchaseEntryView` call site keeps compiling and behaving identically, so
+this task adds a path rather than migrating one.
+
+- [ ] **Step 1: Write the failing test**
+
+```swift
+// append to LocalEditsTests.swift
+
+@Test func createPurchaseCarriesTheInvoicePageItWasKeyedFrom() throws {
+    let store = try seededStore([
+        StoreTests.ingredientChange(id: "ing-1", name: "Flour", baseUnit: "lb", serverSeq: 1),
+    ])
+    let edits = LocalEdits(store: store, locationId: "loc-1")
+
+    let id = try edits.createPurchase(
+        ingredientId: "ing-1", purchasedOn: "2026-08-03", qty: "10", unit: "lb",
+        qtyInCase: nil, totalPrice: "55.10", invoicePageId: "pg-1")
+
+    let op = try #require(try store.pendingOps(state: .queued).first { $0.row_id == id })
+    #expect(fieldValue(op, "invoice_page_id") == "pg-1")
+    // 3a-D5: a human keyed this while looking at a photo. It is manual.
+    #expect(fieldValue(op, "source") == "manual")
+}
+
+/// The parameter is defaulted, so every pre-3a call site is unchanged --
+/// and must not start sending an explicit null.
+@Test func createPurchaseWithoutAPageOmitsTheKeyEntirely() throws {
+    let store = try seededStore([
+        StoreTests.ingredientChange(id: "ing-1", name: "Flour", baseUnit: "lb", serverSeq: 1),
+    ])
+    let edits = LocalEdits(store: store, locationId: "loc-1")
+
+    let id = try edits.createPurchase(
+        ingredientId: "ing-1", purchasedOn: "2026-08-03", qty: "10", unit: "lb",
+        qtyInCase: nil, totalPrice: "55.10")
+
+    let op = try #require(try store.pendingOps(state: .queued).first { $0.row_id == id })
+    #expect(!op.fields.keys.contains("invoice_page_id"))
+}
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd ios/CostSauceKit && swift test --filter createPurchaseCarries`
+Expected: FAIL to build — extra argument `invoicePageId` in call
+
+- [ ] **Step 3: Extend `createPurchase`**
+
+Add `invoicePageId: String? = nil` as the last parameter before `now:`, and
+inside, only when it is non-nil:
+
+```swift
+// Omitted entirely when nil, never sent as an explicit null -- the same
+// "was a value supplied" rule every other optional field here follows.
+if let invoicePageId {
+    fields["invoice_page_id"] = invoicePageId
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd ios/CostSauceKit && swift test --filter createPurchase`
+Expected: PASS
+
+- [ ] **Step 5: Build the two views**
+
+`InvoiceListView` lists `store.liveInvoices()` newest first, each row showing
+its capture date, page count, and an upload indicator driven by
+`pending_uploads`. Tapping pushes `InvoicePageView`.
+
+`InvoicePageView` shows one page, zoomable, with the page selector when
+there is more than one, and an "Add purchase from this page" button pushing
+`PurchaseEntryView(appModel:invoicePageId:)`. The image loads from the local
+file when present and from a signed download URL when it has been evicted —
+eviction removes the file, never the row.
+
+`PurchaseEntryView` gains `let invoicePageId: String?` (defaulted `nil`) and
+passes it straight through to `createPurchase`. Nothing else about it
+changes; its validation and op-minting are untouched.
+
+- [ ] **Step 6: Run the Kit suite and build**
+
+Run: `cd ios/CostSauceKit && swift test` then the Task 6 `xcodebuild build` command
+Expected: PASS, 199; `BUILD SUCCEEDED`
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add ios/CostSauce ios/CostSauceKit
+git commit -m "feat(3a): photo-assisted purchase entry against a captured page"
+```
+
+---
+
+### Task 10: XCUITest acceptance and the runbook
+
+**Files:**
+- Modify: `ios/CostSauceUITests/SmokeTests.swift`
+- Create: `docs/runbooks/phase-3a-acceptance.md`
+
+**Interfaces:**
+- Consumes: everything above, particularly Task 6's `FixturePageSource`.
+
+- [ ] **Step 1: Write the failing test**
+
+```swift
+// append to SmokeTests.swift
+
+/// Capture -> upload -> photo-assisted purchase -> synced, against a real
+/// local stack. Runs headless because Task 6's ScannedPageSource seam feeds
+/// a fixture page where the scanner's output would land -- the simulator has
+/// no camera, so without that seam this test could not exist at all.
+func testInvoiceCaptureUploadAndPhotoAssistedPurchase() throws {
+    let app = XCUIApplication()
+    app.launchEnvironment = [
+        "API_BASE_URL": apiBaseURL,
+        "UITEST": "1",
+        "REVIEWER_EMAIL": reviewerEmail,
+        "REVIEWER_CODE": reviewerCode,
+    ]
+    app.launch()
+    loginAndAwaitBootstrap(app)
+
+    let captureButton = app.buttons["Capture Invoice"]
+    XCTAssertTrue(captureButton.waitForExistence(timeout: 10), "capture entry point never appeared")
+    captureButton.tap()
+
+    // The fixture page passes both quality gates, so it is accepted without
+    // a retake prompt and the invoice is minted.
+    XCTAssertTrue(
+        app.staticTexts["1 page"].waitForExistence(timeout: 10),
+        "the captured page never landed on an invoice")
+
+    // The badge counts the un-uploaded page (§9): unsynced until it lands.
+    let syncedChip = app.buttons["Synced \u{2713}"]
+    XCTAssertTrue(
+        syncedChip.waitForExistence(timeout: 30),
+        "sync chip never reached Synced -- the page upload or its ops did not complete")
+
+    app.buttons["Add purchase from this page"].tap()
+
+    let ingredientField = app.textFields["Ingredient name"]
+    XCTAssertTrue(ingredientField.waitForExistence(timeout: 10))
+    ingredientField.tap()
+    addStagedIngredient(ingredientField, "Chicken Breast", app: app)
+
+    let qtyField = app.textFields["Qty"]
+    XCTAssertTrue(qtyField.waitForExistence(timeout: 5))
+    qtyField.tap()
+    qtyField.typeText("10")
+    let priceField = app.textFields["Total price"]
+    priceField.tap()
+    priceField.typeText("32.00")
+    app.buttons["Save"].tap()
+
+    XCTAssertTrue(
+        syncedChip.waitForExistence(timeout: 30),
+        "sync chip never returned to Synced after the photo-assisted purchase")
+
+    print("CHECKPOINT 1 (capture+purchase synced): the runbook's SQL asserts one invoices row, one invoice_pages row with a non-null sha256, and a purchase whose invoice_page_id matches that page")
+}
+```
+
+- [ ] **Step 2: Run it against the stack and watch it fail**
+
+Stand the stack up exactly as `docs/runbooks/phase-2b-acceptance.md` §2
+describes — its §2.2 seed script is reproduced verbatim in that runbook, so
+copy it to a scratch path and run it. **Reseed only while `uvicorn` is
+down**, or every request 500s on stale prepared-statement plans. Then:
+
+Run: `cd ios && xcodebuild test -project CostSauce.xcodeproj -scheme CostSauce -destination 'platform=iOS Simulator,id=F71924C7-9272-4A35-AA66-82061A1E4A9D' -only-testing:CostSauceUITests/SmokeTests/testInvoiceCaptureUploadAndPhotoAssistedPurchase`
+Expected: FAIL — "capture entry point never appeared", until the entry point is wired
+
+- [ ] **Step 3: Wire the entry point and make it pass**
+
+Add the "Capture Invoice" affordance where Task 9's `InvoiceListView` is
+reached. Give it a 44×44pt target with `.contentShape(Rectangle())` — the
+same fix the Dashboard "+" needed.
+
+- [ ] **Step 4: Verify against the server**
+
+```bash
+docker exec cs-3a-smoke psql -U postgres -d postgres -c \
+  "SELECT i.id, count(p.id) AS pages, bool_and(p.sha256 IS NOT NULL) AS all_confirmed
+     FROM invoices i JOIN invoice_pages p ON p.invoice_id = i.id
+    GROUP BY i.id;" -c \
+  "SELECT pu.total_price, pu.invoice_page_id IS NOT NULL AS linked
+     FROM purchases pu WHERE pu.invoice_page_id IS NOT NULL;"
+```
+
+Expected: one invoice, one page, `all_confirmed = t` (proving the confirm
+endpoint ran, not merely the PUT), and one linked purchase.
+
+- [ ] **Step 5: Run the whole suite — nothing may regress**
+
+Run: `cd ios && xcodebuild test -project CostSauce.xcodeproj -scheme CostSauce -destination 'platform=iOS Simulator,id=F71924C7-9272-4A35-AA66-82061A1E4A9D'`
+Expected: 4/4 tests pass
+
+- [ ] **Step 6: Write the runbook**
+
+`docs/runbooks/phase-3a-acceptance.md`, following
+`phase-2b-acceptance.md`'s structure: local stack, the seed script inline
+(uncommitted but reproduced in full), the checkpoint SQL, and an explicit
+coverage-gap section. **State plainly that the real
+`VNDocumentCameraViewController` path is never exercised by any automated
+test** — only `FixturePageSource` is — so the camera, its permission prompt,
+and multi-page retake need one manual device pass before release, exactly as
+2b's swipe-to-remove does.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add ios/CostSauceUITests/SmokeTests.swift docs/runbooks/phase-3a-acceptance.md
+git commit -m "test(3a): headless capture-to-synced-purchase acceptance walk"
+```
