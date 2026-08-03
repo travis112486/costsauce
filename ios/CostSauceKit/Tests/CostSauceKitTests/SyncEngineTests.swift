@@ -980,4 +980,55 @@ struct SyncEngineTests {
         }
         #expect(opIds == ["op-b", "op-a"])
     }
+
+    // MARK: - Phase 3a: invoices over the wire
+
+    /// An invoice captured with no connectivity pushes on reconnect, and its
+    /// page arrives with it. This exercises the FK ORDER end to end through
+    /// the engine rather than asserting on a constant: invoice_pages carries
+    /// a parent-liveness check on invoice_id, so if the page were pushed
+    /// before its invoice the server would refuse it as a missing parent.
+    @Test func invoiceCapturedOfflinePushesAndConverges() async throws {
+        let server = FakeSyncServer()
+        let store = try makeStore()
+        let engine = SyncEngine(store: store, api: makeApi(), orgId: "org-1")
+        let edits = LocalEdits(store: store, locationId: "loc-1")
+
+        let invoiceId = try edits.createInvoice()
+        _ = try edits.addInvoicePage(invoiceId: invoiceId, pageNo: 1, orgId: "org-1")
+        _ = try edits.addInvoicePage(invoiceId: invoiceId, pageNo: 2, orgId: "org-1")
+
+        try await StubTransport.withStub(server.responder()) {
+            try await engine.syncNow()
+        }
+
+        #expect(server.rowCount(table: "invoices") == 1)
+        #expect(server.rowCount(table: "invoice_pages") == 2)
+        #expect(try store.pendingOps(state: .queued).isEmpty)
+    }
+
+    /// The delete fan-out over the wire: tombstoning an invoice must carry
+    /// every page with it, or live pages are stranded against a dead invoice
+    /// server-side (a tombstone op does not cascade there).
+    @Test func tombstoningAnInvoiceTombstonesItsPagesServerSide() async throws {
+        let server = FakeSyncServer()
+        let store = try makeStore()
+        let engine = SyncEngine(store: store, api: makeApi(), orgId: "org-1")
+        let edits = LocalEdits(store: store, locationId: "loc-1")
+
+        let invoiceId = try edits.createInvoice()
+        _ = try edits.addInvoicePage(invoiceId: invoiceId, pageNo: 1, orgId: "org-1")
+        try await StubTransport.withStub(server.responder()) {
+            try await engine.syncNow()
+        }
+
+        try edits.tombstoneInvoice(id: invoiceId)
+        try await StubTransport.withStub(server.responder()) {
+            try await engine.syncNow()
+        }
+
+        #expect(try store.pendingOps(state: .queued).isEmpty)
+        #expect(try store.liveInvoices().isEmpty)
+        #expect(try store.livePages(invoiceId: invoiceId).isEmpty)
+    }
 }

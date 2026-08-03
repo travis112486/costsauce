@@ -649,3 +649,112 @@ import Foundation
         #expect(try store.pendingCount() == before)
     }
 }
+
+// MARK: - Phase 3a invoice helpers
+
+@Suite struct InvoiceEditsTests {
+
+    private func store() throws -> LocalStore {
+        let store = try LocalStore.inMemory()
+        try store.bind(userId: "user-1", orgId: "org-1", locationId: "loc-1")
+        return store
+    }
+
+    private func fieldValue(_ op: PendingOp, _ key: String) -> String? {
+        op.fields[key] ?? nil
+    }
+
+    @Test func createInvoiceEnqueuesInsertWithCapturedAtAndUnparsedStatus() throws {
+        let store = try store()
+        let edits = LocalEdits(store: store, locationId: "loc-1")
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+        let id = try edits.createInvoice(now: now)
+
+        let op = try #require(try store.pendingOps(state: .queued).first { $0.row_id == id })
+        #expect(op.table == "invoices")
+        #expect(op.kind == .insert)
+        #expect(Set(op.fields.keys) == ["captured_at", "parse_status"])
+        // 'unparsed' is the only status a device can produce; the schema
+        // CHECK admits 'failed' too but only 3b's parser sets it.
+        #expect(fieldValue(op, "parse_status") == "unparsed")
+        #expect(fieldValue(op, "captured_at") == Kernel.canonicalTimestamp(now))
+    }
+
+    @Test func addInvoicePageDerivesTheSameStoragePathTheServerWill() throws {
+        let store = try store()
+        let edits = LocalEdits(store: store, locationId: "loc-1")
+        let invoiceId = try edits.createInvoice()
+
+        let (pageId, path) = try edits.addInvoicePage(
+            invoiceId: invoiceId, pageNo: 1, orgId: "org-1")
+
+        #expect(path == StoragePath.forPage(orgId: "org-1", invoiceId: invoiceId, pageNo: 1))
+        let op = try #require(try store.pendingOps(state: .queued).first { $0.row_id == pageId })
+        #expect(op.table == "invoice_pages")
+        #expect(op.kind == .insert)
+        #expect(Set(op.fields.keys) == ["invoice_id", "page_no", "storage_path"])
+        #expect(fieldValue(op, "page_no") == "1")
+    }
+
+    /// The same liveness guard every other mutation runs. Without it, a page
+    /// added to an invoice tombstoned on another device queues an op the
+    /// server refuses, for something knowable locally.
+    @Test func addInvoicePageOnTombstonedInvoiceThrowsAndEnqueuesNothing() throws {
+        let store = try store()
+        let edits = LocalEdits(store: store, locationId: "loc-1")
+        let invoiceId = try edits.createInvoice()
+        try edits.tombstoneInvoice(id: invoiceId)
+        let before = try store.pendingCount()
+
+        #expect(throws: KernelError.self) {
+            _ = try edits.addInvoicePage(invoiceId: invoiceId, pageNo: 2, orgId: "org-1")
+        }
+
+        #expect(try store.pendingCount() == before)
+    }
+
+    @Test func addInvoicePageRefusesANonPositivePageNumber() throws {
+        let store = try store()
+        let edits = LocalEdits(store: store, locationId: "loc-1")
+        let invoiceId = try edits.createInvoice()
+
+        #expect(throws: KernelError.self) {
+            _ = try edits.addInvoicePage(invoiceId: invoiceId, pageNo: 0, orgId: "org-1")
+        }
+    }
+
+    /// Same fan-out shape as tombstoneRecipe: one deleted_at op per live
+    /// page plus one for the invoice, all sharing a single timestamp, in one
+    /// transaction. A tombstone op does not cascade server-side, so skipping
+    /// the fan-out would strand live pages against a dead invoice.
+    @Test func tombstoneInvoiceFansOutToEveryLivePage() throws {
+        let store = try store()
+        let edits = LocalEdits(store: store, locationId: "loc-1")
+        let invoiceId = try edits.createInvoice()
+        _ = try edits.addInvoicePage(invoiceId: invoiceId, pageNo: 1, orgId: "org-1")
+        _ = try edits.addInvoicePage(invoiceId: invoiceId, pageNo: 2, orgId: "org-1")
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+        try edits.tombstoneInvoice(id: invoiceId, now: now)
+
+        let stamp = Kernel.canonicalTimestamp(now)
+        let tombstones = try store.pendingOps(state: .queued).filter {
+            $0.kind == .update && (($0.fields["deleted_at"] ?? nil) == stamp)
+        }
+        #expect(tombstones.count == 3)  // two pages plus the invoice
+        #expect(try store.livePages(invoiceId: invoiceId).isEmpty)
+        #expect(try store.invoice(id: invoiceId)?.deleted_at == stamp)
+    }
+
+    @Test func tombstoneInvoiceOnAnAlreadyDeadInvoiceThrows() throws {
+        let store = try store()
+        let edits = LocalEdits(store: store, locationId: "loc-1")
+        let invoiceId = try edits.createInvoice()
+        try edits.tombstoneInvoice(id: invoiceId)
+
+        #expect(throws: KernelError.self) {
+            try edits.tombstoneInvoice(id: invoiceId)
+        }
+    }
+}
