@@ -201,6 +201,38 @@ public final class ApiClient: @unchecked Sendable {
         return try await decode(SyncPushResponse.self, makeURL("/sync"), method: "POST", body: body)
     }
 
+    // MARK: - invoice page uploads (Phase 3a)
+
+    /// Mints a pre-signed PUT for one page's bytes. Called per attempt,
+    /// never cached: a URL signed before a night offline has long expired
+    /// by the time the background session gets to run
+    /// (api/routes/invoices.py's `mint_upload_url`).
+    public func uploadURL(invoiceId: String, pageNo: Int) async throws -> SignedUpload {
+        try await decode(
+            SignedUpload.self,
+            makeURL("/invoices/\(invoiceId)/pages/\(pageNo)/upload-url"),
+            method: "POST")
+    }
+
+    /// Records that the bytes landed (a 204). Without this the server has
+    /// no record the storage PUT ever happened -- `storage_path` would be a
+    /// claim nobody checked (api/routes/invoices.py's module doc). `width`
+    /// and `height` are `Int` on the wire deliberately: pixel dimensions
+    /// are the Global Constraints' one numeric carve-out, and the server's
+    /// `ConfirmBody` validates them as integers.
+    public func confirmPage(
+        invoiceId: String, pageNo: Int, sha256: String, width: Int, height: Int
+    ) async throws {
+        struct Body: Encodable {
+            let sha256: String
+            let width: Int
+            let height: Int
+        }
+        let body = try Self.encoder.encode(Body(sha256: sha256, width: width, height: height))
+        _ = try await execute(
+            makeURL("/invoices/\(invoiceId)/pages/\(pageNo)/confirm"), method: "POST", body: body)
+    }
+
     // MARK: - export
 
     /// Raw ZIP bytes, returned untouched (api/routes/deletion.py:538-569 —

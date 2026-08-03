@@ -280,3 +280,21 @@ extension SyncValue: Decodable {
         self = .string(try container.decode(String.self))
     }
 }
+
+// MARK: - invoice page uploads (Phase 3a)
+
+/// `POST /invoices/{id}/pages/{n}/upload-url` (api/routes/invoices.py's
+/// `mint_upload_url`). `url` is pre-signed and scoped to the one object
+/// path it was minted for; `expiresAt` is informational only -- the
+/// uploader mints a fresh URL per attempt rather than checking it.
+public struct SignedUpload: Codable, Sendable {
+    public let url: String
+    public let storagePath: String
+    public let expiresAt: String
+
+    public init(url: String, storagePath: String, expiresAt: String) {
+        self.url = url
+        self.storagePath = storagePath
+        self.expiresAt = expiresAt
+    }
+}

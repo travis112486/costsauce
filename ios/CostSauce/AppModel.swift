@@ -115,6 +115,12 @@ final class AppModel {
 
     // MARK: - private wiring
 
+    /// The background transfer arm of the upload outbox (Task 7). Lazy
+    /// only to satisfy the `self` reference; `init` forces it immediately,
+    /// because recreating the background URLSession at launch is what
+    /// re-attaches the app to uploads that ran while it was dead.
+    @ObservationIgnored private(set) lazy var uploader = BackgroundUploader(appModel: self)
+
     private let keychain: KeychainStore
     private let tokenBox: TokenBox
     private(set) var boundOrgId: String?
@@ -155,6 +161,11 @@ final class AppModel {
                 self?.tokenBox.set(nil)
             }
         }
+
+        // See `uploader`'s doc comment: forced now so the background
+        // session exists from launch, including a headless relaunch whose
+        // only purpose is delivering that session's events.
+        _ = uploader
     }
 
     // MARK: - base URL
@@ -804,7 +815,10 @@ final class AppModel {
         }
     }
 
-    private func refreshPendingCount() {
+    /// Internal, not private: `BackgroundUploader` refreshes the badge the
+    /// moment an upload lands, the same way edit-driven callers do through
+    /// `syncSoon()`. (Task 8 folds `pendingUploadCount` into this figure.)
+    func refreshPendingCount() {
         guard let store else {
             pendingCount = 0
             return
@@ -837,6 +851,9 @@ final class AppModel {
             try? await Task.sleep(for: .milliseconds(500))
             guard !Task.isCancelled else { return }
             await self?.syncEngine?.syncNow()
+            // Bytes ride behind the rows they belong to: pump uploads only
+            // after the op push has had its turn at the connection.
+            await self?.uploader.pump()
         }
     }
 
@@ -865,11 +882,14 @@ final class AppModel {
         tokenBox.set(currentAccessToken)
         await syncEngine?.syncNow()
         guard let boundOrgId, let boundLocationId else { return }
-        guard let locations = try? await api.locations(orgId: boundOrgId) else { return }
-        if let match = locations.first(where: { $0.id == boundLocationId }) {
+        if let locations = try? await api.locations(orgId: boundOrgId),
+           let match = locations.first(where: { $0.id == boundLocationId }) {
             currentLocation = match
             Self.saveLocationSnapshot(match, userId: authSession.userId, orgId: boundOrgId)
         }
+        // Last, never first: a failed pump sleeps out its backoff before
+        // returning, and nothing above should wait behind that.
+        await uploader.pump()
     }
 
     /// Task 13's `SettingsView` calls this after its own `patchLocation`

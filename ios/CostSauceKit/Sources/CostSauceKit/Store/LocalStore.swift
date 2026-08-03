@@ -478,6 +478,16 @@ public final class LocalStore: Sendable {
         }
     }
 
+    /// One page by row id -- how the uploader turns a queued `page_id`
+    /// back into the `(invoice_id, page_no)` the upload endpoints are
+    /// keyed by.
+    public func invoicePage(id: String) throws -> LocalInvoicePage? {
+        try dbQueue.read { db in
+            try LocalInvoicePage.fetchOne(
+                db, sql: "SELECT * FROM invoice_pages WHERE id = ?", arguments: [id])
+        }
+    }
+
     /// Newest first -- an invoice list is read newest first, unlike the
     /// name-ordered reads elsewhere in this file.
     public func liveInvoices() throws -> [LocalInvoice] {
