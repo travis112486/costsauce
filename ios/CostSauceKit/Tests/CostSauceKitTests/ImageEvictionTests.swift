@@ -64,4 +64,29 @@ import Foundation
         #expect(!evicted.contains("pending"))
         #expect(evicted.contains("done"))
     }
+
+    /// The acceptance walk needs one ordinary captured page to exceed the
+    /// budget, which the 500MB production value can never do.
+    @Test func injectedByteBudgetEvictsWhereTheDefaultWouldNot() {
+        let evicted = ImageEviction.evictable(
+            candidates: [candidate("a", bytes: 1_000, ageDays: 1)],
+            now: now, maximumBytes: 100)
+        #expect(evicted == ["a"])
+    }
+
+    @Test func injectedAgeBudgetEvictsWhereTheDefaultWouldNot() {
+        let evicted = ImageEviction.evictable(
+            candidates: [candidate("a", bytes: 1_000, ageDays: 2)],
+            now: now, maximumAge: 86_400)
+        #expect(evicted == ["a"])
+    }
+
+    /// The invariant survives budget injection: a tiny budget must still
+    /// never sacrifice the only copy of an un-uploaded page.
+    @Test func injectedBudgetStillNeverEvictsAnUnuploadedPage() {
+        let evicted = ImageEviction.evictable(
+            candidates: [candidate("a", bytes: 1_000_000, ageDays: 3650, uploaded: false)],
+            now: now, maximumBytes: 1, maximumAge: 1)
+        #expect(evicted.isEmpty)
+    }
 }
