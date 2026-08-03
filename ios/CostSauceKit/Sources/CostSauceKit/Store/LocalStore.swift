@@ -16,6 +16,17 @@
 import Foundation
 import GRDB
 
+/// A live invoice page plus what eviction needs to judge it, from
+/// `LocalStore.evictionCandidates()`. See that method's doc comment for why
+/// `isUploaded` comes from the outbox rather than the row's `sha256`.
+public struct EvictionCandidate: Sendable, Equatable {
+    public let pageId: String
+    public let invoiceId: String
+    public let pageNo: Int
+    public let createdAt: Date
+    public let isUploaded: Bool
+}
+
 public final class LocalStore: Sendable {
     private let dbQueue: DatabaseQueue
 
@@ -524,6 +535,40 @@ public final class LocalStore: Sendable {
                     ORDER BY CAST(page_no AS INTEGER), id
                     """,
                 arguments: [invoiceId])
+        }
+    }
+
+    /// Every live page with what eviction needs to judge it.
+    ///
+    /// `isUploaded` is LEFT JOINed from the outbox and defaults to false: a
+    /// page with no outbox row (pulled from another device) cannot be proven
+    /// uploaded by this device, and the eviction invariant is that an
+    /// unproven page is never deleted.
+    ///
+    /// Returns rows, not files. The caller filters to pages that actually
+    /// have a file on disk before measuring bytes -- counting bytes that are
+    /// not there would evict real files to get under a budget the device was
+    /// never over.
+    public func evictionCandidates() throws -> [EvictionCandidate] {
+        try dbQueue.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT p.id AS page_id, p.invoice_id, p.page_no, p.created_at,
+                       COALESCE(u.state, '') AS upload_state
+                  FROM invoice_pages p
+                  LEFT JOIN pending_uploads u ON u.page_id = p.id
+                 WHERE p.deleted_at IS NULL
+                 ORDER BY p.created_at, p.id
+                """)
+            return try rows.map { row in
+                EvictionCandidate(
+                    pageId: row["page_id"],
+                    invoiceId: row["invoice_id"],
+                    // page_no is TEXT locally like every synced column.
+                    pageNo: Int(row["page_no"] as String) ?? 0,
+                    createdAt: try Kernel.parsePostgresTimestamp(row["created_at"]),
+                    isUploaded: (row["upload_state"] as String)
+                        == PendingUpload.State.uploaded.rawValue)
+            }
         }
     }
 
