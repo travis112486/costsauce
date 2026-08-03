@@ -35,6 +35,51 @@ import GRDB
         ])
     }
 
+    /// Phase 3a. `page_no`/`width`/`height` arrive as TEXT, exactly as the
+    /// server's pull SQL casts them.
+    static func invoiceChange(
+        id: String, locationId: String = "loc-1", capturedAt: String = "2026-08-03 10:00:00+00",
+        parseStatus: String = "unparsed", clientMutatedAt: String = "2026-08-03 10:00:00+00",
+        serverSeq: Int64, updatedAt: String = "2026-08-03 10:00:00+00",
+        deletedAt: String? = nil, createdAt: String = "2026-08-03 10:00:00+00"
+    ) -> PullChange {
+        PullChange(table: "invoices", row: [
+            "id": .string(id),
+            "location_id": .string(locationId),
+            "captured_at": .string(capturedAt),
+            "parse_status": .string(parseStatus),
+            "client_mutated_at": .string(clientMutatedAt),
+            "server_seq": .int(serverSeq),
+            "updated_at": .string(updatedAt),
+            "deleted_at": deletedAt.map(SyncValue.string) ?? .null,
+            "created_at": .string(createdAt),
+        ])
+    }
+
+    static func invoicePageChange(
+        id: String, locationId: String = "loc-1", invoiceId: String, pageNo: String = "1",
+        storagePath: String = "org-1/inv-1/1.jpg", width: String? = nil, height: String? = nil,
+        sha256: String? = nil, clientMutatedAt: String = "2026-08-03 10:00:00+00",
+        serverSeq: Int64, updatedAt: String = "2026-08-03 10:00:00+00",
+        deletedAt: String? = nil, createdAt: String = "2026-08-03 10:00:00+00"
+    ) -> PullChange {
+        PullChange(table: "invoice_pages", row: [
+            "id": .string(id),
+            "invoice_id": .string(invoiceId),
+            "location_id": .string(locationId),
+            "page_no": .string(pageNo),
+            "storage_path": .string(storagePath),
+            "width": width.map(SyncValue.string) ?? .null,
+            "height": height.map(SyncValue.string) ?? .null,
+            "sha256": sha256.map(SyncValue.string) ?? .null,
+            "client_mutated_at": .string(clientMutatedAt),
+            "server_seq": .int(serverSeq),
+            "updated_at": .string(updatedAt),
+            "deleted_at": deletedAt.map(SyncValue.string) ?? .null,
+            "created_at": .string(createdAt),
+        ])
+    }
+
     static func recipeChange(
         id: String, locationId: String = "loc-1", name: String, menuPrice: String = "12.00",
         targetFcPct: String = "30.00", clientMutatedAt: String = "2026-07-29 10:00:00+00",
@@ -481,5 +526,68 @@ import GRDB
         #expect(try store.liveRecipeItems().isEmpty)
         #expect(try store.allLivePurchases().isEmpty)
         #expect(try store.pendingOps(state: nil).isEmpty)
+    }
+}
+
+// MARK: - Phase 3a dispatch wiring
+
+@Suite struct InvoiceStoreTests {
+
+    /// LocalStore has FOUR table-dispatch points -- knownTables, upsert,
+    /// insertStub and wipe -- and missing one fails SILENTLY: a forgotten
+    /// insertStub case throws only when an offline insert is first enqueued,
+    /// long after build time. This drives all four in a single pass.
+    @Test func invoiceTablesAreWiredThroughEveryDispatchPoint() throws {
+        let store = try LocalStore.inMemory()
+        try store.bind(userId: "user-1", orgId: "org-1", locationId: "loc-1")
+
+        // upsert, via the pull path
+        try store.applyPullPage([
+            StoreTests.invoiceChange(id: "inv-1", serverSeq: 1),
+            StoreTests.invoicePageChange(id: "pg-1", invoiceId: "inv-1", serverSeq: 2),
+        ], cursor: 2)
+        #expect(try store.liveInvoices().count == 1)
+        #expect(try store.livePages(invoiceId: "inv-1").count == 1)
+
+        // insertStub, via an offline insert whose row has never been pulled
+        try store.enqueue(PendingOp(
+            op_id: "op-1", table: "invoices", row_id: "inv-2", location_id: "loc-1",
+            client_mutated_at: "2026-08-03 11:00:00+00", kind: .insert,
+            fields: ["captured_at": "2026-08-03 11:00:00+00", "parse_status": "unparsed"],
+            state: .queued, reason: nil, created_at: "2026-08-03 11:00:00+00"))
+        #expect(try store.liveInvoices().count == 2)
+
+        // wipe
+        try store.wipe()
+        #expect(try store.liveInvoices().isEmpty)
+    }
+
+    /// page_no is TEXT, so ordering must CAST -- a plain string sort puts
+    /// page 10 between 1 and 2.
+    @Test func livePagesOrderNumericallyNotLexically() throws {
+        let store = try LocalStore.inMemory()
+        try store.bind(userId: "user-1", orgId: "org-1", locationId: "loc-1")
+        try store.applyPullPage([
+            StoreTests.invoiceChange(id: "inv-1", serverSeq: 1),
+            StoreTests.invoicePageChange(id: "pg-10", invoiceId: "inv-1", pageNo: "10", serverSeq: 2),
+            StoreTests.invoicePageChange(id: "pg-2", invoiceId: "inv-1", pageNo: "2", serverSeq: 3),
+            StoreTests.invoicePageChange(id: "pg-1", invoiceId: "inv-1", pageNo: "1", serverSeq: 4),
+        ], cursor: 4)
+
+        #expect(try store.livePages(invoiceId: "inv-1").map(\.page_no) == ["1", "2", "10"])
+    }
+
+    @Test func enqueueUploadIsCountedUntilItIsUploaded() throws {
+        let store = try LocalStore.inMemory()
+        try store.bind(userId: "user-1", orgId: "org-1", locationId: "loc-1")
+
+        try store.enqueueUpload(pageId: "pg-1", localPath: "/tmp/a.jpg")
+        #expect(try store.pendingUploadCount() == 1)
+
+        var upload = try #require(try store.pendingUploads().first)
+        upload.state = PendingUpload.State.uploaded.rawValue
+        try store.updateUpload(upload)
+
+        #expect(try store.pendingUploadCount() == 0)
     }
 }

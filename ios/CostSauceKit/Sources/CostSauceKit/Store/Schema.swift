@@ -125,6 +125,69 @@ enum Schema {
                 """)
         }
 
+        // Phase 3a. A SECOND migration rather than an edit to "v1": v1 has
+        // shipped, and GRDB records which migrations have run -- editing it
+        // would leave every existing install without these tables.
+        migrator.registerMigration("v2") { db in
+            try db.execute(sql: """
+                CREATE TABLE invoices (
+                    id TEXT PRIMARY KEY,
+                    location_id TEXT NOT NULL,
+                    captured_at TEXT NOT NULL,
+                    parse_status TEXT NOT NULL,
+                    client_mutated_at TEXT NOT NULL,
+                    server_seq INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    deleted_at TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """)
+
+            // page_no/width/height are integers server-side but TEXT here,
+            // like every other synced column (this file's header comment) --
+            // server_seq is the sole INTEGER exception.
+            try db.execute(sql: """
+                CREATE TABLE invoice_pages (
+                    id TEXT PRIMARY KEY,
+                    invoice_id TEXT NOT NULL,
+                    location_id TEXT NOT NULL,
+                    page_no TEXT NOT NULL,
+                    storage_path TEXT NOT NULL,
+                    width TEXT,
+                    height TEXT,
+                    sha256 TEXT,
+                    client_mutated_at TEXT NOT NULL,
+                    server_seq INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    deleted_at TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """)
+            try db.execute(sql: """
+                CREATE INDEX invoice_pages_invoice_deleted_idx
+                    ON invoice_pages(invoice_id, deleted_at)
+                """)
+
+            // Local-only, like pending_ops: the upload outbox (spec 3a-D2).
+            // Never synced and never pushed -- it tracks BYTES, not rows, and
+            // a stalled 12MB page must not block the JSON op batch.
+            try db.execute(sql: """
+                CREATE TABLE pending_uploads (
+                    page_id TEXT PRIMARY KEY,
+                    local_path TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    attempts INTEGER NOT NULL,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """)
+            try db.execute(sql: """
+                CREATE INDEX pending_uploads_state_idx ON pending_uploads(state)
+                """)
+
+            try db.execute(sql: "ALTER TABLE purchases ADD COLUMN invoice_page_id TEXT")
+        }
+
         return migrator
     }
 }
