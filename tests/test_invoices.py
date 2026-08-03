@@ -208,3 +208,85 @@ async def test_confirm_404s_for_a_page_that_does_not_exist(
         headers=auth(s["alice"]))
 
     assert r.status_code == 404
+
+
+async def _fake_sign_get(path):
+    return f"https://storage.test/get/{path}", "2026-08-03T12:00:00+00:00"
+
+
+async def _confirm(raw_conn, inv, loc, page_no=1):
+    """A page WITH bytes: sha256 set is what makes it downloadable."""
+    page = await _mint_page(raw_conn, inv, loc, page_no)
+    await raw_conn.execute(
+        "UPDATE invoice_pages SET sha256 = %s, width = 1694, height = 2200"
+        " WHERE id = %s", ("a" * 64, page))
+    await raw_conn.commit()
+    return page
+
+
+async def test_download_url_signs_the_same_key_the_upload_wrote(
+        app_client, seeded_biz, raw_conn, monkeypatch):
+    """Download must resolve against the key upload derived, or it 404s in
+    the bucket while both endpoints look correct in isolation."""
+    import api.routes.invoices as mod
+    monkeypatch.setattr(mod, "sign_get", lambda path: _fake_sign_get(path))
+
+    s = seeded_biz
+    inv = await _mint_invoice_for(raw_conn, s["acme_loc"])
+    await _confirm(raw_conn, inv, s["acme_loc"], 2)
+
+    r = await app_client.post(
+        f"/invoices/{inv}/pages/2/download-url", headers=auth(s["alice"]))
+
+    assert r.status_code == 200, r.text
+    assert r.json()["url"].endswith(f"{s['acme']}/{inv}/2.jpg")
+    assert r.json()["expires_at"]
+
+
+async def test_download_url_409s_for_a_page_whose_bytes_never_confirmed(
+        app_client, seeded_biz, raw_conn, monkeypatch):
+    """Not 404: the row exists and is legitimately ours. 409 says the page
+    is not in a state that has bytes, which is the truth and is actionable."""
+    import api.routes.invoices as mod
+    monkeypatch.setattr(mod, "sign_get", lambda path: _fake_sign_get(path))
+
+    s = seeded_biz
+    inv = await _mint_invoice_for(raw_conn, s["acme_loc"])
+    await _mint_page(raw_conn, inv, s["acme_loc"], 1)   # no sha256
+    await raw_conn.commit()
+
+    r = await app_client.post(
+        f"/invoices/{inv}/pages/1/download-url", headers=auth(s["alice"]))
+
+    assert r.status_code == 409, r.text
+
+
+async def test_download_url_404s_for_another_orgs_invoice(
+        app_client, seeded_biz, raw_conn, monkeypatch):
+    """404, never 403: distinguishing 'absent' from 'not yours' would leak
+    the existence of another org's invoice."""
+    import api.routes.invoices as mod
+    monkeypatch.setattr(mod, "sign_get", lambda path: _fake_sign_get(path))
+
+    s = seeded_biz
+    inv = await _mint_invoice_for(raw_conn, s["acme_loc"])
+    await _confirm(raw_conn, inv, s["acme_loc"], 1)
+
+    r = await app_client.post(
+        f"/invoices/{inv}/pages/1/download-url", headers=auth(s["bob"]))
+
+    assert r.status_code == 404, r.text
+
+
+async def test_download_url_404s_for_a_page_that_does_not_exist(
+        app_client, seeded_biz, raw_conn, monkeypatch):
+    import api.routes.invoices as mod
+    monkeypatch.setattr(mod, "sign_get", lambda path: _fake_sign_get(path))
+
+    s = seeded_biz
+    inv = await _mint_invoice_for(raw_conn, s["acme_loc"])
+
+    r = await app_client.post(
+        f"/invoices/{inv}/pages/7/download-url", headers=auth(s["alice"]))
+
+    assert r.status_code == 404, r.text
