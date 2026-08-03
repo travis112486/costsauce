@@ -455,8 +455,19 @@ public final class LocalStore: Sendable {
 
     /// Deletes all rows, including meta — an identity switch or an
     /// org-deleted signal both need to leave nothing behind.
-    public func wipe() throws {
+    ///
+    /// Returns the `local_path` of every page image the upload outbox
+    /// knew about, collected inside the same transaction, BEFORE the
+    /// DELETEs (§11): the JPEGs live on the filesystem and would survive a
+    /// rows-only wipe, leaving another org's invoice photographs in the
+    /// container on a shared or resold phone. Returning the paths rather
+    /// than deleting the files here keeps this store free of filesystem
+    /// concerns beyond the database file it already owns — the caller
+    /// (AppModel) owns the actual file deletion.
+    public func wipe() throws -> [String] {
         try dbQueue.write { db in
+            let orphanedPaths = try String.fetchAll(
+                db, sql: "SELECT local_path FROM pending_uploads")
             try db.execute(sql: "DELETE FROM ingredients")
             try db.execute(sql: "DELETE FROM recipes")
             try db.execute(sql: "DELETE FROM recipe_items")
@@ -466,6 +477,7 @@ public final class LocalStore: Sendable {
             try db.execute(sql: "DELETE FROM pending_uploads")
             try db.execute(sql: "DELETE FROM pending_ops")
             try db.execute(sql: "DELETE FROM meta")
+            return orphanedPaths
         }
     }
 

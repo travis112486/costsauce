@@ -518,7 +518,7 @@ import GRDB
             client_mutated_at: "t1", kind: .update, fields: ["name": "X"],
             state: .queued, reason: nil, created_at: "t1"))
 
-        try store.wipe()
+        _ = try store.wipe()
 
         #expect(try store.meta() == nil)
         #expect(try store.liveIngredients().isEmpty)
@@ -558,8 +558,23 @@ import GRDB
         #expect(try store.liveInvoices().count == 2)
 
         // wipe
-        try store.wipe()
+        _ = try store.wipe()
         #expect(try store.liveInvoices().isEmpty)
+    }
+
+    /// §11: wiping for an identity switch must take the IMAGES, not just
+    /// the rows. A rows-only wipe leaves another org's invoice photographs
+    /// sitting in the app container.
+    @Test func wipeReturnsEveryLocalImagePathSoTheFilesCanBeDeleted() throws {
+        let store = try LocalStore.inMemory()
+        try store.bind(userId: "user-1", orgId: "org-1", locationId: "loc-1")
+        try store.enqueueUpload(pageId: "pg-1", localPath: "/tmp/a.jpg")
+        try store.enqueueUpload(pageId: "pg-2", localPath: "/tmp/b.jpg")
+
+        let orphanedPaths = try store.wipe()
+
+        #expect(Set(orphanedPaths) == ["/tmp/a.jpg", "/tmp/b.jpg"])
+        #expect(try store.pendingUploadCount() == 0)
     }
 
     /// page_no is TEXT, so ordering must CAST -- a plain string sort puts

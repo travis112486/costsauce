@@ -251,6 +251,35 @@ final class AppModel {
         try? FileManager.default.removeItem(atPath: Self.storePath(userId: userId, orgId: orgId))
     }
 
+    /// §11 image erasure, the filesystem half of `LocalStore.wipe()`: the
+    /// wiped store returns the `local_path` of every page image its upload
+    /// outbox knew about, and this deletes exactly those files. Same
+    /// exact-scope rule as `removeStoreFile` directly above: only EMPTY
+    /// directories are cleaned up afterwards, never a recursive sweep --
+    /// the `invoices` container is shared by every org this user holds a
+    /// store for, and another org's photographs must survive an erase whose
+    /// on-screen consent never covered them.
+    private static func removeInvoiceImages(atPaths paths: [String]) {
+        let fileManager = FileManager.default
+        var parents = Set<String>()
+        for path in paths {
+            InvoiceFiles.delete(atPath: path)
+            parents.insert((path as NSString).deletingLastPathComponent)
+        }
+        for parent in parents
+        where (try? fileManager.contentsOfDirectory(atPath: parent))?.isEmpty == true {
+            try? fileManager.removeItem(atPath: parent)
+        }
+        guard let base = try? fileManager.url(
+            for: .applicationSupportDirectory, in: .userDomainMask,
+            appropriateFor: nil, create: false)
+        else { return }
+        let invoicesDirectory = base.appendingPathComponent("invoices", isDirectory: true)
+        if (try? fileManager.contentsOfDirectory(atPath: invoicesDirectory.path))?.isEmpty == true {
+            try? fileManager.removeItem(at: invoicesDirectory)
+        }
+    }
+
     // MARK: - location snapshot (offline cold start)
 
     /// `tryFastPathToMain` enters `.main` without ever calling `/locations`
@@ -563,7 +592,9 @@ final class AppModel {
     /// bound under the new identity, exactly like a first-time sign-in.
     func switchAccountAndErase() {
         guard mismatchedStore != nil else { return }
-        try? mismatchedStore?.wipe()
+        // Optional chaining, not a local binding -- see this method's doc
+        // comment for why `mismatchedStore` must never be bound to a `let`.
+        let orphanedImagePaths = (try? mismatchedStore?.wipe()) ?? []
         let oldMeta = mismatchedMeta
         let sessionToAdopt = mismatchedSession
 
@@ -591,6 +622,7 @@ final class AppModel {
                 userId: oldMeta.user_id, orgId: oldMeta.org_id, locationId: oldMeta.location_id)
             Self.clearRoleSnapshot(userId: oldMeta.user_id, orgId: oldMeta.org_id)
         }
+        Self.removeInvoiceImages(atPaths: orphanedImagePaths)
         if let sessionToAdopt {
             session.adopt(sessionToAdopt)
             tokenBox.set(sessionToAdopt.accessToken)
@@ -629,7 +661,7 @@ final class AppModel {
     /// alone isn't enough.
     func eraseDeviceAndSignOut() {
         let oldMeta = try? store?.meta()
-        try? store?.wipe()
+        let orphanedImagePaths = (try? store?.wipe()) ?? []
         signOut()
         if let oldMeta {
             Self.removeStoreFile(userId: oldMeta.user_id, orgId: oldMeta.org_id)
@@ -637,6 +669,7 @@ final class AppModel {
                 userId: oldMeta.user_id, orgId: oldMeta.org_id, locationId: oldMeta.location_id)
             Self.clearRoleSnapshot(userId: oldMeta.user_id, orgId: oldMeta.org_id)
         }
+        Self.removeInvoiceImages(atPaths: orphanedImagePaths)
     }
 
     // MARK: - bootstrap
@@ -817,13 +850,18 @@ final class AppModel {
 
     /// Internal, not private: `BackgroundUploader` refreshes the badge the
     /// moment an upload lands, the same way edit-driven callers do through
-    /// `syncSoon()`. (Task 8 folds `pendingUploadCount` into this figure.)
+    /// `syncSoon()`.
     func refreshPendingCount() {
         guard let store else {
             pendingCount = 0
             return
         }
-        pendingCount = (try? store.pendingCount()) ?? 0
+        // §9: a captured-but-unuploaded page is unsynced data living only
+        // in the app container. Counting only pending_ops would make the
+        // app read as safe in precisely the delete-and-reinstall situation
+        // §13 exists to prevent.
+        pendingCount =
+            ((try? store.pendingCount()) ?? 0) + ((try? store.pendingUploadCount()) ?? 0)
     }
 
     /// Debounced `syncNow` for edit-driven callers (Tasks 10-14's views,
