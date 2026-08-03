@@ -386,3 +386,47 @@ async def test_recipe_item_insert_new_pair_creates_new_row(pool, actors):
         row_id, qty = await cur.fetchone()
         assert row_id == new_row_id
         assert str(qty) == "1.5000"
+
+
+# --- Phase 3a: the table config itself ---------------------------------
+# These assert on module constants rather than on applied rows: the 3a
+# change REORDERS TABLE_ORDER rather than appending to it (purchases moves
+# last for its new invoice_pages FK), and an ordering regression there
+# would surface as a confusing FK violation deep in a batch apply rather
+# than as anything naming the ordering.
+
+from api.services.sync import TABLE_ORDER, INSERT_FIELDS, UPDATE_FIELDS  # noqa: E402
+
+
+def test_table_order_is_a_valid_fk_topological_sort():
+    """Every table must appear after every table it references. Asserted as
+    a property, not as a literal tuple, so a future table cannot be appended
+    blindly into a position that breaks the apply path."""
+    references = {
+        "ingredients": set(),
+        "recipes": set(),
+        "recipe_items": {"recipes", "ingredients"},
+        "invoices": set(),
+        "invoice_pages": {"invoices"},
+        "purchases": {"ingredients", "invoice_pages"},
+    }
+    position = {t: i for i, t in enumerate(TABLE_ORDER)}
+    assert set(position) == set(references), "TABLE_ORDER and the FK map disagree"
+    for table, parents in references.items():
+        for parent in parents:
+            assert position[parent] < position[table], (
+                f"{table} applies before its parent {parent}")
+
+
+def test_purchases_applies_after_invoice_pages():
+    """The specific regression the 3a reorder introduces: a batch carrying a
+    purchase AND the page it points at must apply the page first."""
+    assert TABLE_ORDER.index("invoice_pages") < TABLE_ORDER.index("purchases")
+
+
+def test_invoice_field_allowlists_exclude_identity_and_server_owned_columns():
+    assert "location_id" not in INSERT_FIELDS["invoices"]
+    assert "server_seq" not in INSERT_FIELDS["invoices"]
+    # invoice_id and page_no identify the page; repointing is not sync's job.
+    assert "invoice_id" not in UPDATE_FIELDS["invoice_pages"]
+    assert "page_no" not in UPDATE_FIELDS["invoice_pages"]

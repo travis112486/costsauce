@@ -20,21 +20,34 @@ from psycopg.errors import (
 
 SYNC_PAGE_CAP = 500
 MAX_BATCH_OPS = 200
-TABLE_ORDER = ("ingredients", "recipes", "recipe_items", "purchases")  # §5.5 FK order
+# §5.5 FK order. purchases moved LAST in Phase 3a: it gained an
+# invoice_pages FK, so a batch carrying a purchase AND the page it points at
+# must apply the page first. This is a REORDER, not an append.
+TABLE_ORDER = ("ingredients", "recipes", "recipe_items",
+               "invoices", "invoice_pages", "purchases")
 
 INSERT_FIELDS = {
     "ingredients": {"name", "base_unit", "vendor", "category", "source", "deleted_at"},
     "recipes": {"name", "menu_price", "target_fc_pct", "deleted_at"},
     "recipe_items": {"recipe_id", "ingredient_id", "qty_base_units", "deleted_at"},
+    "invoices": {"captured_at", "parse_status", "deleted_at"},
+    "invoice_pages": {"invoice_id", "page_no", "storage_path", "width", "height",
+                      "sha256", "deleted_at"},
     "purchases": {"ingredient_id", "purchased_on", "recorded_at", "qty", "unit",
-                  "qty_in_case", "qty_base_units", "total_price", "source", "deleted_at"},
+                  "qty_in_case", "qty_base_units", "total_price", "source",
+                  "invoice_page_id", "deleted_at"},
 }
 UPDATE_FIELDS = {  # identity fields immutable: repointing is merge's job, never sync's
     "ingredients": {"name", "base_unit", "vendor", "category", "deleted_at"},
     "recipes": {"name", "menu_price", "target_fc_pct", "deleted_at"},
     "recipe_items": {"qty_base_units", "deleted_at"},
+    "invoices": {"parse_status", "deleted_at"},
+    # storage_path/sha256/width/height are set by the confirm endpoint once
+    # the bytes land, so they must be updatable; invoice_id/page_no are the
+    # page's identity and never are.
+    "invoice_pages": {"storage_path", "width", "height", "sha256", "deleted_at"},
     "purchases": {"purchased_on", "recorded_at", "qty", "unit", "qty_in_case",
-                  "qty_base_units", "total_price", "deleted_at"},
+                  "qty_base_units", "total_price", "invoice_page_id", "deleted_at"},
 }
 
 # Parent tables each syncable table's INSERT must check for liveness at
@@ -47,6 +60,7 @@ _PARENT_CHECKS = {
         ("recipe_id", "recipes", "recipe"),
         ("ingredient_id", "ingredients", "ingredient"),
     ),
+    "invoice_pages": (("invoice_id", "invoices", "invoice"),),
 }
 
 _REASONS = [
@@ -180,6 +194,29 @@ _PULL = {
         " 'created_at', t.created_at::text)"
         " FROM recipe_items t JOIN locations l ON l.id = t.location_id"
         " WHERE l.org_id = %(org)s AND t.server_seq > %(since)s"),
+    "invoices": (
+        "SELECT 'invoices', t.server_seq, jsonb_build_object("
+        "'id', t.id::text, 'location_id', t.location_id::text,"
+        " 'captured_at', t.captured_at::text, 'parse_status', t.parse_status,"
+        " 'client_mutated_at', t.client_mutated_at::text, 'server_seq', t.server_seq,"
+        " 'updated_at', t.updated_at::text, 'deleted_at', t.deleted_at::text,"
+        " 'created_at', t.created_at::text)"
+        " FROM invoices t JOIN locations l ON l.id = t.location_id"
+        " WHERE l.org_id = %(org)s AND t.server_seq > %(since)s"),
+    # page_no/width/height are integers in Postgres but cross this boundary
+    # as text like every other value: the device stores every synced column
+    # as TEXT (CostSauceKit Schema.swift), server_seq alone excepted.
+    "invoice_pages": (
+        "SELECT 'invoice_pages', t.server_seq, jsonb_build_object("
+        "'id', t.id::text, 'invoice_id', t.invoice_id::text,"
+        " 'location_id', t.location_id::text, 'page_no', t.page_no::text,"
+        " 'storage_path', t.storage_path, 'width', t.width::text,"
+        " 'height', t.height::text, 'sha256', t.sha256,"
+        " 'client_mutated_at', t.client_mutated_at::text, 'server_seq', t.server_seq,"
+        " 'updated_at', t.updated_at::text, 'deleted_at', t.deleted_at::text,"
+        " 'created_at', t.created_at::text)"
+        " FROM invoice_pages t JOIN locations l ON l.id = t.location_id"
+        " WHERE l.org_id = %(org)s AND t.server_seq > %(since)s"),
     "purchases": (
         "SELECT 'purchases', t.server_seq, jsonb_build_object("
         "'id', t.id::text, 'location_id', t.location_id::text,"
@@ -187,7 +224,8 @@ _PULL = {
         " 'recorded_at', t.recorded_at::text, 'qty', t.qty::text, 'unit', t.unit,"
         " 'qty_in_case', t.qty_in_case::text, 'qty_base_units', t.qty_base_units::text,"
         " 'total_price', t.total_price::text, 'unit_price', t.unit_price::text,"
-        " 'source', t.source, 'client_mutated_at', t.client_mutated_at::text,"
+        " 'source', t.source, 'invoice_page_id', t.invoice_page_id::text,"
+        " 'client_mutated_at', t.client_mutated_at::text,"
         " 'server_seq', t.server_seq, 'updated_at', t.updated_at::text,"
         " 'deleted_at', t.deleted_at::text, 'created_at', t.created_at::text)"
         " FROM purchases t JOIN locations l ON l.id = t.location_id"
