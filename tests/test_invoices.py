@@ -127,3 +127,84 @@ async def test_cross_org_invoice_insert_blocked_by_with_check(pool, actors):
                 "INSERT INTO invoices (location_id, captured_at, client_mutated_at)"
                 " VALUES (%s, now(), now())", (actors["loc"],))
     assert "row-level security" in str(exc.value).lower()
+
+
+# --- The upload-URL and confirm endpoints ------------------------------
+# These use app_client/seeded_biz/auth like every other route test, rather
+# than the RLS fixtures above: they exercise the HTTP surface, not policies.
+
+from tests.test_ingredients_routes import auth  # noqa: E402
+
+
+async def _mint_invoice_for(raw_conn, loc):
+    inv = await _mint_invoice(raw_conn, loc)
+    await raw_conn.commit()
+    return inv
+
+
+async def test_upload_url_path_is_org_invoice_page_jpg(
+        app_client, seeded_biz, raw_conn, monkeypatch):
+    """The key the client will independently derive. Both sides must agree
+    byte for byte or uploads land where nothing reads them."""
+    import api.routes.invoices as mod
+    monkeypatch.setattr(
+        mod, "sign_put",
+        lambda path: _fake_sign(path))
+
+    s = seeded_biz
+    inv = await _mint_invoice_for(raw_conn, s["acme_loc"])
+
+    r = await app_client.post(
+        f"/invoices/{inv}/pages/2/upload-url", headers=auth(s["alice"]))
+
+    assert r.status_code == 200, r.text
+    assert r.json()["storage_path"] == f"{s['acme']}/{inv}/2.jpg"
+
+
+async def _fake_sign(path):
+    return f"https://storage.test/put/{path}", "2026-08-03T12:00:00+00:00"
+
+
+async def test_upload_url_404s_for_another_orgs_invoice(
+        app_client, seeded_biz, raw_conn, monkeypatch):
+    import api.routes.invoices as mod
+    monkeypatch.setattr(mod, "sign_put", lambda path: _fake_sign(path))
+    s = seeded_biz
+    inv = await _mint_invoice_for(raw_conn, s["acme_loc"])
+
+    r = await app_client.post(
+        f"/invoices/{inv}/pages/1/upload-url", headers=auth(s["bob"]))
+
+    assert r.status_code == 404
+
+
+async def test_confirm_records_sha_and_dimensions(app_client, seeded_biz, raw_conn):
+    s = seeded_biz
+    inv = await _mint_invoice(raw_conn, s["acme_loc"])
+    page = await _mint_page(raw_conn, inv, s["acme_loc"])
+    await raw_conn.commit()
+
+    r = await app_client.post(
+        f"/invoices/{inv}/pages/1/confirm",
+        json={"sha256": "a" * 64, "width": 1700, "height": 2200},
+        headers=auth(s["alice"]))
+
+    assert r.status_code == 204, r.text
+    cur = await raw_conn.execute(
+        "SELECT sha256, width, height FROM invoice_pages WHERE id = %s", (page,))
+    assert await cur.fetchone() == ("a" * 64, 1700, 2200)
+
+
+async def test_confirm_404s_for_a_page_that_does_not_exist(
+        app_client, seeded_biz, raw_conn):
+    """Confirm exists precisely so the server records that bytes arrived; a
+    confirm for a page it has never seen must not silently succeed."""
+    s = seeded_biz
+    inv = await _mint_invoice_for(raw_conn, s["acme_loc"])
+
+    r = await app_client.post(
+        f"/invoices/{inv}/pages/9/confirm",
+        json={"sha256": "b" * 64, "width": 10, "height": 10},
+        headers=auth(s["alice"]))
+
+    assert r.status_code == 404
