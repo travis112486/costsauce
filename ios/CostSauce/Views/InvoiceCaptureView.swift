@@ -130,6 +130,13 @@ struct InvoiceCaptureView: View {
         } catch {
             captureErrorMessage = error.localizedDescription
         }
+
+        // Once per capture SESSION, not per page: sweeping between pages of
+        // one multi-page invoice measures a cache still mid-growth and could
+        // evict page 1 while page 3 is still being written.
+        if let store = appModel.store {
+            ImageSweeper.sweep(store: store)
+        }
     }
 
     /// The scanner is a UIKit controller and needs a presenter. Walks from
