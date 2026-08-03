@@ -63,6 +63,41 @@ import Foundation
         #expect(!op.fields.keys.contains("qty_in_case"), "qty_in_case key must be absent for unit lb")
     }
 
+    @Test func createPurchaseCarriesTheInvoicePageItWasKeyedFrom() throws {
+        let store = try seededStore([
+            StoreTests.ingredientChange(id: "ing-1", name: "Flour", baseUnit: "lb", serverSeq: 1),
+        ])
+        let edits = LocalEdits(store: store, locationId: "loc-1")
+
+        let id = try edits.createPurchase(
+            ingredientId: "ing-1", purchasedOn: "2026-08-03", qty: "10", unit: "lb",
+            qtyInCase: nil, totalPrice: "55.10", invoicePageId: "pg-1")
+
+        let op = try #require(try store.pendingOps(state: .queued).first { $0.row_id == id })
+        #expect(fieldValue(op, "invoice_page_id") == "pg-1")
+        // 3a-D5: a human keyed this while looking at a photo -- it is
+        // manual. The op omits `source` entirely (the same convention every
+        // other server-defaulted column follows), and the schema's
+        // NOT NULL DEFAULT 'manual' is what makes that the recorded value.
+        #expect(!op.fields.keys.contains("source"))
+    }
+
+    /// The parameter is defaulted, so every pre-3a call site is unchanged --
+    /// and must not start sending an explicit null.
+    @Test func createPurchaseWithoutAPageOmitsTheKeyEntirely() throws {
+        let store = try seededStore([
+            StoreTests.ingredientChange(id: "ing-1", name: "Flour", baseUnit: "lb", serverSeq: 1),
+        ])
+        let edits = LocalEdits(store: store, locationId: "loc-1")
+
+        let id = try edits.createPurchase(
+            ingredientId: "ing-1", purchasedOn: "2026-08-03", qty: "10", unit: "lb",
+            qtyInCase: nil, totalPrice: "55.10")
+
+        let op = try #require(try store.pendingOps(state: .queued).first { $0.row_id == id })
+        #expect(!op.fields.keys.contains("invoice_page_id"))
+    }
+
     @Test func createPurchaseCaseUnitIncludesQtyInCaseAndLowercasesUnit() throws {
         let store = try seededStore([
             StoreTests.ingredientChange(id: "ing-1", name: "Eggs", baseUnit: "each", serverSeq: 1),

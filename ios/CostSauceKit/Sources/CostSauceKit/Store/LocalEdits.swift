@@ -79,7 +79,8 @@ public struct LocalEdits {
     /// `KernelError` on anything invalid, same as the server's own kernel call.
     public func createPurchase(
         ingredientId: String, purchasedOn: String, qty: String, unit: String,
-        qtyInCase: String?, totalPrice: String, now: Date = Date()
+        qtyInCase: String?, totalPrice: String, invoicePageId: String? = nil,
+        now: Date = Date()
     ) throws -> String {
         guard let ingredient = try store.ingredient(id: ingredientId) else {
             throw KernelError("ingredient not found")
@@ -104,6 +105,14 @@ public struct LocalEdits {
         ]
         if normalizedUnit == "case" {
             fields["qty_in_case"] = qtyInCase
+        }
+        // Omitted entirely when nil, never sent as an explicit null -- the
+        // same "was a value supplied" rule every other optional field here
+        // follows. 3a-D5: even keyed against a photo, the purchase's
+        // `source` stays server-defaulted 'manual'; this link records
+        // provenance, not automation.
+        if let invoicePageId {
+            fields["invoice_page_id"] = invoicePageId
         }
 
         try store.enqueue(PendingOp(
