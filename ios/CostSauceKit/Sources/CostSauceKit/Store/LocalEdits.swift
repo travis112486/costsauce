@@ -79,7 +79,8 @@ public struct LocalEdits {
     /// `KernelError` on anything invalid, same as the server's own kernel call.
     public func createPurchase(
         ingredientId: String, purchasedOn: String, qty: String, unit: String,
-        qtyInCase: String?, totalPrice: String, now: Date = Date()
+        qtyInCase: String?, totalPrice: String, invoicePageId: String? = nil,
+        now: Date = Date()
     ) throws -> String {
         guard let ingredient = try store.ingredient(id: ingredientId) else {
             throw KernelError("ingredient not found")
@@ -104,6 +105,14 @@ public struct LocalEdits {
         ]
         if normalizedUnit == "case" {
             fields["qty_in_case"] = qtyInCase
+        }
+        // Omitted entirely when nil, never sent as an explicit null -- the
+        // same "was a value supplied" rule every other optional field here
+        // follows. 3a-D5: even keyed against a photo, the purchase's
+        // `source` stays server-defaulted 'manual'; this link records
+        // provenance, not automation.
+        if let invoicePageId {
+            fields["invoice_page_id"] = invoicePageId
         }
 
         try store.enqueue(PendingOp(
@@ -391,5 +400,80 @@ public struct LocalEdits {
 
         try store.enqueueBatch(ops)
         return recipeId
+    }
+
+    // MARK: - Invoices (Phase 3a)
+
+    /// Mints an invoice. `INSERT_FIELDS.invoices` is `{captured_at,
+    /// parse_status, deleted_at}`; this sends the first two. `parse_status`
+    /// is always "unparsed" from a device -- 'failed' belongs to 3b's
+    /// parser, and the schema CHECK admits no other value in 3a.
+    public func createInvoice(now: Date = Date()) throws -> String {
+        let rowId = UUIDv7.generate(now: now)
+        let opId = UUIDv7.generate(now: now)
+        let mutatedAt = Kernel.canonicalTimestamp(now)
+        try store.enqueue(PendingOp(
+            op_id: opId, table: "invoices", row_id: rowId, location_id: locationId,
+            client_mutated_at: mutatedAt, kind: .insert,
+            fields: ["captured_at": mutatedAt, "parse_status": "unparsed"],
+            state: .queued, reason: nil, created_at: mutatedAt))
+        return rowId
+    }
+
+    /// Adds a page. Returns the new row id AND its storage path, because the
+    /// caller needs the path immediately: it is where the JPEG is written
+    /// and what the upload targets, both of which happen before any network
+    /// call (spec §12 step 3, §7.1).
+    ///
+    /// The invoice must be live -- the same guard `addRecipeLine` and
+    /// `tombstoneRecipe` already run. `page_no` crosses as a STRING like
+    /// every other field value, though it is an int server-side.
+    public func addInvoicePage(
+        invoiceId: String, pageNo: Int, orgId: String, now: Date = Date()
+    ) throws -> (pageId: String, storagePath: String) {
+        guard let invoice = try store.invoice(id: invoiceId), invoice.deleted_at == nil else {
+            throw KernelError("invoice is not live")
+        }
+        guard pageNo > 0 else {
+            throw KernelError("page_no must be greater than zero")
+        }
+        let path = StoragePath.forPage(orgId: orgId, invoiceId: invoiceId, pageNo: pageNo)
+        let rowId = UUIDv7.generate(now: now)
+        let opId = UUIDv7.generate(now: now)
+        let mutatedAt = Kernel.canonicalTimestamp(now)
+        try store.enqueue(PendingOp(
+            op_id: opId, table: "invoice_pages", row_id: rowId, location_id: locationId,
+            client_mutated_at: mutatedAt, kind: .insert,
+            fields: ["invoice_id": invoiceId, "page_no": String(pageNo), "storage_path": path],
+            state: .queued, reason: nil, created_at: mutatedAt))
+        return (rowId, path)
+    }
+
+    /// Deletes an invoice by tombstoning it AND every one of its live pages,
+    /// one `deleted_at` op per row, all sharing a single timestamp, enqueued
+    /// in ONE transaction -- the same fan-out `tombstoneRecipe` performs and
+    /// for the same reason: a tombstone op does NOT cascade server-side, so
+    /// skipping the fan-out strands live pages against a dead invoice.
+    public func tombstoneInvoice(id: String, now: Date = Date()) throws {
+        guard let invoice = try store.invoice(id: id), invoice.deleted_at == nil else {
+            throw KernelError("invoice is not live")
+        }
+        let livePages = try store.livePages(invoiceId: id)
+        let mutatedAt = Kernel.canonicalTimestamp(now)
+
+        var ops: [PendingOp] = livePages.map { page in
+            PendingOp(
+                op_id: UUIDv7.generate(now: now), table: "invoice_pages", row_id: page.id,
+                location_id: locationId, client_mutated_at: mutatedAt, kind: .update,
+                fields: ["deleted_at": mutatedAt],
+                state: .queued, reason: nil, created_at: mutatedAt)
+        }
+        ops.append(PendingOp(
+            op_id: UUIDv7.generate(now: now), table: "invoices", row_id: id,
+            location_id: locationId, client_mutated_at: mutatedAt, kind: .update,
+            fields: ["deleted_at": mutatedAt],
+            state: .queued, reason: nil, created_at: mutatedAt))
+
+        try store.enqueueBatch(ops)
     }
 }

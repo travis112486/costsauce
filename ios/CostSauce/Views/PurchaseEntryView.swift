@@ -25,6 +25,12 @@ import CostSauceKit
 struct PurchaseEntryView: View {
     let appModel: AppModel
 
+    /// Photo-assisted entry (Phase 3a): non-nil when this form was pushed
+    /// from an `InvoicePageView`, so the purchase minted here records which
+    /// page it was keyed against. Defaulted, so every pre-3a call site --
+    /// the Add tab foremost -- compiles and behaves identically.
+    var invoicePageId: String? = nil
+
     /// The currently picked ingredient, kept in sync with
     /// `IngredientPickerView`'s live `effectiveIngredient` via its `onPick`/
     /// `onClear` pair -- the extracted component owns the search/match/
@@ -159,7 +165,8 @@ struct PurchaseEntryView: View {
         do {
             let id = try edits.createPurchase(
                 ingredientId: ingredient.id, purchasedOn: purchasedOn, qty: qty, unit: unit,
-                qtyInCase: unit == "case" ? qtyInCase : nil, totalPrice: totalPrice)
+                qtyInCase: unit == "case" ? qtyInCase : nil, totalPrice: totalPrice,
+                invoicePageId: invoicePageId)
             savedMessage = successMessage(purchaseId: id, ingredient: ingredient)
             appModel.syncSoon()
             resetFormKeepingDate()

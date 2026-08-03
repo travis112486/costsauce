@@ -148,6 +148,10 @@ public struct LocalPurchase: Codable, FetchableRecord, PersistableRecord, Equata
     /// purchase prices identically to a synced one.
     public var unit_price: String?
     public var source: String?
+    /// Phase 3a: the invoice page this purchase was keyed in against, when
+    /// it came from photo-assisted entry. Nil for every other purchase, and
+    /// DEFAULTED in the initializer below so no pre-3a call site changes.
+    public var invoice_page_id: String?
     public var client_mutated_at: String
     public var server_seq: Int64
     public var updated_at: String
@@ -158,6 +162,7 @@ public struct LocalPurchase: Codable, FetchableRecord, PersistableRecord, Equata
         id: String, location_id: String, ingredient_id: String, purchased_on: String,
         recorded_at: String, qty: String, unit: String, qty_in_case: String?,
         qty_base_units: String, total_price: String, unit_price: String?, source: String?,
+        invoice_page_id: String? = nil,
         client_mutated_at: String, server_seq: Int64, updated_at: String,
         deleted_at: String?, created_at: String
     ) {
@@ -173,6 +178,7 @@ public struct LocalPurchase: Codable, FetchableRecord, PersistableRecord, Equata
         self.total_price = total_price
         self.unit_price = unit_price
         self.source = source
+        self.invoice_page_id = invoice_page_id
         self.client_mutated_at = client_mutated_at
         self.server_seq = server_seq
         self.updated_at = updated_at
@@ -403,6 +409,156 @@ extension LocalPurchase {
             total_price: try change.requireString("total_price"),
             unit_price: try change.optionalString("unit_price"),
             source: try change.optionalString("source"),
+            invoice_page_id: try change.optionalString("invoice_page_id"),
+            client_mutated_at: try Kernel.canonicalize(change.requireString("client_mutated_at")),
+            server_seq: try change.requireInt64("server_seq"),
+            updated_at: try Kernel.canonicalize(change.requireString("updated_at")),
+            deleted_at: try change.optionalString("deleted_at").map { try Kernel.canonicalize($0) },
+            created_at: try Kernel.canonicalize(change.requireString("created_at"))
+        )
+    }
+}
+
+// MARK: - invoices (Phase 3a)
+
+public struct LocalInvoice: Codable, FetchableRecord, PersistableRecord, Equatable, Sendable {
+    public static let databaseTableName = "invoices"
+
+    public var id: String
+    public var location_id: String
+    public var captured_at: String
+    public var parse_status: String
+    public var client_mutated_at: String
+    public var server_seq: Int64
+    public var updated_at: String
+    public var deleted_at: String?
+    public var created_at: String
+
+    public init(
+        id: String, location_id: String, captured_at: String, parse_status: String,
+        client_mutated_at: String, server_seq: Int64, updated_at: String,
+        deleted_at: String?, created_at: String
+    ) {
+        self.id = id
+        self.location_id = location_id
+        self.captured_at = captured_at
+        self.parse_status = parse_status
+        self.client_mutated_at = client_mutated_at
+        self.server_seq = server_seq
+        self.updated_at = updated_at
+        self.deleted_at = deleted_at
+        self.created_at = created_at
+    }
+}
+
+// MARK: - invoice_pages (Phase 3a)
+
+/// `page_no`, `width` and `height` are `String` here, not `Int`: every
+/// synced column crosses this boundary as a verbatim string (this file's
+/// header comment), and a page number is no exception. The server casts
+/// them to text in its pull SQL for exactly this reason.
+public struct LocalInvoicePage: Codable, FetchableRecord, PersistableRecord, Equatable, Sendable {
+    public static let databaseTableName = "invoice_pages"
+
+    public var id: String
+    public var invoice_id: String
+    public var location_id: String
+    public var page_no: String
+    public var storage_path: String
+    public var width: String?
+    public var height: String?
+    public var sha256: String?
+    public var client_mutated_at: String
+    public var server_seq: Int64
+    public var updated_at: String
+    public var deleted_at: String?
+    public var created_at: String
+
+    public init(
+        id: String, invoice_id: String, location_id: String, page_no: String,
+        storage_path: String, width: String?, height: String?, sha256: String?,
+        client_mutated_at: String, server_seq: Int64, updated_at: String,
+        deleted_at: String?, created_at: String
+    ) {
+        self.id = id
+        self.invoice_id = invoice_id
+        self.location_id = location_id
+        self.page_no = page_no
+        self.storage_path = storage_path
+        self.width = width
+        self.height = height
+        self.sha256 = sha256
+        self.client_mutated_at = client_mutated_at
+        self.server_seq = server_seq
+        self.updated_at = updated_at
+        self.deleted_at = deleted_at
+        self.created_at = created_at
+    }
+}
+
+// MARK: - pending_uploads (Phase 3a, local only -- never synced)
+
+/// The upload outbox's row. Deliberately NOT a syncable record: it tracks
+/// bytes in transit, not server state, and lives only on this device.
+public struct PendingUpload: Codable, FetchableRecord, PersistableRecord, Equatable, Sendable {
+    public static let databaseTableName = "pending_uploads"
+
+    public enum State: String, Codable, Sendable {
+        case queued
+        case uploading
+        case uploaded
+        case failed
+    }
+
+    public var page_id: String
+    public var local_path: String
+    public var state: String
+    public var attempts: Int
+    public var last_error: String?
+    public var created_at: String
+
+    public init(
+        page_id: String, local_path: String, state: State, attempts: Int,
+        last_error: String?, created_at: String
+    ) {
+        self.page_id = page_id
+        self.local_path = local_path
+        self.state = state.rawValue
+        self.attempts = attempts
+        self.last_error = last_error
+        self.created_at = created_at
+    }
+}
+
+extension LocalInvoice {
+    static func fromPull(_ change: PullChange) throws -> LocalInvoice {
+        LocalInvoice(
+            id: try change.requireString("id"),
+            location_id: try change.requireString("location_id"),
+            captured_at: try Kernel.canonicalize(change.requireString("captured_at")),
+            parse_status: try change.requireString("parse_status"),
+            client_mutated_at: try Kernel.canonicalize(change.requireString("client_mutated_at")),
+            server_seq: try change.requireInt64("server_seq"),
+            updated_at: try Kernel.canonicalize(change.requireString("updated_at")),
+            deleted_at: try change.optionalString("deleted_at").map { try Kernel.canonicalize($0) },
+            created_at: try Kernel.canonicalize(change.requireString("created_at"))
+        )
+    }
+}
+
+extension LocalInvoicePage {
+    /// `page_no`/`width`/`height` arrive already text-cast from the server's
+    /// pull SQL and are stored verbatim -- never parsed to Int here.
+    static func fromPull(_ change: PullChange) throws -> LocalInvoicePage {
+        LocalInvoicePage(
+            id: try change.requireString("id"),
+            invoice_id: try change.requireString("invoice_id"),
+            location_id: try change.requireString("location_id"),
+            page_no: try change.requireString("page_no"),
+            storage_path: try change.requireString("storage_path"),
+            width: try change.optionalString("width"),
+            height: try change.optionalString("height"),
+            sha256: try change.optionalString("sha256"),
             client_mutated_at: try Kernel.canonicalize(change.requireString("client_mutated_at")),
             server_seq: try change.requireInt64("server_seq"),
             updated_at: try Kernel.canonicalize(change.requireString("updated_at")),

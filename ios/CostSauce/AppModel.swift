@@ -115,6 +115,12 @@ final class AppModel {
 
     // MARK: - private wiring
 
+    /// The background transfer arm of the upload outbox (Task 7). Lazy
+    /// only to satisfy the `self` reference; `init` forces it immediately,
+    /// because recreating the background URLSession at launch is what
+    /// re-attaches the app to uploads that ran while it was dead.
+    @ObservationIgnored private(set) lazy var uploader = BackgroundUploader(appModel: self)
+
     private let keychain: KeychainStore
     private let tokenBox: TokenBox
     private(set) var boundOrgId: String?
@@ -155,6 +161,11 @@ final class AppModel {
                 self?.tokenBox.set(nil)
             }
         }
+
+        // See `uploader`'s doc comment: forced now so the background
+        // session exists from launch, including a headless relaunch whose
+        // only purpose is delivering that session's events.
+        _ = uploader
     }
 
     // MARK: - base URL
@@ -238,6 +249,35 @@ final class AppModel {
     /// hygiene, never a correctness/identity-mixing risk.
     private static func removeStoreFile(userId: String, orgId: String) {
         try? FileManager.default.removeItem(atPath: Self.storePath(userId: userId, orgId: orgId))
+    }
+
+    /// §11 image erasure, the filesystem half of `LocalStore.wipe()`: the
+    /// wiped store returns the `local_path` of every page image its upload
+    /// outbox knew about, and this deletes exactly those files. Same
+    /// exact-scope rule as `removeStoreFile` directly above: only EMPTY
+    /// directories are cleaned up afterwards, never a recursive sweep --
+    /// the `invoices` container is shared by every org this user holds a
+    /// store for, and another org's photographs must survive an erase whose
+    /// on-screen consent never covered them.
+    private static func removeInvoiceImages(atPaths paths: [String]) {
+        let fileManager = FileManager.default
+        var parents = Set<String>()
+        for path in paths {
+            InvoiceFiles.delete(atPath: path)
+            parents.insert((path as NSString).deletingLastPathComponent)
+        }
+        for parent in parents
+        where (try? fileManager.contentsOfDirectory(atPath: parent))?.isEmpty == true {
+            try? fileManager.removeItem(atPath: parent)
+        }
+        guard let base = try? fileManager.url(
+            for: .applicationSupportDirectory, in: .userDomainMask,
+            appropriateFor: nil, create: false)
+        else { return }
+        let invoicesDirectory = base.appendingPathComponent("invoices", isDirectory: true)
+        if (try? fileManager.contentsOfDirectory(atPath: invoicesDirectory.path))?.isEmpty == true {
+            try? fileManager.removeItem(at: invoicesDirectory)
+        }
     }
 
     // MARK: - location snapshot (offline cold start)
@@ -552,7 +592,9 @@ final class AppModel {
     /// bound under the new identity, exactly like a first-time sign-in.
     func switchAccountAndErase() {
         guard mismatchedStore != nil else { return }
-        try? mismatchedStore?.wipe()
+        // Optional chaining, not a local binding -- see this method's doc
+        // comment for why `mismatchedStore` must never be bound to a `let`.
+        let orphanedImagePaths = (try? mismatchedStore?.wipe()) ?? []
         let oldMeta = mismatchedMeta
         let sessionToAdopt = mismatchedSession
 
@@ -580,6 +622,7 @@ final class AppModel {
                 userId: oldMeta.user_id, orgId: oldMeta.org_id, locationId: oldMeta.location_id)
             Self.clearRoleSnapshot(userId: oldMeta.user_id, orgId: oldMeta.org_id)
         }
+        Self.removeInvoiceImages(atPaths: orphanedImagePaths)
         if let sessionToAdopt {
             session.adopt(sessionToAdopt)
             tokenBox.set(sessionToAdopt.accessToken)
@@ -618,7 +661,7 @@ final class AppModel {
     /// alone isn't enough.
     func eraseDeviceAndSignOut() {
         let oldMeta = try? store?.meta()
-        try? store?.wipe()
+        let orphanedImagePaths = (try? store?.wipe()) ?? []
         signOut()
         if let oldMeta {
             Self.removeStoreFile(userId: oldMeta.user_id, orgId: oldMeta.org_id)
@@ -626,6 +669,7 @@ final class AppModel {
                 userId: oldMeta.user_id, orgId: oldMeta.org_id, locationId: oldMeta.location_id)
             Self.clearRoleSnapshot(userId: oldMeta.user_id, orgId: oldMeta.org_id)
         }
+        Self.removeInvoiceImages(atPaths: orphanedImagePaths)
     }
 
     // MARK: - bootstrap
@@ -804,12 +848,20 @@ final class AppModel {
         }
     }
 
-    private func refreshPendingCount() {
+    /// Internal, not private: `BackgroundUploader` refreshes the badge the
+    /// moment an upload lands, the same way edit-driven callers do through
+    /// `syncSoon()`.
+    func refreshPendingCount() {
         guard let store else {
             pendingCount = 0
             return
         }
-        pendingCount = (try? store.pendingCount()) ?? 0
+        // §9: a captured-but-unuploaded page is unsynced data living only
+        // in the app container. Counting only pending_ops would make the
+        // app read as safe in precisely the delete-and-reinstall situation
+        // §13 exists to prevent.
+        pendingCount =
+            ((try? store.pendingCount()) ?? 0) + ((try? store.pendingUploadCount()) ?? 0)
     }
 
     /// Debounced `syncNow` for edit-driven callers (Tasks 10-14's views,
@@ -817,6 +869,19 @@ final class AppModel {
     /// instead of a round trip per save, while still refreshing
     /// `pendingCount` immediately so the chip/badge never lags an edit
     /// that's already visible to local reads.
+    /// Where captured pages come from. UITEST substitutes a generated
+    /// fixture for the camera the simulator does not have -- the same
+    /// environment flag `AppModel.init` already consults to wipe the
+    /// Keychain and store on launch. Without this substitution the Phase 3a
+    /// acceptance walk could not run at all.
+    var pageSource: any ScannedPageSource {
+        if ProcessInfo.processInfo.environment["UITEST"] == "1",
+           let fixture = FixtureInvoicePage.make() {
+            return FixturePageSource(images: [fixture])
+        }
+        return DocumentScannerSource()
+    }
+
     func syncSoon() {
         refreshPendingCount()
         syncDebounceTask?.cancel()
@@ -824,6 +889,9 @@ final class AppModel {
             try? await Task.sleep(for: .milliseconds(500))
             guard !Task.isCancelled else { return }
             await self?.syncEngine?.syncNow()
+            // Bytes ride behind the rows they belong to: pump uploads only
+            // after the op push has had its turn at the connection.
+            await self?.uploader.pump()
         }
     }
 
@@ -852,11 +920,14 @@ final class AppModel {
         tokenBox.set(currentAccessToken)
         await syncEngine?.syncNow()
         guard let boundOrgId, let boundLocationId else { return }
-        guard let locations = try? await api.locations(orgId: boundOrgId) else { return }
-        if let match = locations.first(where: { $0.id == boundLocationId }) {
+        if let locations = try? await api.locations(orgId: boundOrgId),
+           let match = locations.first(where: { $0.id == boundLocationId }) {
             currentLocation = match
             Self.saveLocationSnapshot(match, userId: authSession.userId, orgId: boundOrgId)
         }
+        // Last, never first: a failed pump sleeps out its backoff before
+        // returning, and nothing above should wait behind that.
+        await uploader.pump()
     }
 
     /// Task 13's `SettingsView` calls this after its own `patchLocation`

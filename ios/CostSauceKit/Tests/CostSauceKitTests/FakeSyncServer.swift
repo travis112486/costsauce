@@ -53,6 +53,7 @@ final class FakeSyncServer: @unchecked Sendable {
 
     private var tables: [String: [String: [String: Any]]] = [
         "ingredients": [:], "recipes": [:], "recipe_items": [:], "purchases": [:],
+        "invoices": [:], "invoice_pages": [:],
     ]
     private var nextSeq: Int64 = 0
     private var ledger: [String: [String: Any]] = [:]  // op_id -> ledgered result
@@ -95,24 +96,35 @@ final class FakeSyncServer: @unchecked Sendable {
     /// whose result shape it doesn't understand (§13).
     var bogusStatusOpId: String?
 
-    private static let tableOrder = ["ingredients", "recipes", "recipe_items", "purchases"]
+    // purchases LAST, mirroring api/services/sync.py's Phase 3a reorder:
+    // it gained an invoice_pages FK, so the page must apply first.
+    private static let tableOrder = ["ingredients", "recipes", "recipe_items",
+                                     "invoices", "invoice_pages", "purchases"]
 
     private static let insertFields: [String: Set<String>] = [
         "ingredients": ["name", "base_unit", "vendor", "category", "source", "deleted_at"],
         "recipes": ["name", "menu_price", "target_fc_pct", "deleted_at"],
         "recipe_items": ["recipe_id", "ingredient_id", "qty_base_units", "deleted_at"],
+        "invoices": ["captured_at", "parse_status", "deleted_at"],
+        "invoice_pages": [
+            "invoice_id", "page_no", "storage_path", "width", "height", "sha256",
+            "deleted_at",
+        ],
         "purchases": [
             "ingredient_id", "purchased_on", "recorded_at", "qty", "unit",
-            "qty_in_case", "qty_base_units", "total_price", "source", "deleted_at",
+            "qty_in_case", "qty_base_units", "total_price", "source",
+            "invoice_page_id", "deleted_at",
         ],
     ]
     private static let updateFields: [String: Set<String>] = [
         "ingredients": ["name", "base_unit", "vendor", "category", "deleted_at"],
         "recipes": ["name", "menu_price", "target_fc_pct", "deleted_at"],
         "recipe_items": ["qty_base_units", "deleted_at"],
+        "invoices": ["parse_status", "deleted_at"],
+        "invoice_pages": ["storage_path", "width", "height", "sha256", "deleted_at"],
         "purchases": [
             "purchased_on", "recorded_at", "qty", "unit", "qty_in_case",
-            "qty_base_units", "total_price", "deleted_at",
+            "qty_base_units", "total_price", "invoice_page_id", "deleted_at",
         ],
     ]
     // purchases.unit_price is server-generated and never client-settable
@@ -128,6 +140,7 @@ final class FakeSyncServer: @unchecked Sendable {
             ("recipe_id", "recipes", "recipe"),
             ("ingredient_id", "ingredients", "ingredient"),
         ],
+        "invoice_pages": [("invoice_id", "invoices", "invoice")],
     ]
 
     init() {}

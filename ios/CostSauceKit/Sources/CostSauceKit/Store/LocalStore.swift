@@ -21,6 +21,7 @@ public final class LocalStore: Sendable {
 
     private static let knownTables: Set<String> = [
         "ingredients", "recipes", "recipe_items", "purchases",
+        "invoices", "invoice_pages",
     ]
 
     /// Opens (creating if needed) the SQLite file at `path`, runs the
@@ -142,6 +143,10 @@ public final class LocalStore: Sendable {
             try LocalRecipeItem.fromPull(change).save(db)
         case "purchases":
             try LocalPurchase.fromPull(change).save(db)
+        case "invoices":
+            try LocalInvoice.fromPull(change).save(db)
+        case "invoice_pages":
+            try LocalInvoicePage.fromPull(change).save(db)
         default:
             throw StoreError(kind: .unknownTable(change.table))
         }
@@ -240,6 +245,19 @@ public final class LocalStore: Sendable {
                 id: rowId, location_id: locationId, ingredient_id: "", purchased_on: "",
                 recorded_at: clientMutatedAt, qty: "0", unit: "", qty_in_case: nil,
                 qty_base_units: "0", total_price: "0", unit_price: nil, source: nil,
+                client_mutated_at: clientMutatedAt, server_seq: 0,
+                updated_at: clientMutatedAt, deleted_at: nil, created_at: clientMutatedAt
+            ).insert(db)
+        case "invoices":
+            try LocalInvoice(
+                id: rowId, location_id: locationId, captured_at: clientMutatedAt,
+                parse_status: "unparsed", client_mutated_at: clientMutatedAt, server_seq: 0,
+                updated_at: clientMutatedAt, deleted_at: nil, created_at: clientMutatedAt
+            ).insert(db)
+        case "invoice_pages":
+            try LocalInvoicePage(
+                id: rowId, invoice_id: "", location_id: locationId, page_no: "0",
+                storage_path: "", width: nil, height: nil, sha256: nil,
                 client_mutated_at: clientMutatedAt, server_seq: 0,
                 updated_at: clientMutatedAt, deleted_at: nil, created_at: clientMutatedAt
             ).insert(db)
@@ -437,14 +455,112 @@ public final class LocalStore: Sendable {
 
     /// Deletes all rows, including meta — an identity switch or an
     /// org-deleted signal both need to leave nothing behind.
-    public func wipe() throws {
+    ///
+    /// Returns the `local_path` of every page image the upload outbox
+    /// knew about, collected inside the same transaction, BEFORE the
+    /// DELETEs (§11): the JPEGs live on the filesystem and would survive a
+    /// rows-only wipe, leaving another org's invoice photographs in the
+    /// container on a shared or resold phone. Returning the paths rather
+    /// than deleting the files here keeps this store free of filesystem
+    /// concerns beyond the database file it already owns — the caller
+    /// (AppModel) owns the actual file deletion.
+    public func wipe() throws -> [String] {
         try dbQueue.write { db in
+            let orphanedPaths = try String.fetchAll(
+                db, sql: "SELECT local_path FROM pending_uploads")
             try db.execute(sql: "DELETE FROM ingredients")
             try db.execute(sql: "DELETE FROM recipes")
             try db.execute(sql: "DELETE FROM recipe_items")
             try db.execute(sql: "DELETE FROM purchases")
+            try db.execute(sql: "DELETE FROM invoices")
+            try db.execute(sql: "DELETE FROM invoice_pages")
+            try db.execute(sql: "DELETE FROM pending_uploads")
             try db.execute(sql: "DELETE FROM pending_ops")
             try db.execute(sql: "DELETE FROM meta")
+            return orphanedPaths
+        }
+    }
+
+    // MARK: - Invoices (Phase 3a)
+
+    public func invoice(id: String) throws -> LocalInvoice? {
+        try dbQueue.read { db in
+            try LocalInvoice.fetchOne(
+                db, sql: "SELECT * FROM invoices WHERE id = ?", arguments: [id])
+        }
+    }
+
+    /// One page by row id -- how the uploader turns a queued `page_id`
+    /// back into the `(invoice_id, page_no)` the upload endpoints are
+    /// keyed by.
+    public func invoicePage(id: String) throws -> LocalInvoicePage? {
+        try dbQueue.read { db in
+            try LocalInvoicePage.fetchOne(
+                db, sql: "SELECT * FROM invoice_pages WHERE id = ?", arguments: [id])
+        }
+    }
+
+    /// Newest first -- an invoice list is read newest first, unlike the
+    /// name-ordered reads elsewhere in this file.
+    public func liveInvoices() throws -> [LocalInvoice] {
+        try dbQueue.read { db in
+            try LocalInvoice.fetchAll(
+                db, sql: """
+                    SELECT * FROM invoices WHERE deleted_at IS NULL
+                    ORDER BY captured_at DESC, id DESC
+                    """)
+        }
+    }
+
+    /// Ordered by page number, which is the order a human reads an invoice.
+    /// `page_no` is TEXT (every synced column is), so the CAST is required:
+    /// a plain string sort puts page 10 before page 2.
+    public func livePages(invoiceId: String) throws -> [LocalInvoicePage] {
+        try dbQueue.read { db in
+            try LocalInvoicePage.fetchAll(
+                db, sql: """
+                    SELECT * FROM invoice_pages
+                    WHERE invoice_id = ? AND deleted_at IS NULL
+                    ORDER BY CAST(page_no AS INTEGER), id
+                    """,
+                arguments: [invoiceId])
+        }
+    }
+
+    // MARK: - Upload outbox (Phase 3a, local only)
+
+    /// Queues `pageId`'s already-written file for upload. Separate from
+    /// `enqueue` (which is the op outbox) on purpose: bytes and rows travel
+    /// different paths with different retry semantics (spec 3a-D2).
+    public func enqueueUpload(pageId: String, localPath: String, now: Date = Date()) throws {
+        try dbQueue.write { db in
+            try PendingUpload(
+                page_id: pageId, local_path: localPath, state: .queued,
+                attempts: 0, last_error: nil,
+                created_at: Kernel.canonicalTimestamp(now)
+            ).insert(db)
+        }
+    }
+
+    public func pendingUploads() throws -> [PendingUpload] {
+        try dbQueue.read { db in
+            try PendingUpload.fetchAll(
+                db, sql: "SELECT * FROM pending_uploads ORDER BY created_at, page_id")
+        }
+    }
+
+    public func updateUpload(_ upload: PendingUpload) throws {
+        try dbQueue.write { db in
+            try upload.update(db)
+        }
+    }
+
+    /// Anything not yet `uploaded` -- what the unsynced badge adds to its
+    /// pending-op count (spec §9).
+    public func pendingUploadCount() throws -> Int {
+        try dbQueue.read { db in
+            try Int.fetchOne(
+                db, sql: "SELECT count(*) FROM pending_uploads WHERE state != 'uploaded'") ?? 0
         }
     }
 }
