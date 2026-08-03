@@ -817,6 +817,19 @@ final class AppModel {
     /// instead of a round trip per save, while still refreshing
     /// `pendingCount` immediately so the chip/badge never lags an edit
     /// that's already visible to local reads.
+    /// Where captured pages come from. UITEST substitutes a generated
+    /// fixture for the camera the simulator does not have -- the same
+    /// environment flag `AppModel.init` already consults to wipe the
+    /// Keychain and store on launch. Without this substitution the Phase 3a
+    /// acceptance walk could not run at all.
+    var pageSource: any ScannedPageSource {
+        if ProcessInfo.processInfo.environment["UITEST"] == "1",
+           let fixture = FixtureInvoicePage.make() {
+            return FixturePageSource(images: [fixture])
+        }
+        return DocumentScannerSource()
+    }
+
     func syncSoon() {
         refreshPendingCount()
         syncDebounceTask?.cancel()
