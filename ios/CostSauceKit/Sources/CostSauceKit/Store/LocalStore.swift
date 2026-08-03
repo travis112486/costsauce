@@ -382,12 +382,34 @@ public final class LocalStore: Sendable {
 
     /// Overload of `liveRecipeItems()` scoped to one recipe -- `liveRecipeItems()`
     /// itself stays unfiltered-by-recipe (DashboardModel consumes it that way).
+    ///
+    /// Ordered by INGREDIENT NAME, mirroring the server's own recipe-items
+    /// query (`ORDER BY i.name, ri.id`, api/services/costing.py:62) and spec
+    /// §3/§6 -- "there is no order column, the server orders by ingredient
+    /// name", so "a saved recipe reopens alphabetically, which is also how
+    /// web and the Dashboard already display it". This used to be a plain
+    /// `ORDER BY id`; since `recipe_items.id` is a UUIDv7 with no
+    /// intra-millisecond counter, two lines added in the same millisecond
+    /// (routine when `saveNewRecipe` writes a whole draft in one
+    /// transaction) then ordered arbitrarily -- stable for a given recipe,
+    /// but neither alphabetical nor insertion order.
+    ///
+    /// LEFT JOIN, not JOIN, for the same reason `costing.py` uses one: a
+    /// line whose ingredient row is missing locally (mid-pull, or pruned)
+    /// must still come back rather than vanishing from the editor. Such a
+    /// row sorts first here (SQLite puts NULL first ascending) where
+    /// Postgres would put it last; the case is unreachable through the app
+    /// -- `addRecipeLine` refuses an ingredient that is not live, and a
+    /// pulled line always arrives in the same FK-ordered batch as its
+    /// ingredient -- so this costs no real parity.
     public func liveRecipeItems(recipeId: String) throws -> [LocalRecipeItem] {
         try dbQueue.read { db in
             try LocalRecipeItem.fetchAll(
                 db, sql: """
-                    SELECT * FROM recipe_items WHERE recipe_id = ? AND deleted_at IS NULL
-                    ORDER BY id
+                    SELECT ri.* FROM recipe_items ri
+                    LEFT JOIN ingredients i ON i.id = ri.ingredient_id
+                    WHERE ri.recipe_id = ? AND ri.deleted_at IS NULL
+                    ORDER BY i.name, ri.id
                     """,
                 arguments: [recipeId])
         }

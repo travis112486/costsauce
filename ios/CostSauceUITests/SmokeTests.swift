@@ -415,18 +415,21 @@ final class SmokeTests: XCTestCase {
         // still never a full clear, and the result stays within the
         // column's own precision.
         app.staticTexts["Acceptance Bowl"].tap()
-        // Which "Qty" field is Onion's is NOT `boundBy: 1` reliably here --
+        // Which "Qty" field is Onion's is NOT `boundBy: 1` reliably here.
         // `editLinesSection`'s `ForEach(lines, ...)` is fed by
-        // `LocalStore.liveRecipeItems(recipeId:)`'s `ORDER BY id`
-        // (LocalStore.swift:385-391), and `UUIDv7.generate` mixes in
-        // CSPRNG-random bits for same-millisecond ties (UUIDv7.swift:19-23,
-        // no monotonic counter) -- `saveNewRecipe` mints both lines' row
-        // ids from the SAME `now`, so which of Ground Beef's/Onion's ids
-        // sorts first is effectively a coin flip per run (reproduced live:
-        // an earlier full-suite run silently edited the wrong row this
-        // way, and the SQL after it showed Onion's qty unchanged). Locating
-        // by the row's own visible ingredient name, not position, is
-        // robust to that.
+        // `LocalStore.liveRecipeItems(recipeId:)`, which USED to be a plain
+        // `ORDER BY id`; since `UUIDv7.generate` mixes in CSPRNG-random
+        // bits for same-millisecond ties (UUIDv7.swift:19-23, no monotonic
+        // counter) and `saveNewRecipe` mints both lines' row ids from the
+        // SAME `now`, which of Ground Beef's/Onion's ids sorted first was
+        // effectively a coin flip per run (reproduced live: an earlier
+        // full-suite run silently edited the wrong row this way, and the
+        // SQL after it showed Onion's qty unchanged). That read now orders
+        // by INGREDIENT NAME, mirroring the server (`ORDER BY i.name,
+        // ri.id`), so "Ground Beef" then "Onion" is in fact deterministic
+        // today -- but locating by the row's own visible ingredient name
+        // rather than by position stays correct under either ordering, and
+        // asserts the thing this walk actually cares about, so it stands.
         let onionLabel = app.staticTexts["Onion"]
         XCTAssertTrue(scrollToReveal(onionLabel, in: app), "Onion's line never scrolled into view on the edit screen")
         let onionRowY = onionLabel.frame.midY
@@ -490,5 +493,91 @@ final class SmokeTests: XCTestCase {
         XCTAssertTrue(syncedAfterDelete.waitForExistence(timeout: 20), "sync chip never returned to Synced after the recipe delete")
 
         print("CHECKPOINT 3 (delete+sync complete): docs/runbooks/phase-2b-acceptance.md's final SQL asserts the recipe AND both lines are tombstoned server-side -- no fixed pause needed, this state is stable for the rest of the run")
+    }
+
+    /// The negative case for the create path's staged pick -- the coverage
+    /// gap the final review named, and a direct regression test for the bug
+    /// `addStagedIngredient`'s doc comment describes.
+    ///
+    /// `Kernel.matchIngredient` has NO minimum-length floor (Kernel.swift:88
+    /// -- it returns the first candidate whose normalized name contains the
+    /// normalized query, or vice versa), so a single character is a real
+    /// live match. Before the fix, `IngredientPickerView`'s `onPick` fed
+    /// `addLine` directly, so that one character appended a line and popped
+    /// this screen mid-keystroke. Now `onPick` only STAGES into
+    /// `pickedIngredient`; nothing commits until the explicit "Add" tap.
+    ///
+    /// Three assertions, and all three matter:
+    ///  1. the staged "Add ..." button DOES appear -- the positive control.
+    ///     Without it this test would still pass if matching were broken
+    ///     outright and the one character simply matched nothing, which is
+    ///     not the property under test.
+    ///  2. the screen did NOT pop (its own navigation bar is still up).
+    ///  3. nothing was committed -- no line row, hence no "Qty" field,
+    ///     which only exists back on the recipe form.
+    ///
+    /// "n" is the character: it is a substring of every ingredient the
+    /// reviewer seed carries that this suite already relies on ("Chicken
+    /// Breast", "Ground Beef", "Onion"), so SOMETHING always stages. Which
+    /// one stages is candidate-order-dependent and deliberately not
+    /// asserted -- the property under test is "did not commit or pop", not
+    /// "picked a particular row".
+    func testSingleCharacterPickDoesNotCommitOrPopThePicker() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment = [
+            "API_BASE_URL": apiBaseURL,
+            "UITEST": "1",
+            "REVIEWER_EMAIL": reviewerEmail,
+            "REVIEWER_CODE": reviewerCode,
+        ]
+        app.launch()
+        loginAndAwaitBootstrap(app)
+
+        let addRecipeButton = app.buttons["Add Recipe"]
+        XCTAssertTrue(addRecipeButton.waitForExistence(timeout: 10), "Menu section's + never appeared")
+        addRecipeButton.tap()
+
+        let addIngredientButton = app.buttons["Add ingredient"]
+        XCTAssertTrue(addIngredientButton.waitForExistence(timeout: 10), "recipe form never appeared")
+        addIngredientButton.tap()
+
+        let ingredientNameField = app.textFields["Ingredient name"]
+        XCTAssertTrue(ingredientNameField.waitForExistence(timeout: 10), "picker never appeared")
+        ingredientNameField.tap()
+        ingredientNameField.typeText("n")
+
+        // Settle first, asserting nothing: the match is staged
+        // asynchronously, and under the REGRESSION the pop is animated
+        // rather than instant -- checking either property the microsecond
+        // after `typeText` could read a state that has not happened yet and
+        // pass for the wrong reason. Whichever way this run goes, the app is
+        // quiescent once the staged button exists (fixed) or the wait times
+        // out (regressed, having popped instead). The result is deliberately
+        // discarded here; assertion 3 below is what judges it.
+        let stagedAddButton = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@ AND label != %@", "Add ", "Add ingredient")
+        ).firstMatch
+        _ = stagedAddButton.waitForExistence(timeout: 10)
+
+        // 1. Nothing committed: a "Qty" field exists only on a line row
+        //    back on the recipe form, which is only reachable by popping.
+        XCTAssertFalse(
+            app.textFields["Qty"].exists,
+            "one character appended a line -- onPick is committing again instead of staging")
+
+        // 2. Still on the picker: staging must not navigate.
+        XCTAssertTrue(
+            app.navigationBars["Add Ingredient"].exists,
+            "one character popped the picker -- onPick is committing again instead of staging")
+
+        // 3. Positive control, asserted LAST so that a genuine regression
+        //    reports itself as one above rather than as this. One character
+        //    really did produce a live match, so 1 and 2 are not vacuously
+        //    true. Matches the `"Add \(pickedIngredient.name)"` label
+        //    `RecipeEditorView.addIngredientDestination` renders, without
+        //    pinning WHICH candidate won.
+        XCTAssertTrue(
+            stagedAddButton.exists,
+            "one character staged no match at all -- the two assertions above would be vacuous")
     }
 }

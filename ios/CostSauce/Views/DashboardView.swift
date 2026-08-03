@@ -274,7 +274,17 @@ private struct MenuSection: View {
                 NavigationLink {
                     RecipeEditorView(appModel: appModel, mode: .create)
                 } label: {
+                    // A bare `Image` sized itself to the glyph -- roughly
+                    // 22pt at `.body`, half the 44x44pt minimum the HIG
+                    // asks for, and the only create affordance for the
+                    // whole recipe feature. `.contentShape` is what makes
+                    // the padded-out area actually tappable rather than
+                    // merely occupied: without it the hit test still
+                    // follows the glyph's own bounds.
                     Image(systemName: "plus.circle")
+                        .font(.title3)
+                        .frame(minWidth: 44, minHeight: 44, alignment: .trailing)
+                        .contentShape(Rectangle())
                 }
                 .accessibilityLabel("Add Recipe")
             }
@@ -306,6 +316,18 @@ private struct MenuRow: View {
                 // `if complete { ... }` block) — no separate `complete`
                 // check needed to land on "incomplete".
                 StatusChip(status: item.status ?? "incomplete")
+                // D5 made these rows the recipe list, but the enclosing
+                // `NavigationLink` uses `.buttonStyle(.plain)` (so the row
+                // keeps its own colours instead of turning accent-blue),
+                // and plain style draws no disclosure chevron -- leaving
+                // nothing at all to say the rows became tappable. Drawn
+                // here rather than dropping `.buttonStyle(.plain)`, which
+                // would recolour the whole row. Decorative: the link
+                // itself already carries the row's accessibility label.
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
             }
             HStack(spacing: 12) {
                 Text("Plate $\(item.plateCost)")

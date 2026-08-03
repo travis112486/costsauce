@@ -167,9 +167,26 @@ public struct LocalEdits {
     /// enqueued: a no-change Save must not mint an op. `menu_price`/
     /// `target_fc_pct` must parse as a positive `Rational` (schema CHECKs:
     /// `numeric(10,2) > 0`, `numeric(5,2) > 0`).
+    ///
+    /// The recipe must be live, checked FIRST -- the same guard, in the same
+    /// position, that `addRecipeLine`/`tombstoneRecipe` already run (and that
+    /// `updateRecipeLineQty`/`tombstoneRecipeLine` run on the line). This was
+    /// the last recipe mutation without one. Absent it, renaming a recipe
+    /// tombstoned from ANOTHER device queued an op the server then refused
+    /// with `deleted`, leaving the user's edit to be parked as
+    /// `needs_attention` by `SyncEngine.apply`'s rejection-reason handling --
+    /// fail-safe, but a server round trip and a parked op for something
+    /// knowable locally the moment the pull lands the tombstone.
+    /// `recipe(id:)` is deliberately NOT filtered by `deleted_at` (its own
+    /// contract), so a tombstoned row does read back non-nil here; the
+    /// `deleted_at == nil` test is what rejects it.
     public func updateRecipeFields(
         id: String, name: String?, menuPrice: String?, targetFcPct: String?, now: Date = Date()
     ) throws {
+        guard let recipe = try store.recipe(id: id), recipe.deleted_at == nil else {
+            throw KernelError("recipe is not live")
+        }
+
         var fields: [String: String?] = [:]
         if let name {
             let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)

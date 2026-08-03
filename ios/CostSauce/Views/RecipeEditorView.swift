@@ -131,7 +131,9 @@ struct RecipeEditorView: View {
     @State private var addLineErrorMessage: String?
 
     @State private var pendingRemoveLine: LocalRecipeItem?
-    @State private var lastLineMessage: String?
+    /// Every `removeLine` failure, not just the last-line refusal -- see
+    /// that method's doc comment for why this is no longer `lastLineMessage`.
+    @State private var removeLineMessage: String?
 
     @State private var deleteRecipeConfirming = false
     @State private var deleteErrorMessage: String?
@@ -565,10 +567,10 @@ struct RecipeEditorView: View {
             }
             Button("Cancel", role: .cancel) { pendingRemoveLine = nil }
         }
-        .alert("Can't Remove Ingredient", isPresented: lastLineAlertBinding) {
+        .alert("Can't Remove Ingredient", isPresented: removeLineAlertBinding) {
             Button("OK") {}
         } message: {
-            Text(lastLineMessage ?? "")
+            Text(removeLineMessage ?? "")
         }
         .navigationDestination(isPresented: $addLineDestinationPresented) {
             addLineDestination(recipeId: recipeId)
@@ -846,6 +848,24 @@ struct RecipeEditorView: View {
     /// `tombstoneRecipeLine`'s own local guard runs BEFORE any op is queued
     /// (its own doc comment) -- `EditError.lastLine` here is just surfacing
     /// that guard's result as the brief's alert, never a network round trip.
+    ///
+    /// EVERY failure lands in that same alert (final-review fix). The
+    /// catch-all used to assign `loadError`, which `editContent` reads as
+    /// "the recipe could not be loaded" and answers with a full-screen
+    /// `ContentUnavailableView` -- so `tombstoneRecipeLine`'s other throw,
+    /// `KernelError("recipe line is not live")` (reachable when the line was
+    /// tombstoned elsewhere and the pull landed between this screen's last
+    /// reload and the swipe), replaced a perfectly good form, and its
+    /// still-live sibling lines with it, over one stale row. The alert's
+    /// title, "Can't Remove Ingredient", already describes every case, so
+    /// the state carrying it is named for the removal, not for the one
+    /// `lastLine` case that used to be the only thing in it.
+    ///
+    /// The `EditError` arm is a `switch` rather than an `if case .lastLine`
+    /// for the same reason: the old form silently swallowed any other case
+    /// (`.duplicate`/`.inUse`), leaving the swipe looking like it worked.
+    /// Neither is thrown by this call today; if that changes, the user sees
+    /// it instead of nothing.
     private func removeLine(_ line: LocalRecipeItem) {
         pendingRemoveLine = nil
         guard let edits = appModel.edits else { return }
@@ -853,11 +873,16 @@ struct RecipeEditorView: View {
             try edits.tombstoneRecipeLine(itemId: line.id)
             appModel.syncSoon()
         } catch let error as LocalEdits.EditError {
-            if case .lastLine = error {
-                lastLineMessage = "A recipe needs at least one ingredient. Delete the recipe instead."
+            switch error {
+            case .lastLine:
+                removeLineMessage = "A recipe needs at least one ingredient. Delete the recipe instead."
+            case .duplicate, .inUse:
+                removeLineMessage = "That ingredient couldn't be removed. Try again."
             }
+        } catch let error as KernelError {
+            removeLineMessage = error.message
         } catch {
-            loadError = error.localizedDescription
+            removeLineMessage = error.localizedDescription
         }
     }
 
@@ -887,8 +912,8 @@ struct RecipeEditorView: View {
         Binding(get: { pendingRemoveLine != nil }, set: { if !$0 { pendingRemoveLine = nil } })
     }
 
-    private var lastLineAlertBinding: Binding<Bool> {
-        Binding(get: { lastLineMessage != nil }, set: { if !$0 { lastLineMessage = nil } })
+    private var removeLineAlertBinding: Binding<Bool> {
+        Binding(get: { removeLineMessage != nil }, set: { if !$0 { removeLineMessage = nil } })
     }
 
     // MARK: - Edit-path preview

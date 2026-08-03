@@ -242,6 +242,62 @@ import Foundation
         #expect(Set(items.map(\.id)) == ["ri-1", "ri-2"])
     }
 
+    /// Spec §3 ("the server orders by ingredient name") and §6 ("every
+    /// stored read orders by ingredient name ... a saved recipe therefore
+    /// reopens alphabetically"). The server's own query is literally
+    /// `ORDER BY i.name, ri.id` (api/services/costing.py:62); this is its
+    /// local mirror. The line ids here run in the OPPOSITE order to the
+    /// ingredient names on purpose, so the previous `ORDER BY id` cannot
+    /// pass by coincidence.
+    @Test func liveRecipeItemsScopedOrdersByIngredientName() throws {
+        let store = try seededStore([
+            StoreTests.ingredientChange(id: "ing-a", name: "Zucchini", serverSeq: 1),
+            StoreTests.ingredientChange(id: "ing-b", name: "Apple", serverSeq: 2),
+            StoreTests.ingredientChange(id: "ing-c", name: "Milk", serverSeq: 3),
+            StoreTests.recipeChange(id: "rec-1", name: "Bread", serverSeq: 4),
+            StoreTests.recipeItemChange(
+                id: "ri-1", recipeId: "rec-1", ingredientId: "ing-a", serverSeq: 5),
+            StoreTests.recipeItemChange(
+                id: "ri-2", recipeId: "rec-1", ingredientId: "ing-b", serverSeq: 6),
+            StoreTests.recipeItemChange(
+                id: "ri-3", recipeId: "rec-1", ingredientId: "ing-c", serverSeq: 7),
+        ])
+
+        let items = try store.liveRecipeItems(recipeId: "rec-1")
+
+        // Apple (ri-2), Milk (ri-3), Zucchini (ri-1).
+        #expect(items.map(\.id) == ["ri-2", "ri-3", "ri-1"])
+    }
+
+    /// The `ri.id` half of the server's `ORDER BY i.name, ri.id`. Two
+    /// ingredients CAN share a name (nothing constrains it -- the duplicate
+    /// check `createIngredient` runs is a fuzzy pre-empt, not a schema
+    /// UNIQUE), and both can sit on one recipe, since the per-recipe
+    /// uniqueness constraint is on ingredient id. Without the tiebreak that
+    /// pair's order would be whatever SQLite happened to return.
+    ///
+    /// Honest caveat: this one is a determinism PIN, not a test that drove
+    /// the change -- with the names tied, the old `ORDER BY id` produced
+    /// this same result, so it passed before the fix as well as after. It
+    /// earns its place by catching a future rewrite that drops the
+    /// tiebreak (e.g. a plain Swift `.sorted { $0.name < $1.name }`), which
+    /// would leave same-name lines unordered again.
+    @Test func liveRecipeItemsScopedTiesOnNameBreakByItemId() throws {
+        let store = try seededStore([
+            StoreTests.ingredientChange(id: "ing-a", name: "Basil", serverSeq: 1),
+            StoreTests.ingredientChange(id: "ing-b", name: "Basil", serverSeq: 2),
+            StoreTests.recipeChange(id: "rec-1", name: "Pesto", serverSeq: 3),
+            StoreTests.recipeItemChange(
+                id: "ri-9", recipeId: "rec-1", ingredientId: "ing-a", serverSeq: 4),
+            StoreTests.recipeItemChange(
+                id: "ri-1", recipeId: "rec-1", ingredientId: "ing-b", serverSeq: 5),
+        ])
+
+        let items = try store.liveRecipeItems(recipeId: "rec-1")
+
+        #expect(items.map(\.id) == ["ri-1", "ri-9"])
+    }
+
     // MARK: - updateRecipeFields
 
     @Test func updateRecipeFieldsNameOnlyTrimsAndEnqueuesSingleOp() throws {
@@ -276,6 +332,46 @@ import Foundation
         #expect(throws: KernelError.self) {
             try edits.updateRecipeFields(id: "rec-1", name: nil, menuPrice: "0", targetFcPct: nil)
         }
+    }
+
+    /// The liveness guard every OTHER recipe mutation already has
+    /// (`addRecipeLine`/`tombstoneRecipe` check `recipe.deleted_at == nil`,
+    /// `updateRecipeLineQty`/`tombstoneRecipeLine` check the line is live).
+    /// Without it, editing a recipe tombstoned from another device enqueues
+    /// an op the server refuses as `deleted`, which only Task 12's
+    /// rejection-reason handling then parks as `needs_attention` -- correct,
+    /// but a server round trip and a parked op for something knowable
+    /// locally.
+    @Test func updateRecipeFieldsOnTombstonedRecipeThrowsAndEnqueuesNothing() throws {
+        let store = try seededStore([
+            StoreTests.recipeChange(
+                id: "rec-dead", name: "Bread", serverSeq: 1,
+                deletedAt: "2026-07-29 10:00:00+00"),
+        ])
+        let edits = LocalEdits(store: store, locationId: "loc-1")
+        let before = try store.pendingCount()
+
+        #expect(throws: KernelError.self) {
+            try edits.updateRecipeFields(
+                id: "rec-dead", name: "Renamed", menuPrice: nil, targetFcPct: nil)
+        }
+
+        #expect(try store.pendingCount() == before)
+    }
+
+    /// The same guard's other half: an id with no row at all (never pulled,
+    /// or pruned) is not live either.
+    @Test func updateRecipeFieldsOnUnknownRecipeThrowsAndEnqueuesNothing() throws {
+        let store = try recipeFixture()
+        let edits = LocalEdits(store: store, locationId: "loc-1")
+        let before = try store.pendingCount()
+
+        #expect(throws: KernelError.self) {
+            try edits.updateRecipeFields(
+                id: "rec-nope", name: "Renamed", menuPrice: nil, targetFcPct: nil)
+        }
+
+        #expect(try store.pendingCount() == before)
     }
 
     // MARK: - addRecipeLine
