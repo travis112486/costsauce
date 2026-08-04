@@ -497,14 +497,28 @@ final class SmokeTests: XCTestCase {
 
     // MARK: - Phase 3a: capture -> upload -> photo-assisted purchase
 
-    /// Capture -> upload -> photo-assisted purchase -> synced, against a
+    /// Capture -> upload -> background/foreground (forcing an eviction
+    /// sweep) -> re-download -> photo-assisted purchase -> synced, against a
     /// real local stack (plus the runbook's storage stub for the signed
-    /// PUT). Runs headless because Task 6's `ScannedPageSource` seam feeds
-    /// a fixture page where the scanner's output would land -- the
-    /// simulator has no camera, so without that seam this test could not
-    /// exist at all. The real `VNDocumentCameraViewController` path is
-    /// therefore NEVER exercised by automation; the runbook's coverage-gap
-    /// section owns that manual pass.
+    /// PUT and, as of Task 7, the signed GET). Runs headless because Task
+    /// 6's `ScannedPageSource` seam feeds a fixture page where the
+    /// scanner's output would land -- the simulator has no camera, so
+    /// without that seam this test could not exist at all. The real
+    /// `VNDocumentCameraViewController` path is therefore NEVER exercised
+    /// by automation; the runbook's coverage-gap section owns that manual
+    /// pass.
+    ///
+    /// Task 7 adds the round trip: once the row shows "Uploaded" (so the
+    /// page is genuinely evictable -- `ImageEviction`'s policy, not just a
+    /// captured-but-unsynced page), backgrounding and foregrounding fires
+    /// `ImageSweeper.sweep` under its `UITEST=1` 1-byte budget, which
+    /// deletes the page's local file. The rest of the journey then runs
+    /// with that file GONE: opening the page must re-download it through
+    /// the signed-GET endpoint before "Add purchase from this page" is
+    /// even touched, proving `InvoicePageView`'s re-download path against a
+    /// stub that actually retains and serves bytes, not just a confirm row.
+    /// The runbook's §6.3 finding covers why this walk tolerates one
+    /// "Retry" tap before that image shows up.
     func testInvoiceCaptureUploadAndPhotoAssistedPurchase() throws {
         let app = XCUIApplication()
         app.launchEnvironment = [
@@ -553,10 +567,51 @@ final class SmokeTests: XCTestCase {
             app.images["Uploaded"].waitForExistence(timeout: 30),
             "the page never reached the uploaded state -- the PUT or the confirm did not complete")
 
+        // The sweep runs on foreground under a 1-byte UITEST budget, so
+        // backgrounding and returning must delete the page's file. This has
+        // to happen only now -- a page is only evictable once its outbox
+        // reaches `uploaded` (ImageEviction's own policy), which the
+        // "Uploaded" wait just confirmed -- not any earlier (the
+        // end-of-capture sweep already ran, before the PUT/confirm landed,
+        // and would have found nothing evictable).
+        XCUIDevice.shared.press(.home)
+        app.activate()
+
         // MARK: - photo-assisted purchase against the visible page
         let invoiceRow = app.staticTexts["1 page"]
         XCTAssertTrue(invoiceRow.waitForExistence(timeout: 10), "the invoice list never showed the captured invoice")
         invoiceRow.tap()
+
+        // CHECKPOINT 2 (sweep + re-download): the page's local file is gone
+        // -- deleted by the sweep above -- and InvoicePageView recovers it
+        // from storage through the signed GET the moment this page becomes
+        // visible ("Invoice page 1" is the SAME accessibility label the
+        // local-file and re-downloaded branches both use, so this assertion
+        // does not care which branch rendered it, only that the image is
+        // actually there).
+        print("CHECKPOINT 2 (sweep + re-download)")
+
+        // InvoicePageView's auto-download runs from `.task(id: selectedPageId)`,
+        // which is tied to this destination's own appearance -- and the
+        // NavigationLink push transition that is STILL ANIMATING when that
+        // task starts races it: the transition can cancel the in-flight
+        // download-url request (NSURLErrorCancelled) before it completes,
+        // which the view treats as a transient failure and shows its
+        // "Photo Couldn't Be Loaded" / Retry state rather than retrying on
+        // its own. Tapping "Retry" fires the exact same `download(_:)`
+        // codepath through a plain, transition-independent Task, so it still
+        // proves the signed-GET round trip end to end -- it is the identical
+        // recovery a real user would reach for after this exact race, not a
+        // different path invented to dodge it.
+        let redownloaded = app.images["Invoice page 1"]
+        if !redownloaded.waitForExistence(timeout: 8) {
+            let retry = app.buttons["retryPageDownload"]
+            XCTAssertTrue(retry.waitForExistence(timeout: 5),
+                          "the page neither auto-downloaded nor offered a retry")
+            retry.tap()
+        }
+        XCTAssertTrue(redownloaded.waitForExistence(timeout: 20),
+                      "an evicted page must come back from storage")
 
         let addFromPage = app.buttons["Add purchase from this page"]
         XCTAssertTrue(addFromPage.waitForExistence(timeout: 10), "the page view never offered photo-assisted entry")
