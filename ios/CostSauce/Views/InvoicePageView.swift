@@ -231,6 +231,15 @@ struct InvoicePageView: View {
                 return
             }
             downloaded[page.id] = image
+        } catch is CancellationError {
+            // Page navigation cancelled this in-flight download -- not a
+            // real failure. Leaving `downloadFailures[page.id]` untouched
+            // means returning to this page tries again cleanly instead of
+            // showing a false error the user never earned.
+        } catch let error as URLError where error.code == .cancelled {
+            // Swift concurrency cancellation can also surface here, since
+            // URLSession cancels its in-flight task when the wrapping Task
+            // is cancelled -- same no-op treatment as above.
         } catch let error as URLError where
             error.code == .notConnectedToInternet || error.code == .networkConnectionLost {
             downloadFailures[page.id] = .offline
