@@ -28,9 +28,14 @@ struct InvoicePageView: View {
     /// regardless of size, so a restored old page would be deleted again on
     /// the very next foreground sweep -- and old invoices are exactly the
     /// ones people reopen during a dispute.
+    ///
+    /// Keyed by page id, same as `downloaded` -- on a multi-page invoice
+    /// each page has its own in-flight/failure state. A single shared flag
+    /// would let page 2 render page 1's outcome (or vice versa) purely
+    /// because it happened to be the page open when that outcome landed.
     @State private var downloaded: [String: UIImage] = [:]
-    @State private var downloadFailure: DownloadFailure?
-    @State private var isDownloading = false
+    @State private var downloadFailures: [String: DownloadFailure] = [:]
+    @State private var downloadingPageIds: Set<String> = []
 
     private enum DownloadFailure: Equatable { case offline, failed }
 
@@ -40,11 +45,25 @@ struct InvoicePageView: View {
             .navigationBarTitleDisplayMode(.inline)
             .task {
                 load()
-                if let pages, let page = selectedPage(in: pages),
-                   localImage(for: page) == nil, downloaded[page.id] == nil {
-                    await download(page)
-                }
             }
+            // Re-keyed on the selected page id, not just once on appear, so
+            // switching pages via the Picker attempts a download for the
+            // newly selected page instead of leaving it untried while
+            // showing whatever state the previously selected page left
+            // behind.
+            .task(id: selectedPageId) {
+                await downloadSelectedPageIfNeeded()
+            }
+    }
+
+    private func downloadSelectedPageIfNeeded() async {
+        guard let pages, let page = selectedPage(in: pages),
+              localImage(for: page) == nil,
+              downloaded[page.id] == nil,
+              downloadFailures[page.id] == nil,
+              !downloadingPageIds.contains(page.id)
+        else { return }
+        await download(page)
     }
 
     @ViewBuilder
@@ -78,7 +97,7 @@ struct InvoicePageView: View {
                 pageImage(image, page: page)
             } else if let image = downloaded[page.id] {
                 pageImage(image, page: page)
-            } else if isDownloading {
+            } else if downloadingPageIds.contains(page.id) {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 unavailable(page)
@@ -174,7 +193,7 @@ struct InvoicePageView: View {
     @ViewBuilder
     private func unavailable(_ page: LocalInvoicePage) -> some View {
         VStack(spacing: 12) {
-            if downloadFailure == .offline {
+            if downloadFailures[page.id] == .offline {
                 ContentUnavailableView(
                     "Photo Needs a Connection", systemImage: "icloud.slash",
                     description: Text("It's stored safely — reconnect to view it."))
@@ -193,30 +212,30 @@ struct InvoicePageView: View {
 
     private func download(_ page: LocalInvoicePage) async {
         guard let pageNo = Int(page.page_no) else {
-            downloadFailure = .failed
+            downloadFailures[page.id] = .failed
             return
         }
-        isDownloading = true
-        downloadFailure = nil
-        defer { isDownloading = false }
+        downloadingPageIds.insert(page.id)
+        downloadFailures[page.id] = nil
+        defer { downloadingPageIds.remove(page.id) }
         do {
             let signed = try await appModel.api.downloadURL(
                 invoiceId: page.invoice_id, pageNo: pageNo)
             guard let url = URL(string: signed.url) else {
-                downloadFailure = .failed
+                downloadFailures[page.id] = .failed
                 return
             }
             let (data, _) = try await URLSession.shared.data(from: url)
             guard let image = UIImage(data: data) else {
-                downloadFailure = .failed
+                downloadFailures[page.id] = .failed
                 return
             }
             downloaded[page.id] = image
         } catch let error as URLError where
             error.code == .notConnectedToInternet || error.code == .networkConnectionLost {
-            downloadFailure = .offline
+            downloadFailures[page.id] = .offline
         } catch {
-            downloadFailure = .failed
+            downloadFailures[page.id] = .failed
         }
     }
 }
