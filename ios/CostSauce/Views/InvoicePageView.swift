@@ -51,8 +51,19 @@ struct InvoicePageView: View {
             // newly selected page instead of leaving it untried while
             // showing whatever state the previously selected page left
             // behind.
+            //
+            // The work is handed to an UNSTRUCTURED Task on purpose. This
+            // view is a NavigationLink destination, and the push transition
+            // is still animating when `.task(id:)` starts -- reproducibly,
+            // it cancelled the request about 14ms in, on the feature's
+            // PRIMARY path (runbook §6.3). Because `selectedPageId` does not
+            // change across that cancellation, `.task(id:)` never fires
+            // again, so the first attempt was also the last. An unstructured
+            // Task inherits the actor but NOT the cancellation -- the one
+            // difference that has always made the Retry button succeed where
+            // the automatic attempt could not.
             .task(id: selectedPageId) {
-                await downloadSelectedPageIfNeeded()
+                Task { @MainActor in await downloadSelectedPageIfNeeded() }
             }
     }
 
@@ -94,9 +105,9 @@ struct InvoicePageView: View {
             }
 
             if let image = localImage(for: page) {
-                pageImage(image, page: page)
+                pageImage(image, page: page, identifier: "pageImage.local")
             } else if let image = downloaded[page.id] {
-                pageImage(image, page: page)
+                pageImage(image, page: page, identifier: "pageImage.downloaded")
             } else if downloadingPageIds.contains(page.id) {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -121,8 +132,18 @@ struct InvoicePageView: View {
     /// page image, called by both the local-file branch and the
     /// re-downloaded branch -- so a future change to either can't land on
     /// only one copy.
+    ///
+    /// The two branches share a LABEL and differ by IDENTIFIER. The label
+    /// says what the thing is, which is all VoiceOver should care about --
+    /// where the bytes came from is not the user's problem. The identifier
+    /// says which branch drew it, which the acceptance walk very much does
+    /// care about: with one shared label, a walk asserting "the page image
+    /// is on screen" passes identically whether the sweep evicted the file
+    /// and storage gave it back or the sweep silently stopped deleting
+    /// anything at all.
     @ViewBuilder
-    private func pageImage(_ image: UIImage, page: LocalInvoicePage) -> some View {
+    private func pageImage(_ image: UIImage, page: LocalInvoicePage,
+                           identifier: String) -> some View {
         GeometryReader { proxy in
             Image(uiImage: image)
                 .resizable()
@@ -133,6 +154,7 @@ struct InvoicePageView: View {
                 .contentShape(Rectangle())
                 .gesture(magnification)
                 .accessibilityLabel("Invoice page \(page.page_no)")
+                .accessibilityIdentifier(identifier)
         }
     }
 
@@ -185,24 +207,40 @@ struct InvoicePageView: View {
 
     // MARK: - download
 
-    /// Offline and broken get DIFFERENT copy: someone in a walk-in cooler
+    /// Three states, not two, because "no photo" has three causes and only
+    /// two of them are failures.
+    ///
+    /// `nil` means no attempt has FINISHED -- the automatic one may not have
+    /// started yet, or something cancelled it. Reporting that as
+    /// "Photo Couldn't Be Loaded" claims an attempt was made and lost, which
+    /// is a lie whenever it is not true, and it was not true on this view's
+    /// primary path for as long as the push transition kept cancelling the
+    /// first attempt. Neutral copy and a "Load Photo" button say the same
+    /// thing honestly and read identically to a user who then taps it.
+    ///
+    /// Offline and broken keep DIFFERENT copy: someone in a walk-in cooler
     /// needs to know whether waiting will help. Everything that is not a
     /// transport failure -- including the endpoint's 409 -- is the generic
     /// error, because a 409 is unreachable for a page this device evicted
     /// and a third message for an unactionable case is not worth the string.
     @ViewBuilder
     private func unavailable(_ page: LocalInvoicePage) -> some View {
+        let failure = downloadFailures[page.id]
         VStack(spacing: 12) {
-            if downloadFailures[page.id] == .offline {
+            if failure == .offline {
                 ContentUnavailableView(
                     "Photo Needs a Connection", systemImage: "icloud.slash",
                     description: Text("It's stored safely — reconnect to view it."))
-            } else {
+            } else if failure == .failed {
                 ContentUnavailableView(
                     "Photo Couldn't Be Loaded", systemImage: "icloud",
                     description: Text("This page's photo isn't on this device."))
+            } else {
+                ContentUnavailableView(
+                    "Photo Not Downloaded Yet", systemImage: "icloud.and.arrow.down",
+                    description: Text("It's stored safely — it just isn't on this device."))
             }
-            Button("Retry") {
+            Button(failure == nil ? "Load Photo" : "Retry") {
                 Task { await download(page) }
             }
             .buttonStyle(.bordered)
@@ -232,14 +270,15 @@ struct InvoicePageView: View {
             }
             downloaded[page.id] = image
         } catch is CancellationError {
-            // Page navigation cancelled this in-flight download -- not a
-            // real failure. Leaving `downloadFailures[page.id]` untouched
-            // means returning to this page tries again cleanly instead of
-            // showing a false error the user never earned.
+            // Cancellation is not a failure and must never be recorded as
+            // one. Leaving `downloadFailures[page.id]` nil holds the view in
+            // its neutral not-downloaded-yet state, which is the truth: an
+            // attempt was started and abandoned, so nothing is known about
+            // whether the bytes are reachable.
         } catch let error as URLError where error.code == .cancelled {
-            // Swift concurrency cancellation can also surface here, since
-            // URLSession cancels its in-flight task when the wrapping Task
-            // is cancelled -- same no-op treatment as above.
+            // URLSession bridges a cancelled wrapping Task into
+            // URLError(.cancelled) rather than CancellationError, so the two
+            // spellings need identical no-op treatment.
         } catch let error as URLError where
             error.code == .notConnectedToInternet || error.code == .networkConnectionLost {
             downloadFailures[page.id] = .offline

@@ -517,8 +517,16 @@ final class SmokeTests: XCTestCase {
     /// the signed-GET endpoint before "Add purchase from this page" is
     /// even touched, proving `InvoicePageView`'s re-download path against a
     /// stub that actually retains and serves bytes, not just a confirm row.
-    /// The runbook's §6.3 finding covers why this walk tolerates one
-    /// "Retry" tap before that image shows up.
+    ///
+    /// The two render branches carry DISTINCT accessibility identifiers
+    /// (`pageImage.local` / `pageImage.downloaded`) because they share a
+    /// label. Asserting the shared label proves only "an image is on
+    /// screen", which a page the sweep never deleted satisfies just as well
+    /// -- the walk would stay green while the feature under test did
+    /// nothing. So the journey visits the page TWICE: once before the sweep,
+    /// where the local branch must draw, and once after, where it must not
+    /// and the downloaded branch must. The first visit is what keeps the
+    /// second's negative assertion from being vacuously true.
     func testInvoiceCaptureUploadAndPhotoAssistedPurchase() throws {
         let app = XCUIApplication()
         app.launchEnvironment = [
@@ -567,6 +575,26 @@ final class SmokeTests: XCTestCase {
             app.images["Uploaded"].waitForExistence(timeout: 30),
             "the page never reached the uploaded state -- the PUT or the confirm did not complete")
 
+        // CHECKPOINT 2a (pre-sweep control): the file is still on disk, so
+        // InvoicePageView must draw its LOCAL branch. This visit exists to
+        // make the post-sweep XCTAssertFalse below mean something: an
+        // assertion that an identifier is ABSENT passes just as happily when
+        // the identifier is stale, misspelled, or was never wired at all.
+        // Proving it present here first is what turns that into a real
+        // regression barrier against ImageSweeper quietly stopping.
+        let invoiceRow = app.staticTexts["1 page"]
+        XCTAssertTrue(invoiceRow.waitForExistence(timeout: 10),
+                      "the invoice list never showed the captured invoice")
+        invoiceRow.tap()
+
+        XCTAssertTrue(
+            app.images["pageImage.local"].waitForExistence(timeout: 10),
+            "the captured page never rendered from its own local file")
+
+        // Nav-bar back buttons mirror the PREVIOUS screen's title (2b's
+        // finding), so leaving "Invoice" means tapping "Invoices".
+        app.navigationBars.buttons["Invoices"].tap()
+
         // The sweep runs on foreground under a 1-byte UITEST budget, so
         // backgrounding and returning must delete the page's file. This has
         // to happen only now -- a page is only evictable once its outbox
@@ -577,44 +605,40 @@ final class SmokeTests: XCTestCase {
         XCUIDevice.shared.press(.home)
         app.activate()
 
-        // MARK: - photo-assisted purchase against the visible page
-        let invoiceRow = app.staticTexts["1 page"]
-        XCTAssertTrue(invoiceRow.waitForExistence(timeout: 10), "the invoice list never showed the captured invoice")
+        // MARK: - photo-assisted purchase against the re-downloaded page
+        XCTAssertTrue(invoiceRow.waitForExistence(timeout: 10),
+                      "the invoice list never came back after foregrounding")
         invoiceRow.tap()
 
-        // CHECKPOINT 2 (sweep + re-download): the page's local file is gone
-        // -- deleted by the sweep above -- and InvoicePageView recovers it
-        // from storage through the signed GET the moment this page becomes
-        // visible ("Invoice page 1" is the SAME accessibility label the
-        // local-file and re-downloaded branches both use, so this assertion
-        // does not care which branch rendered it, only that the image is
-        // actually there).
         print("CHECKPOINT 2 (sweep + re-download)")
 
-        // InvoicePageView's auto-download runs from `.task(id: selectedPageId)`,
-        // which is tied to this destination's own appearance -- and the
-        // NavigationLink push transition that is STILL ANIMATING when that
-        // task starts races it: the transition can cancel the in-flight
-        // download-url request (NSURLErrorCancelled) before it completes,
-        // which the view treats as a transient failure and shows its
-        // "Photo Couldn't Be Loaded" / Retry state rather than retrying on
-        // its own. Tapping "Retry" fires the exact same `download(_:)`
-        // codepath through a plain, transition-independent Task, so it still
-        // proves the signed-GET round trip end to end -- it is the identical
-        // recovery a real user would reach for after this exact race, not a
-        // different path invented to dodge it.
-        let redownloaded = app.images["Invoice page 1"]
-        if !redownloaded.waitForExistence(timeout: 8) {
-            let retry = app.buttons["retryPageDownload"]
-            XCTAssertTrue(retry.waitForExistence(timeout: 5),
-                          "the page neither auto-downloaded nor offered a retry")
-            retry.tap()
-        }
-        XCTAssertTrue(redownloaded.waitForExistence(timeout: 20),
-                      "an evicted page must come back from storage")
-
+        // Spec §6 in its two halves, and neither is redundant.
+        //
+        // FIRST the fallback: the page view is genuinely up -- "Add purchase
+        // from this page" renders in EVERY view state, so it is the one
+        // anchor that proves arrival without presupposing a photo -- and the
+        // local branch is not drawing. That pair is the whole discrimination
+        // this walk has. If the sweep silently stopped deleting, the file
+        // would still be there, `pageImage.local` would render, and every
+        // assertion after this one would pass without a single byte crossing
+        // the network.
         let addFromPage = app.buttons["Add purchase from this page"]
-        XCTAssertTrue(addFromPage.waitForExistence(timeout: 10), "the page view never offered photo-assisted entry")
+        XCTAssertTrue(addFromPage.waitForExistence(timeout: 10),
+                      "the page view never offered photo-assisted entry")
+        XCTAssertFalse(
+            app.images["pageImage.local"].exists,
+            "the sweep did not delete the page's local file -- the re-download below would then prove nothing")
+
+        // THEN the recovery: the bytes come back through the signed GET and
+        // into memory only. No Retry fallback here on purpose. Tolerating
+        // one is exactly how §6.3's cancelled-first-attempt bug stayed
+        // invisible -- the walk went green on a path no real user's first
+        // tap ever takes. The auto-download now runs from a transition-
+        // independent Task, so it has to win unaided or this fails.
+        XCTAssertTrue(
+            app.images["pageImage.downloaded"].waitForExistence(timeout: 20),
+            "an evicted page must come back from storage on the FIRST attempt, with no Retry tap")
+
         addFromPage.tap()
 
         let nameField = app.textFields["Ingredient name"]

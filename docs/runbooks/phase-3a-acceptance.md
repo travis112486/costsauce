@@ -23,14 +23,17 @@ pre-signed-upload mint and its confirm). The acceptance run is local
   `testInvoiceCaptureUploadAndPhotoAssistedPurchase` — reviewer login →
   Invoices tab → capture (the `UITEST` fixture page stands in for the
   camera) → the invoice list's row indicator flips to **Uploaded** (the
-  §9-visible proof that the PUT *and* the confirm both landed) → background
-  and foreground the app (forcing an `ImageSweeper.sweep` under its
-  `UITEST=1` 1-byte budget, which deletes the page's local file) → open the
-  page → the evicted page comes back through the signed-download endpoint
-  (CHECKPOINT 2; §6.3 covers the one-retry tolerance this step needs) →
-  "Add purchase from this page" → fuzzy-pick "Chicken Breast", 10 lb /
-  $32.00 → save → synced. Two checkpoint `print`s mark where this
-  document's assertions run.
+  §9-visible proof that the PUT *and* the confirm both landed) → open the
+  page once and assert it renders from its **local file**
+  (`pageImage.local`, the control that keeps the next assertion honest) →
+  back out → background and foreground the app (forcing an
+  `ImageSweeper.sweep` under its `UITEST=1` 1-byte budget, which deletes the
+  page's local file) → open the page again, where `pageImage.local` must be
+  **gone** and the evicted page comes back through the signed-download
+  endpoint as `pageImage.downloaded`, unaided, with no Retry tap
+  (CHECKPOINT 2; §6.3) → "Add purchase from this page" → fuzzy-pick
+  "Chicken Breast", 10 lb / $32.00 → save → synced. Two checkpoint `print`s
+  mark where this document's assertions run.
 - **`ios/CostSauce/Views/MainTabView.swift`** (modified): the Invoices tab
   — the entry point Task 9's `InvoiceListView` needed (its own toolbar
   already carried the "Capture Invoice" affordance).
@@ -43,9 +46,11 @@ pre-signed-upload mint and its confirm). The acceptance run is local
 - **`ios/CostSauce/Upload/ImageSweeper.swift`** (modified, prior task): the
   foreground/end-of-capture sweep this task's walk triggers via
   background/foreground.
-- **`ios/CostSauce/Views/InvoicePageView.swift`** (modified, prior task):
-  local file → in-memory re-download → spinner → offline/error with
-  Retry — the view this task's walk drives through its re-download branch.
+- **`ios/CostSauce/Views/InvoicePageView.swift`** (modified): local file →
+  in-memory re-download → spinner → not-downloaded-yet / offline / error —
+  the view this walk drives through its re-download branch. Its two image
+  branches carry distinct accessibility identifiers, and its auto-download
+  survives the push transition; §6.3 records why both were needed.
 - This document.
 
 ---
@@ -247,25 +252,40 @@ purchase `total_price = 32.00`, `source = manual`, `linked = t`,
 `{org}/{invoice}/{page}.jpg` derivation exactly.
 
 **`CHECKPOINT 2` (Task 7, sweep + re-download)** prints earlier in the same
-run, right after the walk backgrounds and foregrounds the app and taps back
-into the invoice's page. By that point `ImageSweeper.sweep` has already
-deleted the page's local file (§6's 1-byte `UITEST` budget), so the image
-appearing at all only happens if `InvoicePageView` minted a signed GET
-against the stub and rendered the bytes it returned. There is no separate
-server-side assertion for this checkpoint — the stub's own log is the
-proof: it must show a `200` on the `GET .../object/sign/...` line, never a
-`404`. Recorded result, 2026-08-04:
+run. The walk opens the invoice's page **twice**: once before the sweep,
+where `pageImage.local` must render, and once after backgrounding and
+foregrounding, where it must not. By that second visit `ImageSweeper.sweep`
+has already deleted the page's local file (§6's 1-byte `UITEST` budget), so
+`pageImage.downloaded` appearing only happens if `InvoicePageView` minted a
+signed GET against the stub and rendered the bytes it returned.
+
+The two identifiers are the point. Both branches share one accessibility
+label, so a walk asserting the label would pass identically if the sweep
+quietly stopped deleting and the page simply rendered from disk. The
+pre-sweep visit is what makes the post-sweep `XCTAssertFalse` a real
+barrier rather than an assertion about an identifier that might never have
+existed at all.
+
+There is no separate server-side assertion for this checkpoint — the stub's
+own log is the proof: it must show a `200` on the `GET .../object/sign/...`
+line, never a `404`. Recorded result, 2026-08-06:
 
 ```
 stub: "POST /storage/v1/object/upload/sign/invoices/<org>/<invoice>/1.jpg HTTP/1.1" 200 -
 stub: "PUT /storage/v1/object/upload/sign/invoices/<org>/<invoice>/1.jpg?token=smoke HTTP/1.1" 200 -
 stub: "POST /storage/v1/object/sign/invoices/<org>/<invoice>/1.jpg HTTP/1.1" 200 -
-stub: "POST /storage/v1/object/sign/invoices/<org>/<invoice>/1.jpg HTTP/1.1" 200 -
 stub: "GET /storage/v1/object/sign/invoices/<org>/<invoice>/1.jpg?token=smoke HTTP/1.1" 200 -
 ```
 
-Two download-sign POSTs, not one — see §6.3 for why, and why that is
-expected rather than a stub bug.
+**One** download-sign POST. The 2026-08-04 run recorded two, because the
+first was cancelled and only the Retry tap got through (§6.3). That count
+is now itself a signal: a second POST reappearing means the auto-download
+has started losing its race again.
+
+The `CHECKPOINT 1` SQL above was re-run unchanged on 2026-08-06 and
+returned the same values — `pages = 1`, `all_confirmed = t`, `w = 1694`,
+`h = 2200`, and one purchase `32.00 / manual / linked = t /
+matches_page = t`.
 
 ---
 
@@ -283,7 +303,7 @@ and the 2a purchase journey, one invocation.
 
 ---
 
-## 6. Findings this task recorded (both reproduced live, then fixed)
+## 6. Findings this task recorded (each reproduced live, then fixed)
 
 ### 6.1 `SyncOpIn.table` lagged `TABLE_ORDER` — every invoice push 422'd
 
@@ -339,16 +359,34 @@ cancelled request also hits), so the view settles on its
 This is a real, reproducible timing gap in shipped (pre-Task-7) code, not
 a test artifact — it was invisible before Task 7 because no earlier walk
 ever needed `InvoicePageView` to fetch bytes over the network at all
-(`localImage(for:)` always won first). It is out of this task's file scope
-to fix in `InvoicePageView.swift` itself (Task 7 touches only this
-document and `SmokeTests.swift`), so the walk instead exercises the exact
-recovery a real user would reach for: if the image has not appeared within
-8s, it taps the view's own `retryPageDownload` button, which fires
-`download(_:)` again through a plain, transition-independent `Task` that
-is no longer racing anything. That second attempt is the one §4's stub log
-shows completing the GET. **A follow-up task should make the first attempt
-win on its own** — e.g. by not starting the download until the push
-transition settles.
+(`localImage(for:)` always won first). It was out of Task 7's file scope
+(that task touched only this document and `SmokeTests.swift`), so the walk
+shipped tolerating one `retryPageDownload` tap.
+
+#### Resolved 2026-08-06 — the first attempt now wins
+
+Tolerating the Retry tap was the wrong shape of fix, and the final review
+said so: the walk was green on a path **no real user's first tap ever
+takes**. Every user opening an evicted page saw "Photo Couldn't Be Loaded"
+and had to tap Retry, on the feature's primary path, every time.
+
+Two changes, both in `InvoicePageView.swift`:
+
+1. `.task(id: selectedPageId)` now hands the download to an **unstructured
+   `Task`**. Structured child tasks inherit the cancellation that the push
+   transition delivers; an unstructured one inherits the actor but not the
+   cancellation. That is the only difference that ever made the Retry
+   button work, so the automatic attempt now takes the same path the
+   manual one always did.
+2. `unavailable(_:)` grew a third state. `downloadFailures[page.id] == nil`
+   means no attempt has *finished*, which is not a failure, so it renders
+   neutral "Photo Not Downloaded Yet" copy and a **Load Photo** button
+   instead of claiming an attempt was made and lost. Cancellation stays a
+   no-op in `download(_:)`; it simply no longer surfaces as a lie.
+
+The walk's Retry fallback is **deleted**, deliberately: keeping it would
+let this regress silently a second time. §4's stub log now shows one
+download-sign POST where it used to show two.
 
 ---
 
