@@ -1,6 +1,7 @@
 # tests/test_invoices.py
 """Phase 3a invoice capture: schema shape, the live-only page unique, the
 purchases link, and org isolation on the two new tables."""
+import httpx
 import pytest
 from tests.conftest import apply_migrations
 from tests.factories import (
@@ -290,3 +291,71 @@ async def test_download_url_404s_for_a_page_that_does_not_exist(
         f"/invoices/{inv}/pages/7/download-url", headers=auth(s["alice"]))
 
     assert r.status_code == 404, r.text
+
+
+# --- sign_get itself ---------------------------------------------------
+# Every route test above monkeypatches `sign_get` away, which is right for
+# them -- they are about the route's status codes, not about Supabase. The
+# consequence is that the function's own body, including the response key it
+# reads, had no coverage at all. These two drive it directly over an httpx
+# MockTransport so the storage contract is pinned somewhere.
+
+def _storage_answers(monkeypatch, payload, status=200):
+    """Point `sign_get` at a MockTransport speaking Supabase's shape."""
+    import api.routes.invoices as mod
+    monkeypatch.setenv("SUPABASE_URL", "https://storage.test/")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role-key")
+
+    def handler(request):
+        # The download signing endpoint, NOT the upload one. Signing the
+        # wrong path would still return a URL and still fail in the bucket.
+        assert request.url.path == (
+            "/storage/v1/object/sign/invoices/org/inv/1.jpg"), request.url
+        return httpx.Response(status, json=payload)
+
+    # Bind the real class before patching -- `mod.httpx` IS the httpx module,
+    # so a lambda that calls `httpx.AsyncClient` would call itself.
+    real_client_cls = httpx.AsyncClient
+    monkeypatch.setattr(
+        mod.httpx, "AsyncClient",
+        lambda *a, **kw: real_client_cls(transport=httpx.MockTransport(handler)))
+
+
+async def test_sign_get_reads_the_signed_url_key_the_download_endpoint_sends(
+        monkeypatch):
+    """Spec §2.3's gotcha, finally pinned.
+
+    Supabase's DOWNLOAD signing endpoint returns its path under `signedURL`;
+    the UPLOAD one returns `url`. `sign_put` reads `url`, so a `sign_get`
+    written by copying it raises KeyError against real Supabase while passing
+    against any stub that happens to answer `url`. This test fails if the
+    reader is ever "simplified" back to the upload spelling.
+    """
+    import api.routes.invoices as mod
+    _storage_answers(
+        monkeypatch,
+        {"signedURL": "/object/sign/invoices/org/inv/1.jpg?token=t"})
+
+    url, expires_at = await mod.sign_get("org/inv/1.jpg")
+
+    assert url == ("https://storage.test/storage/v1"
+                   "/object/sign/invoices/org/inv/1.jpg?token=t")
+    assert expires_at
+
+
+async def test_sign_get_502s_when_storage_answers_with_neither_url_key(
+        monkeypatch):
+    """A 200 whose body has neither key is storage changing its contract.
+
+    That must surface as this function's own 502 -- the same idiom it already
+    uses for a non-200 -- and not as a KeyError that FastAPI renders as an
+    opaque 500 with a traceback in the logs and nothing useful to the client.
+    """
+    import api.routes.invoices as mod
+    from fastapi import HTTPException
+    _storage_answers(monkeypatch, {"unexpected": "shape"})
+
+    with pytest.raises(HTTPException) as excinfo:
+        await mod.sign_get("org/inv/1.jpg")
+
+    assert excinfo.value.status_code == 502

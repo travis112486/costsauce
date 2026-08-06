@@ -82,7 +82,13 @@ async def sign_get(path: str):
     if response.status_code != 200:
         raise HTTPException(502, "could not sign the download URL")
     payload = response.json()
-    signed = payload.get("signedURL") or payload["url"]
+    # Both spellings are accepted deliberately -- the spec records the key as
+    # an expectation, not a verified fact. A 200 carrying NEITHER is storage
+    # changing its contract, and that is a bad gateway, not a KeyError that
+    # FastAPI would render as an opaque 500.
+    signed = payload.get("signedURL") or payload.get("url")
+    if not signed:
+        raise HTTPException(502, "storage signed no download URL")
     expires_at = (
         datetime.now(timezone.utc) + timedelta(seconds=UPLOAD_URL_TTL_SECONDS)
     ).isoformat()
