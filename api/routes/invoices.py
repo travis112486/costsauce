@@ -62,6 +62,39 @@ async def sign_put(path: str):
     return f"{base}/storage/v1{signed}", expires_at
 
 
+async def sign_get(path: str):
+    """A pre-signed download URL for `path`, and when it expires.
+
+    The mirror of `sign_put`, with one difference that will bite anyone who
+    copies that function: Supabase's DOWNLOAD signing endpoint returns its
+    path under `signedURL`, while the UPLOAD one returns `url`. A copy-paste
+    raises KeyError against real Supabase while passing against any stub
+    that happens to return `url`.
+    """
+    base = os.environ["SUPABASE_URL"].rstrip("/")
+    key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.post(
+            f"{base}/storage/v1/object/sign/{BUCKET}/{path}",
+            headers={"Authorization": f"Bearer {key}"},
+            json={"expiresIn": UPLOAD_URL_TTL_SECONDS},
+        )
+    if response.status_code != 200:
+        raise HTTPException(502, "could not sign the download URL")
+    payload = response.json()
+    # Both spellings are accepted deliberately -- the spec records the key as
+    # an expectation, not a verified fact. A 200 carrying NEITHER is storage
+    # changing its contract, and that is a bad gateway, not a KeyError that
+    # FastAPI would render as an opaque 500.
+    signed = payload.get("signedURL") or payload.get("url")
+    if not signed:
+        raise HTTPException(502, "storage signed no download URL")
+    expires_at = (
+        datetime.now(timezone.utc) + timedelta(seconds=UPLOAD_URL_TTL_SECONDS)
+    ).isoformat()
+    return f"{base}/storage/v1{signed}", expires_at
+
+
 class ConfirmBody(BaseModel):
     sha256: str = Field(min_length=64, max_length=64)
     width: int = Field(gt=0)
@@ -111,3 +144,29 @@ async def confirm_upload(invoice_id: uuid.UUID, page_no: int, body: ConfirmBody,
         if await cur.fetchone() is None:
             raise HTTPException(404, "page not found")
     return Response(status_code=204)
+
+
+@router.post("/invoices/{invoice_id}/pages/{page_no}/download-url")
+async def mint_download_url(invoice_id: uuid.UUID, page_no: int, request: Request,
+                            caller: CallerIdentity = Depends(require_caller)):
+    """A signed GET for a page whose bytes are confirmed present.
+
+    409 rather than 404 when `sha256` is null: the row exists and is ours,
+    it simply has no bytes in the bucket yet, and a signed URL would resolve
+    to nothing. 404 stays reserved for absent-or-another-org's (`_invoice_org`).
+    """
+    if page_no < 1:
+        raise HTTPException(422, "page_no must be positive")
+    async with tenant_connection(request.app.state.pool, caller.claims) as conn:
+        org_id = await _invoice_org(conn, invoice_id)
+        cur = await conn.execute(
+            "SELECT sha256 FROM invoice_pages"
+            " WHERE invoice_id = %s AND page_no = %s AND deleted_at IS NULL",
+            (invoice_id, page_no))
+        row = await cur.fetchone()
+    if row is None:
+        raise HTTPException(404, "page not found")
+    if row[0] is None:
+        raise HTTPException(409, "page bytes are not confirmed")
+    url, expires_at = await sign_get(storage_path(org_id, invoice_id, page_no))
+    return {"url": url, "expires_at": expires_at}

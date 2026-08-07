@@ -37,7 +37,16 @@ public enum ImageEviction {
     /// Page ids safe to delete, oldest first. An un-uploaded page is never
     /// returned, at any age or size: until storage acknowledges, the local
     /// file is the only copy in existence (§13).
-    public static func evictable(candidates: [Candidate], now: Date) -> [String] {
+    ///
+    /// The budget is a PARAMETER rather than a read of the statics so the
+    /// acceptance walk can inject one an ordinary page exceeds. Production
+    /// passes nothing and gets the calibrated defaults.
+    public static func evictable(
+        candidates: [Candidate],
+        now: Date,
+        maximumBytes: Int = ImageEviction.maximumBytes,
+        maximumAge: TimeInterval = ImageEviction.maximumAge
+    ) -> [String] {
         let evictableCandidates = candidates
             .filter(\.isUploaded)
             .sorted { ($0.capturedAt, $0.pageId) < ($1.capturedAt, $1.pageId) }

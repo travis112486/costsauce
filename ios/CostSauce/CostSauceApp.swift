@@ -68,6 +68,9 @@ private struct RootView: View {
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .active {
                 Task { await appModel.refreshOnlineData() }
+                if let store = appModel.store {
+                    ImageSweeper.sweep(store: store)
+                }
             }
         }
     }

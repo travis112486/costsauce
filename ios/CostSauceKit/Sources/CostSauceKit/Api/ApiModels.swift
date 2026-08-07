@@ -298,3 +298,16 @@ public struct SignedUpload: Codable, Sendable {
         self.expiresAt = expiresAt
     }
 }
+
+/// The response of `api/routes/invoices.py`'s `mint_download_url`. No
+/// `storagePath`: unlike an upload, the caller does not need the key --
+/// the server already resolved it and the URL is scoped to that one object.
+public struct SignedDownload: Codable, Sendable {
+    public let url: String
+    public let expiresAt: String
+
+    public init(url: String, expiresAt: String) {
+        self.url = url
+        self.expiresAt = expiresAt
+    }
+}

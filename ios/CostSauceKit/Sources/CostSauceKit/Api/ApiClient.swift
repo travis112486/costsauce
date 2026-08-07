@@ -233,6 +233,21 @@ public final class ApiClient: @unchecked Sendable {
             makeURL("/invoices/\(invoiceId)/pages/\(pageNo)/confirm"), method: "POST", body: body)
     }
 
+    /// A signed GET for a page whose local file is gone. Minted per view,
+    /// never cached: the URL expires in an hour and a cached one would be
+    /// dead by the next time anyone opens an old invoice.
+    ///
+    /// Throws on 409 -- the page's bytes were never confirmed. Unreachable
+    /// for a page THIS device evicted (the sweep only deletes pages whose
+    /// outbox reached `uploaded`, and that implies a server-side sha256),
+    /// so the view treats it as the generic error state.
+    public func downloadURL(invoiceId: String, pageNo: Int) async throws -> SignedDownload {
+        try await decode(
+            SignedDownload.self,
+            makeURL("/invoices/\(invoiceId)/pages/\(pageNo)/download-url"),
+            method: "POST")
+    }
+
     // MARK: - export
 
     /// Raw ZIP bytes, returned untouched (api/routes/deletion.py:538-569 —

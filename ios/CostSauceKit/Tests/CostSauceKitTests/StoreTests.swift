@@ -605,4 +605,59 @@ import GRDB
 
         #expect(try store.pendingUploadCount() == 0)
     }
+
+    // MARK: - evictionCandidates
+
+    /// isUploaded comes from the OUTBOX, not the row's sha256. A page this
+    /// device just uploaded has no local sha256 until a later pull brings
+    /// the server's confirmation back -- and the outbox reaching `uploaded`
+    /// is the only local proof that storage acknowledged.
+    @Test func evictionCandidatesReadUploadedFromTheOutboxNotSha256() throws {
+        let store = try LocalStore.inMemory()
+        try store.bind(userId: "user-1", orgId: "org-1", locationId: "loc-1")
+        let edits = LocalEdits(store: store, locationId: "loc-1")
+        let invoiceId = try edits.createInvoice()
+        let added = try edits.addInvoicePage(invoiceId: invoiceId, pageNo: 1, orgId: "org-1")
+        try store.enqueueUpload(pageId: added.pageId, localPath: "/tmp/1.jpg")
+
+        var candidates = try store.evictionCandidates()
+        #expect(candidates.count == 1)
+        #expect(candidates[0].isUploaded == false)   // queued, not uploaded
+
+        var upload = try #require(try store.pendingUploads().first)
+        upload = UploadQueue.transition(upload, on: .succeeded)
+        try store.updateUpload(upload)
+
+        candidates = try store.evictionCandidates()
+        #expect(candidates[0].isUploaded == true)
+        #expect(candidates[0].pageId == added.pageId)
+        #expect(candidates[0].invoiceId == invoiceId)
+        #expect(candidates[0].pageNo == 1)
+    }
+
+    /// A page with no outbox row at all -- pulled from another device --
+    /// is NOT uploaded as far as this device can prove, so it must never
+    /// be evictable.
+    @Test func evictionCandidatesTreatAPageWithNoOutboxRowAsNotUploaded() throws {
+        let store = try LocalStore.inMemory()
+        try store.bind(userId: "user-1", orgId: "org-1", locationId: "loc-1")
+        let edits = LocalEdits(store: store, locationId: "loc-1")
+        let invoiceId = try edits.createInvoice()
+        _ = try edits.addInvoicePage(invoiceId: invoiceId, pageNo: 1, orgId: "org-1")
+
+        let candidates = try store.evictionCandidates()
+        #expect(candidates.count == 1)
+        #expect(candidates[0].isUploaded == false)
+    }
+
+    @Test func evictionCandidatesExcludeTombstonedPages() throws {
+        let store = try LocalStore.inMemory()
+        try store.bind(userId: "user-1", orgId: "org-1", locationId: "loc-1")
+        let edits = LocalEdits(store: store, locationId: "loc-1")
+        let invoiceId = try edits.createInvoice()
+        _ = try edits.addInvoicePage(invoiceId: invoiceId, pageNo: 1, orgId: "org-1")
+        try edits.tombstoneInvoice(id: invoiceId)
+
+        #expect(try store.evictionCandidates().isEmpty)
+    }
 }

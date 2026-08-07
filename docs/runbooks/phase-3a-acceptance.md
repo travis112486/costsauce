@@ -19,14 +19,21 @@ pre-signed-upload mint and its confirm). The acceptance run is local
 
 ## 1. What shipped in this task
 
-- **`ios/CostSauceUITests/SmokeTests.swift`** (modified): a new journey,
+- **`ios/CostSauceUITests/SmokeTests.swift`** (modified): a journey,
   `testInvoiceCaptureUploadAndPhotoAssistedPurchase` — reviewer login →
   Invoices tab → capture (the `UITEST` fixture page stands in for the
   camera) → the invoice list's row indicator flips to **Uploaded** (the
   §9-visible proof that the PUT *and* the confirm both landed) → open the
-  page → "Add purchase from this page" → fuzzy-pick "Chicken Breast", 10 lb
-  / $32.00 → save → synced. One checkpoint `print` marks where this
-  document's SQL runs.
+  page once and assert it renders from its **local file**
+  (`pageImage.local`, the control that keeps the next assertion honest) →
+  back out → background and foreground the app (forcing an
+  `ImageSweeper.sweep` under its `UITEST=1` 1-byte budget, which deletes the
+  page's local file) → open the page again, where `pageImage.local` must be
+  **gone** and the evicted page comes back through the signed-download
+  endpoint as `pageImage.downloaded`, unaided, with no Retry tap
+  (CHECKPOINT 2; §6.3) → "Add purchase from this page" → fuzzy-pick
+  "Chicken Breast", 10 lb / $32.00 → save → synced. Two checkpoint `print`s
+  mark where this document's assertions run.
 - **`ios/CostSauce/Views/MainTabView.swift`** (modified): the Invoices tab
   — the entry point Task 9's `InvoiceListView` needed (its own toolbar
   already carried the "Capture Invoice" affordance).
@@ -34,6 +41,16 @@ pre-signed-upload mint and its confirm). The acceptance run is local
   (modified): the finding in §6.1.
 - **`ios/CostSauce/Upload/BackgroundUploader.swift`** (modified): the
   UITEST session seam in §6.2.
+- **`api/routes/invoices.py`** (modified, prior task): `mint_download_url`
+  and `sign_get` — the signed-GET mint this task's walk proves end to end.
+- **`ios/CostSauce/Upload/ImageSweeper.swift`** (modified, prior task): the
+  foreground/end-of-capture sweep this task's walk triggers via
+  background/foreground.
+- **`ios/CostSauce/Views/InvoicePageView.swift`** (modified): local file →
+  in-memory re-download → spinner → not-downloaded-yet / offline / error —
+  the view this walk drives through its re-download branch. Its two image
+  branches carry distinct accessibility identifiers, and its auto-download
+  survives the push transition; §6.3 records why both were needed.
 - This document.
 
 ---
@@ -69,15 +86,19 @@ DB_URL="postgresql://postgres:postgres@127.0.0.1:55443/postgres" \
 2b's gotcha stands: **reseed only while `uvicorn` is down**, or every
 request 500s on stale prepared-statement plans.
 
-### 2.3 The storage stub — new in 3a
+### 2.3 The storage stub — new in 3a, retaining bytes since Task 7
 
 `api/routes/invoices.py`'s `sign_put` POSTs to
-`{SUPABASE_URL}/storage/v1/object/upload/sign/{bucket}/{path}` and hands
-the device `{SUPABASE_URL}/storage/v1{signed}`. No local Supabase runs in
-this stack, so a ~50-line stub signs anything and accepts the PUT the
-signature authorizes, discarding the bytes — the walk's proof of arrival
-is the **confirm row** (`sha256`/`width`/`height` recorded in
-`invoice_pages`), not storage's copy.
+`{SUPABASE_URL}/storage/v1/object/upload/sign/{bucket}/{path}` and `sign_get`
+POSTs to `{SUPABASE_URL}/storage/v1/object/sign/{bucket}/{path}`, each
+handing the device back `{SUPABASE_URL}/storage/v1{signed}`. No local
+Supabase runs in this stack, so a stub signs anything and accepts the PUT
+the signature authorizes. Through 3a the stub discarded those bytes — the
+walk's proof of arrival was the **confirm row** (`sha256`/`width`/`height`
+recorded in `invoice_pages`), not storage's copy. Task 7 needs the bytes
+back: its walk evicts the local file and proves the page comes back
+through a signed GET, so the stub now keeps a `STORE: dict[str, bytes]`
+the PUT populates and the GET serves from.
 
 `scratch/storage_stub_3a.py`, not committed:
 
@@ -86,7 +107,9 @@ import json
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+STORE: dict[str, bytes] = {}
 SIGN_PREFIX = "/storage/v1/object/upload/sign/"
+SIGN_GET_PREFIX = "/storage/v1/object/sign/"
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -95,16 +118,19 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def do_POST(self):
-        # Consume the body BEFORE responding: with HTTP/1.1 keep-alive an
-        # unread body is parsed as the next request line.
         self.rfile.read(int(self.headers.get("Content-Length", "0")))
-        if not self.path.startswith(SIGN_PREFIX):
+        # Download signing returns its path under "signedURL"; upload signing
+        # returns "url". api/routes/invoices.py reads each accordingly, and
+        # this stub must reproduce the difference or the test proves nothing.
+        if self.path.startswith(SIGN_PREFIX):
+            payload = {"url": self.path[len("/storage/v1"):] + "?token=smoke"}
+        elif self.path.startswith(SIGN_GET_PREFIX):
+            payload = {"signedURL": self.path[len("/storage/v1"):] + "?token=smoke"}
+        else:
             self.send_response(404)
             self.end_headers()
             return
-        # sign_put reads json()["url"] and prefixes {base}/storage/v1 itself.
-        signed = self.path[len("/storage/v1"):] + "?token=smoke"
-        body = json.dumps({"url": signed}).encode()
+        body = json.dumps(payload).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -117,14 +143,33 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         length = int(self.headers.get("Content-Length", "0"))
+        chunks = []
         while length > 0:
             chunk = self.rfile.read(min(length, 1 << 16))
             if not chunk:
                 break
+            chunks.append(chunk)
             length -= len(chunk)
+        # 3a discarded the bytes because its proof of arrival was the confirm
+        # row. The download walk needs them back.
+        STORE[self.path.split("?")[0].replace(SIGN_PREFIX, "", 1)] = b"".join(chunks)
         self.send_response(200)
         self.send_header("Content-Length", "0")
         self.end_headers()
+
+    def do_GET(self):
+        key = self.path.split("?")[0].replace(SIGN_GET_PREFIX, "", 1)
+        data = STORE.get(key)
+        if data is None:
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def log_message(self, fmt, *args):
         print(f"stub: {fmt % args}", file=sys.stderr, flush=True)
@@ -132,6 +177,12 @@ class Handler(BaseHTTPRequestHandler):
 
 ThreadingHTTPServer(("127.0.0.1", 8402), Handler).serve_forever()
 ```
+
+Both handlers strip their own prefix before touching `STORE`, so the key
+lands on the bare `{bucket}/{org}/{invoice}/{page}.jpg` either way — a PUT
+under `SIGN_PREFIX` and a later GET under `SIGN_GET_PREFIX` agree on
+exactly the same key. §4's stub log shows this working end to end: a `200`
+on the GET, never a `404`.
 
 ```bash
 python3 scratch/storage_stub_3a.py &
@@ -193,12 +244,48 @@ docker exec cs-3a-smoke psql -U postgres -d postgres -c \
      FROM purchases pu WHERE pu.invoice_page_id IS NOT NULL;"
 ```
 
-Recorded result, 2026-08-03: one invoice, `pages = 1`,
+Recorded result, 2026-08-04: one invoice, `pages = 1`,
 **`all_confirmed = t`** (the confirm endpoint ran — not merely the PUT;
 the row carried `width=1694 height=2200` and a 64-char sha), and one
 purchase `total_price = 32.00`, `source = manual`, `linked = t`,
 `matches_page = t`. The storage path on the row matched the
 `{org}/{invoice}/{page}.jpg` derivation exactly.
+
+**`CHECKPOINT 2` (Task 7, sweep + re-download)** prints earlier in the same
+run. The walk opens the invoice's page **twice**: once before the sweep,
+where `pageImage.local` must render, and once after backgrounding and
+foregrounding, where it must not. By that second visit `ImageSweeper.sweep`
+has already deleted the page's local file (§6's 1-byte `UITEST` budget), so
+`pageImage.downloaded` appearing only happens if `InvoicePageView` minted a
+signed GET against the stub and rendered the bytes it returned.
+
+The two identifiers are the point. Both branches share one accessibility
+label, so a walk asserting the label would pass identically if the sweep
+quietly stopped deleting and the page simply rendered from disk. The
+pre-sweep visit is what makes the post-sweep `XCTAssertFalse` a real
+barrier rather than an assertion about an identifier that might never have
+existed at all.
+
+There is no separate server-side assertion for this checkpoint — the stub's
+own log is the proof: it must show a `200` on the `GET .../object/sign/...`
+line, never a `404`. Recorded result, 2026-08-06:
+
+```
+stub: "POST /storage/v1/object/upload/sign/invoices/<org>/<invoice>/1.jpg HTTP/1.1" 200 -
+stub: "PUT /storage/v1/object/upload/sign/invoices/<org>/<invoice>/1.jpg?token=smoke HTTP/1.1" 200 -
+stub: "POST /storage/v1/object/sign/invoices/<org>/<invoice>/1.jpg HTTP/1.1" 200 -
+stub: "GET /storage/v1/object/sign/invoices/<org>/<invoice>/1.jpg?token=smoke HTTP/1.1" 200 -
+```
+
+**One** download-sign POST. The 2026-08-04 run recorded two, because the
+first was cancelled and only the Retry tap got through (§6.3). That count
+is now itself a signal: a second POST reappearing means the auto-download
+has started losing its race again.
+
+The `CHECKPOINT 1` SQL above was re-run unchanged on 2026-08-06 and
+returned the same values — `pages = 1`, `all_confirmed = t`, `w = 1694`,
+`h = 2200`, and one purchase `32.00 / manual / linked = t /
+matches_page = t`.
 
 ---
 
@@ -211,12 +298,12 @@ xcodebuild test -project CostSauce.xcodeproj -scheme CostSauce \
   -destination 'platform=iOS Simulator,id=F71924C7-9272-4A35-AA66-82061A1E4A9D'
 ```
 
-Recorded result, 2026-08-03: **4/4** — the 3a walk plus both 2b journeys
+Recorded result, 2026-08-04: **4/4** — the 3a walk plus both 2b journeys
 and the 2a purchase journey, one invocation.
 
 ---
 
-## 6. Findings this task recorded (both reproduced live, then fixed)
+## 6. Findings this task recorded (each reproduced live, then fixed)
 
 ### 6.1 `SyncOpIn.table` lagged `TABLE_ORDER` — every invoice push 422'd
 
@@ -248,6 +335,59 @@ version of the walk passed its chip wait while the PUT was failing. The
 walk now asserts the invoice row's own **Uploaded** indicator, which flips
 only when the outbox reaches `uploaded` (PUT *and* confirm).
 
+### 6.3 (Task 7) `InvoicePageView`'s auto-download can lose a race with its own push transition
+
+The first wired run of the re-download walk timed out waiting for
+`"Invoice page 1"` — not because the stub mishandled the GET (its log
+showed the download-sign POST completing with `200`, proving
+`mint_download_url`/`sign_get` ran end to end), but because **no GET for
+the image bytes was ever attempted**. The device-side unified log pinned
+it exactly: the `download-url` `POST` itself finished with
+`Error Domain=NSURLErrorDomain Code=-999 "cancelled"` about 14ms after
+starting.
+
+`InvoicePageView`'s auto-download runs from `.task(id: selectedPageId)`,
+started the moment the view appears. `NavigationLink`'s own push
+transition is still animating at that instant, and — reproducibly, across
+repeated runs — cancels the in-flight request before it completes. Nothing
+retries automatically: the cancellation lands in `download(_:)`'s
+`catch let error as URLError where error.code == .cancelled` branch, which
+deliberately leaves state untouched (the same branch a page-navigation-
+cancelled request also hits), so the view settles on its
+"Photo Couldn't Be Loaded" / **Retry** state and waits there.
+
+This is a real, reproducible timing gap in shipped (pre-Task-7) code, not
+a test artifact — it was invisible before Task 7 because no earlier walk
+ever needed `InvoicePageView` to fetch bytes over the network at all
+(`localImage(for:)` always won first). It was out of Task 7's file scope
+(that task touched only this document and `SmokeTests.swift`), so the walk
+shipped tolerating one `retryPageDownload` tap.
+
+#### Resolved 2026-08-06 — the first attempt now wins
+
+Tolerating the Retry tap was the wrong shape of fix, and the final review
+said so: the walk was green on a path **no real user's first tap ever
+takes**. Every user opening an evicted page saw "Photo Couldn't Be Loaded"
+and had to tap Retry, on the feature's primary path, every time.
+
+Two changes, both in `InvoicePageView.swift`:
+
+1. `.task(id: selectedPageId)` now hands the download to an **unstructured
+   `Task`**. Structured child tasks inherit the cancellation that the push
+   transition delivers; an unstructured one inherits the actor but not the
+   cancellation. That is the only difference that ever made the Retry
+   button work, so the automatic attempt now takes the same path the
+   manual one always did.
+2. `unavailable(_:)` grew a third state. `downloadFailures[page.id] == nil`
+   means no attempt has *finished*, which is not a failure, so it renders
+   neutral "Photo Not Downloaded Yet" copy and a **Load Photo** button
+   instead of claiming an attempt was made and lost. Cancellation stays a
+   no-op in `download(_:)`; it simply no longer surfaces as a lie.
+
+The walk's Retry fallback is **deleted**, deliberately: keeping it would
+let this regress silently a second time. §4's stub log now shows one
+download-sign POST where it used to show two.
+
 ---
 
 ## 7. Deployment prerequisites (not created by any migration)
@@ -277,11 +417,13 @@ exactly as 2b's swipe-to-remove does:
 3. **Quality-gate refusal in the walk.** The fixture page deliberately
    passes both gates; the refusal path is unit-tested
    (`PageQualityTests`) but the retake UI loop is only exercised manually.
-4. **Eviction sweeps.** `ImageEviction` is pure policy with unit tests;
-   nothing wires a periodic sweep yet, so no automated test deletes a real
-   file. (Related deferral: an evicted page currently shows "Photo Not on
-   This Device" — the signed-download fallback arrives with 3b's
-   re-download endpoint.)
+4. **Background (`BGTaskScheduler`) sweeping.** Task 7's walk proves the
+   two triggers `ImageSweeper.sweep` actually has today — foreground
+   (`scenePhase == .active`) and end-of-capture — by evicting a real file
+   and recovering it through the signed-GET round trip. A periodic
+   `BGTaskScheduler` sweep, for a device that goes months without being
+   foregrounded, remains unbuilt and therefore untested by automation; it
+   needs a device pass once it exists.
 
 ---
 
